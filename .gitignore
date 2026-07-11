@@ -1,0 +1,8 @@
+.tokensave
+.venv/
+.vcscore/
+.claude/
+__pycache__/
+# regenerable shepherd demos (shepherd demo write <name>)
+quickstart_demo.py
+agent_task.py
