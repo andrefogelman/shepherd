@@ -46,6 +46,7 @@ class Attempt:
     gate: GateResult | None
     verdict: str  # "run_failed" | "no_change" | "policy_rejected" | "tests_failed" | "passed"
     error: str | None = None
+    duration_s: float | None = None  # worker wall-clock (cost/speed telemetry)
 
 
 @dataclass
@@ -214,6 +215,7 @@ def run_review(
     diff_text: str | None = None,
     provider: str = "claude",
     placement: str = "jail",
+    context_pack: str | None = None,
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
 
@@ -233,7 +235,7 @@ def run_review(
             repo=workspace.git_repo(),
             placement=placement,
             runtime={"provider": provider},
-            args={"feature": feature, "diff": diff_text},
+            args={"feature": feature, "diff": diff_text, "context": context_pack or ""},
         )
     except Exception as exc:
         return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
@@ -307,14 +309,19 @@ def develop(
     extra_args: dict | None = None,
     review_task=None,
     initial_guidance: str = "",
+    context_pack: str | None = None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace.
 
     test_cmd=None skips the test gate (policy-only pass) — used by the parallel
     coordinator, whose combined gate judges the merged proposal instead.
     initial_guidance seeds the first attempt (e.g. teammate/handoff context);
-    later attempts replace it with concrete failure feedback.
+    later attempts replace it with concrete failure feedback. context_pack, when
+    given, is prepended to the guidance of EVERY attempt (built once per command,
+    reused across retries — the lane-honest analogue of prefix reuse).
     """
+    import time as _time
+
     policy = policy or ChangesetPolicy()
     report = DevReport(feature=feature, succeeded=False, repo=str(repo_root))
     guidance = initial_guidance
@@ -325,8 +332,11 @@ def develop(
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature
-            args["guidance"] = guidance
+            args["guidance"] = (
+                f"{context_pack}\n\n{guidance}".strip() if context_pack else guidance
+            )
 
+        started = _time.monotonic()
         try:
             run = workspace.run(
                 task,
@@ -336,7 +346,11 @@ def develop(
             )
         except Exception as exc:
             report.attempts.append(
-                Attempt(number, "(no run)", [], [], None, "run_failed", error=f"{type(exc).__name__}: {exc}")
+                Attempt(
+                    number, "(no run)", [], [], None, "run_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                    duration_s=round(_time.monotonic() - started, 1),
+                )
             )
             guidance = (
                 "PREVIOUS ATTEMPT: the agent run itself failed "
@@ -344,6 +358,7 @@ def develop(
                 "wall-clock budget: read only what you need, then write the change."
             )
             continue
+        duration = round(_time.monotonic() - started, 1)
         output = run.output()
         changeset = output.changeset()
         entries = read_changeset_entries(changeset)
@@ -353,7 +368,7 @@ def develop(
             # Worker produced nothing: either it judged the feature already
             # satisfied in its world basis, or the agent run failed silently.
             output.discard()
-            report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change"))
+            report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration))
             guidance = (
                 "PREVIOUS ATTEMPT: you produced no file changes at all. "
                 "If the feature genuinely already exists, say so by making the "
@@ -365,7 +380,7 @@ def develop(
         if not verdict_policy.ok:
             output.discard()
             report.attempts.append(
-                Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected")
+                Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
             )
             guidance = _format_guidance("policy", violations=verdict_policy.violations)
             continue
@@ -375,17 +390,17 @@ def develop(
             gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
             if gate.infra_error:
                 # Suite could not run: abort, do not burn attempts, keep output retained
-                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
                 report.settlement_hint = f"gate infra error: {gate.infra_error}"
                 return report
 
             if not gate.passed:
                 output.discard()
-                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
                 guidance = _format_guidance("gate", gate=gate)
                 continue
 
-        report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed"))
+        report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed", duration_s=duration))
         report.succeeded = True
         report.final_run_ref = run.run_ref
         report.entries = entries
@@ -397,6 +412,7 @@ def develop(
                 changeset=changeset,
                 provider=provider,
                 placement=placement,
+                context_pack=context_pack,
             )
         return report
 

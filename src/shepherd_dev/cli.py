@@ -22,7 +22,8 @@ from pathlib import Path
 
 import shepherd as sp
 
-from . import config, history
+from . import config, history, memory as repo_memory
+from .contextpack import build_pack
 from .parallel import PROPOSALS_DIR, develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
@@ -256,7 +257,7 @@ def _auto_settle_conditions(report) -> str | None:
     return None
 
 
-def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, feature: str) -> int:
+def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, feature: str, pack: str | None = None, pack_stats: dict | None = None) -> int:
     report = develop_best_of(
         repo_root,
         feature,
@@ -269,7 +270,12 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         gate_timeout=args.gate_timeout,
         review_task=reviewer,
         worker_task=worker,
+        context_pack=pack,
     )
+    if report.succeeded:
+        learned = repo_memory.learn_from_review(repo_root, report.review, report.proposal_id)
+        if learned:
+            print(f"repo memory: +{learned} fact(s) learned")
     history.record_event(
         "best_of",
         {
@@ -290,7 +296,7 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
                 }
                 for c in report.candidates
             ],
-            "flags": {"auto_settle": args.auto_settle, "mode": args.mode},
+            "flags": {"auto_settle": args.auto_settle, "mode": args.mode, "pack": pack_stats or None},
         },
     )
     print(report.summary())
@@ -317,6 +323,25 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
     if _wants_interactive(args) and report.proposal_id:
         return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
+
+
+def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, dict]:
+    """Build the context pack (+ repo memory) once per command. Disabled by
+    --no-context-pack or on the static provider (no LLM to feed)."""
+    if getattr(args, "no_context_pack", False) or args.provider == "static":
+        return None, {}
+    pack, stats = build_pack(
+        repo_root,
+        feature_text,
+        allowed_prefixes=tuple(args.allowed_prefix),
+        memory_text=repo_memory.memory_text(repo_root),
+    )
+    print(
+        f"context pack: {stats['chars']} chars "
+        f"({stats['files_full']} full + {stats['files_skeleton']} skeleton files, "
+        f"{stats['scanned']} scanned)"
+    )
+    return pack, stats
 
 
 def _wants_interactive(args) -> bool:
@@ -349,6 +374,7 @@ def cmd_run(args) -> int:
     if args.test_cmd is None:
         return 2
     feature = _with_hint(args.feature, gate_hint)
+    pack, pack_stats = _build_pack(args, repo_root, args.feature)
 
     error = _refresh_substrate(repo_root)
     if error:
@@ -368,7 +394,7 @@ def cmd_run(args) -> int:
     reviewer = None if (args.no_review or args.provider == "static") else review
 
     if args.best_of > 1:
-        return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature)
+        return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature, pack, pack_stats)
 
     with sp.open(repo_root) as workspace:
         report = develop(
@@ -384,8 +410,12 @@ def cmd_run(args) -> int:
             gate_timeout=args.gate_timeout,
             policy=policy,
             review_task=reviewer,
+            context_pack=pack,
         )
 
+    learned = repo_memory.learn_from_report(repo_root, report)
+    if learned:
+        print(f"repo memory: +{learned} fact(s) learned")
     history.record_event(
         "run",
         history.run_payload(
@@ -395,6 +425,7 @@ def cmd_run(args) -> int:
                 "max_attempts": args.max_attempts,
                 "allowed_prefix": args.allowed_prefix,
                 "auto_settle": args.auto_settle,
+                "pack": pack_stats or None,
             },
         ),
     )
@@ -439,6 +470,7 @@ def cmd_run2(args) -> int:
     args.test_cmd, gate_hint = _resolve_test_cmd(repo_root, args.test_cmd)
     if args.test_cmd is None:
         return 2
+    pack, pack_stats = _build_pack(args, repo_root, f"{args.feature_a} {args.feature_b}")
 
     if args.provider == "claude":
         set_worker_budget(args.worker_budget)
@@ -454,6 +486,7 @@ def cmd_run2(args) -> int:
         repo_root,
         [_with_hint(args.feature_a, gate_hint), _with_hint(args.feature_b, gate_hint)],
         test_cmd=args.test_cmd,
+        context_pack=pack,
         provider=args.provider,
         placement=placement,
         policy=policy,
@@ -462,6 +495,10 @@ def cmd_run2(args) -> int:
         gate_timeout=args.gate_timeout,
         review_task=reviewer,
     )
+    if report.succeeded:
+        learned = repo_memory.learn_from_review(repo_root, report.review, report.proposal_id)
+        if learned:
+            print(f"repo memory: +{learned} fact(s) learned")
     history.record_event(
         "run2",
         history.parallel_payload(
@@ -471,6 +508,7 @@ def cmd_run2(args) -> int:
                 "max_attempts": args.max_attempts,
                 "max_repairs": args.max_repairs,
                 "auto_settle": args.auto_settle,
+                "pack": pack_stats or None,
             },
         ),
     )
@@ -732,6 +770,11 @@ def main() -> int:
         help="do not prompt to accept/reject at the end; just leave the proposal retained",
     )
     p_run.add_argument(
+        "--no-context-pack",
+        action="store_true",
+        help="skip the pre-computed context pack (worker explores the repo itself)",
+    )
+    p_run.add_argument(
         "--best-of",
         type=int,
         default=1,
@@ -771,6 +814,11 @@ def main() -> int:
         "--no-settle",
         action="store_true",
         help="do not prompt to accept/reject at the end; just leave the proposal staged",
+    )
+    p_run2.add_argument(
+        "--no-context-pack",
+        action="store_true",
+        help="skip the pre-computed context pack (workers explore the repo themselves)",
     )
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")

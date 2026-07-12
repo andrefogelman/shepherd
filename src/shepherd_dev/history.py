@@ -81,6 +81,7 @@ def run_payload(report, repo_root: Path, *, mode: str, test_cmd: str | None, pro
                 "changed_paths": a.changed_paths,
                 "policy_violations": a.policy_violations,
                 "error": a.error,
+                "duration_s": a.duration_s,
                 "gate_exit": a.gate.exit_code if a.gate else None,
                 "gate_tail": (a.gate.output_tail[-GATE_TAIL_LIMIT:] if a.gate else None),
                 "gate_infra_error": (a.gate.infra_error if a.gate else None),

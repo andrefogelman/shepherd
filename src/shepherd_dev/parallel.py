@@ -115,6 +115,7 @@ def _run_worker(
     placement: str,
     policy: ChangesetPolicy,
     max_attempts: int,
+    context_pack: str | None = None,
 ) -> DevReport:
     with sp.open(clone) as workspace:
         report = develop(
@@ -130,6 +131,7 @@ def _run_worker(
             policy=policy,
             extra_args=extra_args,
             initial_guidance=teammate_note if extra_args is None else "",
+            context_pack=context_pack,
         )
     return report
 
@@ -157,6 +159,7 @@ def develop_parallel(
     review_task=None,
     worker_tasks: list | None = None,
     worker_extra_args: list[dict | None] | None = None,
+    context_pack: str | None = None,
 ) -> ParallelReport:
     """Coordinate two parallel workers into one gated, reviewed, staged proposal.
 
@@ -194,6 +197,7 @@ def develop_parallel(
                     placement=placement,
                     policy=policy,
                     max_attempts=max_attempts,
+                    context_pack=context_pack,
                 )
                 for i in range(2)
             ]
@@ -233,6 +237,7 @@ def develop_parallel(
                     policy=policy,
                     extra_args=extras[1],
                     initial_guidance=handoff_guidance if extras[1] is None else "",
+                    context_pack=context_pack,
                 )
             report.workers[1] = follower
             if not (follower.succeeded and follower.entries):
@@ -286,6 +291,7 @@ def develop_parallel(
                     diff_text=_entries_diff_text(combined),
                     provider=provider,
                     placement=placement,
+                    context_pack=context_pack,
                 )
 
         report.proposal_id, report.staged_paths = _stage_proposal(
@@ -410,6 +416,7 @@ def develop_best_of(
     review_task=None,
     worker_task=None,
     worker_extra_args: list[dict | None] | None = None,
+    context_pack: str | None = None,
 ) -> BestOfReport:
     """K parallel candidates from the same state; winner staged for settlement."""
     assert 2 <= k <= len(EMPHASES), f"k must be 2..{len(EMPHASES)}"
@@ -434,6 +441,7 @@ def develop_best_of(
                     placement=placement,
                     policy=policy,
                     max_attempts=max_attempts,
+                    context_pack=context_pack,
                 )
                 for i in range(k)
             ]
@@ -459,6 +467,7 @@ def develop_best_of(
                         diff_text=_entries_diff_text(w.entries),
                         provider=provider,
                         placement=placement,
+                        context_pack=context_pack,
                     )
             report.candidates.append(
                 BestOfCandidate(

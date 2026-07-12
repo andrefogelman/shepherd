@@ -63,9 +63,12 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "review": """Review a proposed change to this repository.
 
     The repository contains the CURRENT (pre-change) code; read whatever
-    you need for context. `diff` contains the full proposed change
-    (per-file new contents and deletions) for the feature described in
-    `feature`. The proposal is NOT applied to the files you see.
+    you need for context. `context`, when non-empty, is a pre-computed
+    context pack (file tree, relevant files, repo memory) — trust it and
+    open additional files only if something you need is missing. `diff`
+    contains the full proposed change (per-file new contents and
+    deletions) for the feature described in `feature`. The proposal is
+    NOT applied to the files you see.
 
     Assess: correctness, hidden bugs, security issues, scope discipline
     (does it touch only what the feature needs?), convention adherence,
@@ -129,7 +132,7 @@ write_tests.__doc__ = get_prompt("write_tests")
 write_tests = sp.task(write_tests)
 
 
-def review(repo: sp.GitRepo, feature: str, diff: str) -> None: ...
+def review(repo: sp.GitRepo, feature: str, diff: str, context: str = "") -> None: ...
 review.__doc__ = get_prompt("review")
 review = sp.task(review)
 
