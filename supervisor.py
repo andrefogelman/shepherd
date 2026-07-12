@@ -8,15 +8,17 @@ stays retained; settlement (select/apply/discard) is always a human decision.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from policy import ChangesetPolicy, check_changeset
+from policy import ChangesetPolicy, check_paths
 
-IGNORED_DIRS = {".vcscore", ".venv", "node_modules", "__pycache__", ".shepherd"}
+IGNORED_DIRS = {".vcscore", ".venv", "node_modules", "__pycache__", ".shepherd", ".review"}
+DIFF_TEXT_LIMIT = 60_000  # chars of proposal content handed to the reviewer
 
 
 @dataclass
@@ -34,7 +36,16 @@ class Attempt:
     changed_paths: list[str]
     policy_violations: list[str]
     gate: GateResult | None
-    verdict: str  # "policy_rejected" | "tests_failed" | "passed"
+    verdict: str  # "run_failed" | "no_change" | "policy_rejected" | "tests_failed" | "passed"
+    error: str | None = None
+
+
+@dataclass
+class ReviewVerdict:
+    approved: bool
+    summary: str
+    issues: list[str] = field(default_factory=list)
+    error: str | None = None  # review ran but verdict could not be obtained
 
 
 @dataclass
@@ -44,6 +55,8 @@ class DevReport:
     attempts: list[Attempt] = field(default_factory=list)
     final_run_ref: str | None = None
     settlement_hint: str | None = None
+    review: ReviewVerdict | None = None
+    repo: str = ""
 
     def summary(self) -> str:
         lines = [f"feature: {self.feature}", f"succeeded: {self.succeeded}"]
@@ -52,25 +65,69 @@ class DevReport:
                 f"  attempt {a.number}: run={a.run_ref} verdict={a.verdict} "
                 f"changed={len(a.changed_paths)}"
             )
+            if a.error:
+                lines.append(f"    error: {a.error}")
             if a.policy_violations:
                 lines += [f"    policy: {v}" for v in a.policy_violations]
             if a.gate and not a.gate.passed:
                 reason = a.gate.infra_error or a.gate.output_tail[-500:]
                 lines.append(f"    gate: exit={a.gate.exit_code} {reason}")
+        if self.review:
+            if self.review.error:
+                lines.append(f"review: UNAVAILABLE ({self.review.error})")
+            else:
+                lines.append(f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}")
+                lines += [f"  issue: {i}" for i in self.review.issues]
         if self.final_run_ref:
+            repo_arg = f" --repo {self.repo}" if self.repo else ""
             lines += [
                 "",
                 "retained for human settlement:",
-                f"  shepherd run changeset {self.final_run_ref}",
-                f"  shepherd run select {self.final_run_ref}   # keep",
-                f"  shepherd run apply {self.final_run_ref}    # merge onto moved-on workspace",
-                f"  shepherd run discard {self.final_run_ref}  # reject",
+                f"  shepherd run changeset {self.final_run_ref}                # inspect",
+                f"  python dev.py settle {self.final_run_ref}{repo_arg}           # accept: advance world + write files",
+                f"  python dev.py settle {self.final_run_ref}{repo_arg} --reject  # discard proposal",
             ]
         return "\n".join(lines)
 
 
-def _materialize(repo_root: Path, changeset, dest: Path) -> None:
-    """Copy the repo and overlay the retained changeset on top."""
+def materialize_into(root: Path, entries: dict[str, bytes]) -> list[str]:
+    """Write changeset content entries under root.
+
+    Refuses paths that escape root. Returns the list of written paths.
+    """
+    written: list[str] = []
+    resolved_root = root.resolve()
+    for rel, content in entries.items():
+        target = (root / rel).resolve()
+        if not target.is_relative_to(resolved_root):
+            raise ValueError(f"changeset path escapes repo root: {rel}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        written.append(rel)
+    return written
+
+
+def read_changeset_entries(changeset) -> dict[str, bytes]:
+    """Snapshot a retained changeset's content entries into memory.
+
+    v0.3.0 lane reality (verified on 3 workspaces): runs fork from the
+    workspace's ORIGINAL adoption basis, not from later settlements, so
+    changed_paths can list stale-basis artifacts whose content is
+    unavailable (read_file -> None). Those are NOT worker actions; the
+    git worktree is our source of truth, so they are skipped. Consequence:
+    genuine worker deletions cannot be expressed in this lane (documented
+    limitation; effect-stream support in F3).
+    """
+    entries: dict[str, bytes] = {}
+    for rel in changeset.changed_paths:
+        entry = changeset.read_file(rel)  # (bytes, mode) | None
+        if entry is not None:
+            entries[rel] = entry[0]
+    return entries
+
+
+def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None:
+    """Copy the repo and overlay the proposal's content entries on top."""
     shutil.copytree(
         repo_root,
         dest,
@@ -78,23 +135,127 @@ def _materialize(repo_root: Path, changeset, dest: Path) -> None:
         dirs_exist_ok=True,
         symlinks=True,
     )
-    for rel in changeset.changed_paths:
-        target = dest / rel
-        entry = changeset.read_file(rel)  # (bytes, mode) | None
-        if entry is None:
-            target.unlink(missing_ok=True)
-            continue
-        content, _mode = entry
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+    materialize_into(dest, entries)
 
 
-def _run_gate(repo_root: Path, changeset, test_cmd: str, timeout: int) -> GateResult:
+def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: GateResult | None = None) -> str:
+    """Structured feedback injected into the worker's next attempt."""
+    if kind == "policy":
+        return (
+            "PREVIOUS ATTEMPT: rejected by policy before testing.\n"
+            "Violations:\n- " + "\n- ".join(violations or []) + "\n"
+            "Stay strictly within the feature's scope and try again."
+        )
+    if kind == "gate":
+        assert gate is not None
+        return (
+            f"PREVIOUS ATTEMPT: failed the test suite (exit {gate.exit_code}).\n"
+            f"Test output (tail):\n{gate.output_tail[-2000:]}\n"
+            "Diagnose the root cause shown above and fix it; do not just retry the same change."
+        )
+    raise ValueError(f"unknown guidance kind: {kind}")
+
+
+def set_worker_budget(seconds: int) -> None:
+    """Raise the Claude workspace provider's wall-clock budget.
+
+    Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
+    runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
+    too little for real features. Rebinds the internal transport seam
+    (private API — revisit on framework upgrade).
+    """
+    from shepherd_dialect import providers
+    from shepherd_dialect.workspace_control import runtime_provider as rp
+
+    def transport(invocation):
+        return providers.ClaudeHeadlessProvider(
+            provider_id=invocation.provider_id,
+            prompt=invocation.prompt,
+            model=invocation.model_name,
+            budget_seconds=seconds,
+        )
+
+    rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
+        claude=transport
+    )
+
+
+def build_diff_text(changeset, limit: int = DIFF_TEXT_LIMIT) -> str:
+    """Render a retained changeset's content entries as reviewer-readable text."""
+    parts: list[str] = []
+    for rel, content in read_changeset_entries(changeset).items():
+        text = content.decode("utf-8", errors="replace")
+        parts.append(f"=== FILE: {rel} (proposed content) ===\n{text}")
+    diff = "\n\n".join(parts)
+    if len(diff) > limit:
+        diff = diff[:limit] + f"\n\n[... truncated at {limit} chars ...]"
+    return diff
+
+
+def run_review(
+    workspace,
+    review_task,
+    *,
+    feature: str,
+    changeset,
+    provider: str = "claude",
+    placement: str = "jail",
+) -> ReviewVerdict:
+    """Run the reviewer against a passing proposal.
+
+    v0.2 lane limits (bindings need disjoint roots; multi-binding runs take no
+    execution provider) rule out a syscall-read-only reviewer, so isolation is
+    custody-based instead: the reviewer runs in the single-repo lane, its
+    output is retained (never applied), a deterministic guard requires the
+    changeset to be exactly {REVIEW.json}, and the output is always discarded
+    after the verdict is read.
+    """
+    workspace.tasks.register(review_task)
+    try:
+        run = workspace.run(
+            review_task,
+            repo=workspace.git_repo(),
+            placement=placement,
+            runtime={"provider": provider},
+            args={"feature": feature, "diff": build_diff_text(changeset)},
+        )
+    except Exception as exc:
+        return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
+
+    output = run.output()
+    try:
+        entries = read_changeset_entries(output.changeset())
+        touched = sorted(entries)
+        if touched and touched != ["REVIEW.json"]:
+            return ReviewVerdict(
+                approved=False,
+                summary="",
+                error=f"reviewer touched files beyond REVIEW.json: {touched} — verdict invalidated",
+            )
+        if "REVIEW.json" not in entries:
+            return ReviewVerdict(approved=False, summary="", error="reviewer produced no REVIEW.json")
+        data = json.loads(entries["REVIEW.json"].decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return ReviewVerdict(approved=False, summary="", error=f"invalid REVIEW.json: {exc}")
+    finally:
+        try:
+            output.discard()
+        except Exception:
+            pass
+
+    return ReviewVerdict(
+        approved=bool(data.get("approved", False)),
+        summary=str(data.get("summary", "")),
+        issues=[str(i) for i in data.get("issues", [])],
+    )
+
+
+def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int) -> GateResult:
     """Run the repo's test suite against a materialized copy of the proposal."""
     with tempfile.TemporaryDirectory(prefix="shepherd-gate-") as tmp:
         staged = Path(tmp) / "staged"
         try:
-            _materialize(repo_root, changeset, staged)
+            _materialize(repo_root, entries, staged)
         except Exception as exc:
             return GateResult(False, None, "", infra_error=f"materialize failed: {exc}")
         try:
@@ -128,10 +289,11 @@ def develop(
     gate_timeout: int = 600,
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
+    review_task=None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace."""
     policy = policy or ChangesetPolicy()
-    report = DevReport(feature=feature, succeeded=False)
+    report = DevReport(feature=feature, succeeded=False, repo=str(repo_root))
     guidance = ""
 
     workspace.tasks.register(task)
@@ -142,30 +304,50 @@ def develop(
             args["feature"] = feature
             args["guidance"] = guidance
 
-        run = workspace.run(
-            task,
-            placement=placement,
-            runtime={"provider": provider},
-            **args,
-        )
+        try:
+            run = workspace.run(
+                task,
+                placement=placement,
+                runtime={"provider": provider},
+                **args,
+            )
+        except Exception as exc:
+            report.attempts.append(
+                Attempt(number, "(no run)", [], [], None, "run_failed", error=f"{type(exc).__name__}: {exc}")
+            )
+            guidance = (
+                "PREVIOUS ATTEMPT: the agent run itself failed "
+                f"({type(exc).__name__}). Work efficiently and stay within the "
+                "wall-clock budget: read only what you need, then write the change."
+            )
+            continue
         output = run.output()
         changeset = output.changeset()
-        changed = list(changeset.changed_paths)
+        entries = read_changeset_entries(changeset)
+        changed = list(entries)
 
-        verdict_policy = check_changeset(changeset, policy)
+        if not changed:
+            # Worker produced nothing: either it judged the feature already
+            # satisfied in its world basis, or the agent run failed silently.
+            output.discard()
+            report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change"))
+            guidance = (
+                "PREVIOUS ATTEMPT: you produced no file changes at all. "
+                "If the feature genuinely already exists, say so by making the "
+                "minimal change that proves it (e.g. a test); otherwise implement it now."
+            )
+            continue
+
+        verdict_policy = check_paths(changed, policy)
         if not verdict_policy.ok:
             output.discard()
             report.attempts.append(
                 Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected")
             )
-            guidance = (
-                "Your previous attempt was rejected by policy before testing:\n- "
-                + "\n- ".join(verdict_policy.violations)
-                + "\nStay within scope and try again."
-            )
+            guidance = _format_guidance("policy", violations=verdict_policy.violations)
             continue
 
-        gate = _run_gate(repo_root, changeset, test_cmd, gate_timeout)
+        gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
         if gate.infra_error:
             # Suite could not run: abort, do not burn attempts, keep output retained
             report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
@@ -175,16 +357,21 @@ def develop(
         if not gate.passed:
             output.discard()
             report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
-            guidance = (
-                f"Your previous attempt failed the test suite (exit {gate.exit_code}).\n"
-                f"Test output (tail):\n{gate.output_tail[-2000:]}\n"
-                "Fix the root cause and try again."
-            )
+            guidance = _format_guidance("gate", gate=gate)
             continue
 
         report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed"))
         report.succeeded = True
         report.final_run_ref = run.run_ref
+        if review_task is not None:
+            report.review = run_review(
+                workspace,
+                review_task,
+                feature=feature,
+                changeset=changeset,
+                provider=provider,
+                placement=placement,
+            )
         return report
 
     return report

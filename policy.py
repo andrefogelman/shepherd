@@ -2,6 +2,10 @@
 worker proposal before it is even considered for the test gate.
 
 These guards are code, not LLM judgment. A violation discards the attempt.
+
+Guards operate on the proposal's CONTENT entries (files the worker actually
+wrote). Worker deletions cannot be expressed in the v0.3.0 workspace lane
+(see supervisor.read_changeset_entries), so there is no deletion guard.
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ class ChangesetPolicy:
     """Limits a worker proposal must respect."""
 
     max_changed_paths: int = 40
-    max_deleted_paths: int = 3
     allowed_prefixes: tuple[str, ...] = ()  # empty = whole repo allowed
     forbidden_paths: tuple[str, ...] = (
         ".git/",
@@ -31,29 +34,13 @@ class PolicyVerdict:
     violations: list[str] = field(default_factory=list)
 
 
-def _is_deletion(changeset, path: str) -> bool:
-    """read_file returns (bytes, mode) for content and None for a deletion."""
-    try:
-        return changeset.read_file(path) is None
-    except Exception:
-        return True
-
-
-def check_changeset(changeset, policy: ChangesetPolicy) -> PolicyVerdict:
-    """Apply deterministic guards to a retained changeset."""
+def check_paths(paths: list[str], policy: ChangesetPolicy) -> PolicyVerdict:
+    """Apply deterministic guards to the proposal's written paths."""
     violations: list[str] = []
-    paths = list(changeset.changed_paths)
 
     if len(paths) > policy.max_changed_paths:
         violations.append(
             f"changed {len(paths)} paths (max {policy.max_changed_paths})"
-        )
-
-    deletions = [p for p in paths if _is_deletion(changeset, p)]
-    if len(deletions) > policy.max_deleted_paths:
-        violations.append(
-            f"deleted {len(deletions)} paths (max {policy.max_deleted_paths}): "
-            + ", ".join(deletions[:10])
         )
 
     for path in paths:

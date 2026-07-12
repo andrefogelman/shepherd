@@ -1,6 +1,6 @@
 # Camada de desenvolvimento com AI supervisionado sobre Shepherd
 
-Data: 2026-07-11 · Status: proposta aguardando aprovação do Andre
+Data: 2026-07-11 · Status: aprovado; F1 e F2 implementadas (ver adendo F2 no fim)
 Base: shepherd-ai 0.3.0, venv `~/shepherd/.venv`, macOS Seatbelt, provider `claude` (Max subscription)
 
 ## Objetivo
@@ -101,3 +101,39 @@ Saída: relatório da execução + instruções de settlement (`shepherd run sel
 - Counterfactual Replay Optimization (aplicação 2 do paper).
 - Tree-RL / treino (aplicação 3).
 - Auto-apply sem humano no gate.
+
+---
+
+## Adendo F2 (2026-07-11): decisões forçadas pela realidade da 0.3.0
+
+Descobertas empíricas (validadas em 4 workspaces de teste) que alteraram o design:
+
+1. **Reviewer não pode ser syscall-ReadOnly nesta versão.** Lane C (multi-binding)
+   exige roots disjuntos (sem sub-root aninhado) E não aceita provider de execução.
+   Decisão: reviewer roda na lane single-repo com leitura livre do repo (reviews
+   melhores) e isolamento por CUSTÓDIA: output retido nunca aplicado, guard
+   determinístico exige changeset == {REVIEW.json}, descarte incondicional após
+   leitura do verdict. Propriedade preservada: reviewer não consegue alterar código.
+
+2. **Runs sempre forkam da adoção ORIGINAL do workspace**; select/apply avançam o
+   mundo vcscore mas não alimentam o basis dos runs seguintes. Consequências:
+   - paths "changed" sem conteúdo no changeset = artefatos de basis, não ações do
+     worker → ignorados (worktree é a fonte de verdade);
+   - deleção real por worker é inexpressável nesta lane (limitação documentada;
+     suporte via effect stream fica para F3);
+   - `dev.py run` recria o `.vcscore` a cada invocação (substrato stateless por
+     rodada; git é a verdade durável), recusando se houver proposta pendente.
+
+3. **Settlement que materializa arquivos não existe no framework** (select/apply só
+   movem o mundo interno). `dev.py settle <ref>` faz: snapshot do changeset →
+   `select` (registro de custódia) → espelha arquivos no worktree APÓS fechar o
+   workspace (vcs-core bloqueia mutação com workspace ativo). Commit no git fica
+   com o humano. Guard anti path-traversal na materialização.
+
+4. **Budget do worker**: campos `budget`/`timeout` são reservados na API pública e
+   o provider Claude trava em 240s. `--worker-budget` (default 900s) reergue via
+   rebind do seam interno de transporte (workaround alpha; revisar em upgrade).
+
+5. **Recomendações operacionais**: `.vcscore/` e `REVIEW.json` no .gitignore dos
+   repos alvo; nunca usar verbos crus `shepherd run select/apply` fora do
+   `dev.py settle` (dessincroniza mundo × worktree).
