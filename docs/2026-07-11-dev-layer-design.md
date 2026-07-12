@@ -174,3 +174,34 @@ settle-par materializou os 2 arquivos e as suites passaram.
 traces dos clones são efêmeros (destruídos com o clone); veto ao vivo por
 intents (stream) continua fora — exigiria a lane baixa (Scope/Device), próximo
 candidato de evolução.
+
+---
+
+## Adendo CRO/Tree-RL/auto-apply (2026-07-12): fases A-D implementadas
+
+Estudo em `docs/2026-07-12-study-cro-treerl-autoapply.md`. Executado A→B→C→D.
+
+- **A — history store** (`history.py`): cada run/run2/best-of e settlement grava um evento
+  JSONL em `~/.shepherd-dev/history/` (env `SHEPHERD_DEV_HISTORY_DIR`) + espelho GBrain
+  best-effort. Nunca bloqueia/quebra um run.
+- **B — auto-apply** (`--auto-settle` em run/run2/best-of): auto-accept SÓ com gate PASS +
+  review APPROVED (incompatível com `--no-review` e provider static); settle + commit em
+  branch isolada `shepherd/<slug>` (nunca a branch atual, nunca push). Detached HEAD/erro
+  de git degradam para arquivos-na-worktree com aviso. Decisão marcada `auto=true` no store.
+- **C — best-of-N** (`--best-of K`, K=2..4): essência do Tree-RL em inferência sem treino.
+  K workers do MESMO estado (clones efêmeros) com sementes de ênfase (neutra/menor-diff/
+  robustez/idiomas); gate em todos; review nos que passam; ranking determinístico
+  (gate → aprovação → menos issues → menos arquivos → menor diff); vencedor vira staged
+  proposal (settle-par). Fork por TENTATIVA (fork de conversa não é expressável com o
+  claude CLI — limite documentado). Treino real do Tree-RL: fora de escopo.
+- **D — CRO-lite** (`shepherd-dev optimize`): mina o history por modos de falha, pede ao
+  meta-otimizador (Claude, default opus) UMA edição de prompt como JSON, valida por
+  **replay real** — cada caso re-executado num git worktree pinado no SHA original, em
+  subprocesso, com o prompt candidato injetado via `SHEPHERD_DEV_PROMPTS_OVERRIDES`. Aceita
+  só se fix set melhora E guard set não regride (`--apply` persiste; default dry-run).
+  Custo em tokens reais (sem KV-reuse na lane pública) — fix/guard pequenos (default 3/3).
+
+Prompts viraram dados em `tasks.py` (DEFAULT_PROMPTS + override file). Restrição do
+framework que moldou o design: o SOURCE de uma task NÃO pode ter import relativo nem de
+módulo do mesmo pacote (só stdlib + shepherd) — por isso os prompts vivem em `tasks.py`,
+não num módulo irmão, e o replay injeta o candidato via arquivo de override lido no import.

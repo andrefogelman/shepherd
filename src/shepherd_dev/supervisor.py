@@ -150,19 +150,21 @@ def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None
 
 
 def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: GateResult | None = None) -> str:
-    """Structured feedback injected into the worker's next attempt."""
+    """Structured feedback injected into the worker's next attempt.
+
+    Templates live in prompts.py (CRO-lite surface); {TOKENS} are substituted
+    with str.replace — gate tails may contain braces, so never str.format.
+    """
+    from .tasks import get_prompt
+
     if kind == "policy":
-        return (
-            "PREVIOUS ATTEMPT: rejected by policy before testing.\n"
-            "Violations:\n- " + "\n- ".join(violations or []) + "\n"
-            "Stay strictly within the feature's scope and try again."
-        )
+        return get_prompt("guidance_policy").replace("{VIOLATIONS}", "\n- ".join(violations or []))
     if kind == "gate":
         assert gate is not None
         return (
-            f"PREVIOUS ATTEMPT: failed the test suite (exit {gate.exit_code}).\n"
-            f"Test output (tail):\n{gate.output_tail[-2000:]}\n"
-            "Diagnose the root cause shown above and fix it; do not just retry the same change."
+            get_prompt("guidance_gate")
+            .replace("{EXIT}", str(gate.exit_code))
+            .replace("{TAIL}", gate.output_tail[-2000:])
         )
     raise ValueError(f"unknown guidance kind: {kind}")
 

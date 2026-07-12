@@ -465,6 +465,17 @@ def settle_run(repo_root: Path, run_ref: str, *, reject: bool, auto: bool = Fals
     return 0, written
 
 
+def cmd_optimize(args) -> int:
+    from .optimize import optimize
+
+    report = optimize(
+        fix_n=args.fix_n, guard_n=args.guard_n, model=args.model,
+        worker_budget=args.worker_budget, apply=args.apply,
+    )
+    print(report.summary())
+    return 0
+
+
 def cmd_settle(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
@@ -559,6 +570,14 @@ def main() -> int:
     p_init = sub.add_parser("init", help="initialize a repo as a Shepherd workspace (one-time)")
     p_init.add_argument("--repo", default=".", help="path to the target repo (default: cwd)")
     p_init.set_defaults(func=cmd_init)
+
+    p_opt = sub.add_parser("optimize", help="CRO-lite: mine run history, propose a prompt edit, validate by replay")
+    p_opt.add_argument("--fix-n", type=int, default=3, help="past failures to replay (must improve)")
+    p_opt.add_argument("--guard-n", type=int, default=3, help="past passes to replay (must not regress)")
+    p_opt.add_argument("--model", default="claude-opus-4-8", help="meta-optimizer model")
+    p_opt.add_argument("--worker-budget", type=int, default=900)
+    p_opt.add_argument("--apply", action="store_true", help="persist the edit if it passes (default: dry-run)")
+    p_opt.set_defaults(func=cmd_optimize)
 
     args = parser.parse_args()
     return args.func(args)
