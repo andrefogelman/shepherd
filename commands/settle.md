@@ -1,13 +1,13 @@
 ---
-description: Accept or reject a retained shepherd-dev proposal (writes files only on accept)
-argument-hint: <run-ref | proposal-id> [--repo <path>] [--reject]
+description: Accept or reject a retained run proposal (writes files only on accept)
+argument-hint: <run-ref> [--repo P] [--reject]
 ---
 
-The user is settling a shepherd-dev proposal: $ARGUMENTS.
+The user is settling a retained `run` proposal: $ARGUMENTS.
 
-1. If the ref starts with `run-` use `shepherd-dev settle`, otherwise it is a run2
-   proposal id — use `shepherd-dev settle-par`.
-2. Before accepting, show the user what will change if they haven't seen it
-   (`shepherd run changeset <run-ref>` for runs; the staged manifest for run2).
-3. Execute the settlement the user asked for and report the written files.
-4. The git commit belongs to the user — ask whether to commit.
+1. If the ref is a run2/best-of proposal id (not `run-…`), use `/shepherd-dev:settle-par` instead.
+2. Before accepting, show what will change if they haven't seen it
+   (`shepherd run changeset <run-ref>`).
+3. Run `shepherd-dev settle <run-ref> [--repo <path>] [--reject]`.
+   `--repo` defaults to the enclosing workspace. `--reject` discards instead of accepting.
+4. Report the written files. The git commit belongs to the user — ask whether to commit.
