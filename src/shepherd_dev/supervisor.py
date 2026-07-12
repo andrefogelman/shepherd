@@ -272,11 +272,31 @@ def run_review(
 _TEST_FILE_RE = re.compile(r"(\.test\.(ts|tsx|js|jsx|mjs)|_test\.py|_test\.exs)$")
 
 
-def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
-    """Substitute {NEW_TESTS} with the proposal's own test files (native gate).
+def _proposal_has_rust_test(entries: dict[str, bytes]) -> bool:
+    """Rust tests live in-module (#[test]/#[cfg(test)] in the same .rs) or under
+    tests/ — a filename check isn't enough, so inspect content."""
+    for rel, content in entries.items():
+        if rel.startswith("tests/") and rel.endswith(".rs"):
+            return True
+        if rel.endswith(".rs"):
+            text = content.decode("utf-8", errors="replace")
+            if "#[test]" in text or "#[cfg(test)]" in text:
+                return True
+    return False
 
-    Returns None when the placeholder is present but the proposal added no
-    tests — the gate must then fail loudly instead of running nothing."""
+
+def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
+    """Resolve a native-gate command against the proposal's own tests.
+
+    - {NEW_TESTS}: substitute the proposal's test files (node/python), or None
+      if it shipped none.
+    - {CARGO_TESTS}: presence sentinel for Rust — cargo test passes with 0 tests,
+      so require the proposal to contain a Rust test, else None.
+    Returns None when the proposal has no tests — the gate then fails loudly."""
+    if "{CARGO_TESTS}" in test_cmd:
+        if not _proposal_has_rust_test(entries):
+            return None
+        return test_cmd.replace("{CARGO_TESTS}", "").strip()
     if "{NEW_TESTS}" not in test_cmd:
         return test_cmd
     import shlex
@@ -293,8 +313,8 @@ def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout
     if resolved is None:
         return GateResult(
             False, 1,
-            "native gate: the proposal contains no test files (*.test.* / *_test.*) — "
-            "write tests for the feature; the gate runs exactly the tests you add.",
+            "native gate: the proposal contains no tests (*.test.* / *_test.* / a Rust "
+            "#[test]) — write tests for the feature; the gate needs them to pass.",
         )
     test_cmd = resolved
     with tempfile.TemporaryDirectory(prefix="shepherd-gate-") as tmp:

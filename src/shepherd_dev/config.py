@@ -64,9 +64,13 @@ def detect_test_cmd(repo_root: Path) -> str | None:
             return "mix test"
         return None
 
-    # Rust
+    # Rust — cargo test passes vacuously with 0 tests (exit 0), so only claim a
+    # real suite when tests already exist; otherwise fall through to the native
+    # gate (same "cargo test", with the test-writing hint + a no-test guard).
     if (repo_root / "Cargo.toml").is_file():
-        return "cargo test"
+        if list(repo_root.glob("tests/**/*.rs")) or _rust_src_has_tests(repo_root):
+            return "cargo test"
+        return None
 
     # Go
     if (repo_root / "go.mod").is_file():
@@ -98,6 +102,18 @@ def _pytest_available() -> bool:
     import shutil
 
     return shutil.which("pytest") is not None
+
+
+def _rust_src_has_tests(repo_root: Path) -> bool:
+    """True when any Rust source already declares a test (#[test]/#[cfg(test)])."""
+    for rs in repo_root.glob("src/**/*.rs"):
+        try:
+            text = rs.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "#[test]" in text or "#[cfg(test)]" in text:
+            return True
+    return False
 
 
 def detect_language(repo_root: Path) -> str | None:
@@ -179,6 +195,19 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
             "files using `use ExUnit.Case` (async: true when possible), runnable "
             "with `mix test`. Test the feature's own modules directly; do NOT touch "
             "Ecto/the database unless the repo's test setup already provides it."
+        )
+        return cmd, hint
+    if lang == "rust":
+        # {CARGO_TESTS} is a presence sentinel — the gate strips it once it has
+        # confirmed the proposal actually ships a Rust test, otherwise it fails
+        # loudly. Needed because `cargo test` with 0 tests exits 0 (vacuous pass).
+        cmd = "cargo test {CARGO_TESTS}"
+        hint = (
+            "Also write tests for this feature using Rust's BUILT-IN test framework "
+            "(a `#[cfg(test)] mod tests { … }` block with `#[test]` functions in the "
+            "same source file, or files under `tests/`), runnable with `cargo test`. "
+            "They must actually assert the feature's behavior — a proposal with no "
+            "test is rejected. Use only the standard library and the crate's own code."
         )
         return cmd, hint
     return None

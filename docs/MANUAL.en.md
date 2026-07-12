@@ -99,11 +99,12 @@ whenever you want: `--test-cmd "…"`, `--repo <path>`.
 
 **Repo without tests?** No problem. When there is no configured or detectable
 suite (or the declared `npm test` can't run because `node_modules` is
-missing), shepherd uses a dependency-free native runner — `node --test`
-(with strip-types for `.ts` on Node ≥ 22.6) or `python3 -m unittest` — **and
-instructs the worker to write the tests alongside the feature**. You write
-only the intent; the tests come in the package. The native gate runs exactly
-the test files the proposal adds; a proposal without tests fails loudly.
+missing), shepherd uses a native runner — `node --test` (with strip-types for
+`.ts` on Node ≥ 22.6), `python3 -m unittest`, `mix test` (Elixir) or
+`cargo test` (Rust) — **and instructs the worker to write the tests alongside
+the feature**. You write only the intent; the tests come in the package. A
+guard rejects a proposal that ships no test (including Rust, where
+`cargo test` would otherwise pass vacuously with 0 tests).
 
 ```
 ... report: attempts, gate, reviewer verdict ...

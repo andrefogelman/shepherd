@@ -96,9 +96,11 @@ quando quiser: `--test-cmd "…"`, `--repo <path>`.
 
 **Repo sem testes?** Sem problema. Quando não há suíte configurada nem detectável
 (ou o `npm test` declarado não roda porque falta `node_modules`), o shepherd usa
-um runner nativo sem dependências — `node --test` (com strip-types para `.ts` em
-Node ≥ 22.6) ou `python3 -m unittest` — **e instrui o worker a escrever os testes
-junto com a feature**. Você escreve só a intenção; os testes vêm no pacote.
+um runner nativo — `node --test` (com strip-types para `.ts` em Node ≥ 22.6),
+`python3 -m unittest`, `mix test` (Elixir) ou `cargo test` (Rust) — **e instrui o
+worker a escrever os testes junto com a feature**. Você escreve só a intenção; os
+testes vêm no pacote. Um guard rejeita proposta sem teste (inclusive em Rust, onde
+`cargo test` passaria vazio com 0 testes).
 
 ```
 ... relatório: tentativas, portão, veredito do revisor ...
