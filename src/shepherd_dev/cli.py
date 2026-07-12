@@ -2,12 +2,12 @@
 
 Usage:
     # develop (output is held for review, nothing touches your files)
-    .venv/bin/python dev.py run "add CPF validation to signup" \
+    shepherd-dev run "add CPF validation to signup" \
         --repo ~/projetos/foo --test-cmd "npm test"
 
     # settle a passing proposal (human decision)
-    .venv/bin/python dev.py settle <run-ref> --repo ~/projetos/foo            # accept
-    .venv/bin/python dev.py settle <run-ref> --repo ~/projetos/foo --reject   # discard
+    shepherd-dev settle <run-ref> --repo ~/projetos/foo            # accept
+    shepherd-dev settle <run-ref> --repo ~/projetos/foo --reject   # discard
 
 The target repo must be a Shepherd workspace (`shepherd init` inside it once).
 Accepting a proposal advances the Shepherd world (select) AND writes the files
@@ -22,10 +22,10 @@ from pathlib import Path
 
 import shepherd as sp
 
-from parallel import PROPOSALS_DIR, develop_parallel
-from policy import ChangesetPolicy
-from supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
-from tasks import implement, review, write_tests
+from .parallel import PROPOSALS_DIR, develop_parallel
+from .policy import ChangesetPolicy
+from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
+from .tasks import implement, review, write_tests
 
 
 def _resolve_repo(raw: str) -> Path | None:
@@ -47,7 +47,7 @@ def _refresh_substrate(repo_root: Path) -> str | None:
 
     In shepherd-ai 0.3.0 runs fork from the workspace's ORIGINAL adoption
     basis; settlements do not feed later runs' bases (verified empirically).
-    Since git is our durable source of truth, each `dev.py run` re-adopts the
+    Since git is our durable source of truth, each `shepherd-dev run` re-adopts the
     worktree from scratch. Refuses if an unconsumed proposal is still pending.
     Returns an error message, or None on success.
     """
@@ -66,7 +66,7 @@ def _refresh_substrate(repo_root: Path) -> str | None:
             return (
                 "pending unconsumed proposal(s): "
                 + ", ".join(sorted(set(pending)))
-                + " — settle them first (dev.py settle <ref> [--reject])"
+                + " — settle them first (shepherd-dev settle <ref> [--reject])"
             )
         shutil.rmtree(vcscore)
 
@@ -185,6 +185,26 @@ def cmd_settle_par(args) -> int:
     return 0
 
 
+def cmd_init(args) -> int:
+    """Initialize PATH as a Shepherd workspace using the bundled shepherd CLI.
+
+    The `shepherd` console script lives inside this tool's venv (dependency
+    shepherd-ai) but is not exposed on the user's PATH by uv/pipx — only
+    shepherd-dev is. This subcommand bridges that.
+    """
+    import subprocess
+
+    repo_root = Path(args.repo).expanduser().resolve()
+    if not repo_root.is_dir():
+        print(f"error: repo not found: {repo_root}", file=sys.stderr)
+        return 2
+    shepherd_bin = Path(sys.executable).parent / "shepherd"
+    proc = subprocess.run([str(shepherd_bin), "init"], cwd=repo_root)
+    if proc.returncode == 0:
+        print("remember to gitignore: .vcscore/  REVIEW.json  .shepherd-proposals/")
+    return proc.returncode
+
+
 def cmd_settle(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
@@ -295,9 +315,18 @@ def main() -> int:
     p_settle.add_argument("--reject", action="store_true", help="discard instead of accept")
     p_settle.set_defaults(func=cmd_settle)
 
+    p_init = sub.add_parser("init", help="initialize a repo as a Shepherd workspace (one-time)")
+    p_init.add_argument("--repo", default=".", help="path to the target repo (default: cwd)")
+    p_init.set_defaults(func=cmd_init)
+
     args = parser.parse_args()
     return args.func(args)
 
 
-if __name__ == "__main__":
+def entry() -> None:
+    """Console-script entry point (pyproject [project.scripts])."""
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    entry()

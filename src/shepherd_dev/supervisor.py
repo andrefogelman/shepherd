@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from policy import ChangesetPolicy, check_paths
+from .policy import ChangesetPolicy, check_paths
 
 IGNORED_DIRS = {
     ".vcscore",
@@ -95,8 +95,8 @@ class DevReport:
                 "",
                 "retained for human settlement:",
                 f"  shepherd run changeset {self.final_run_ref}                # inspect",
-                f"  python dev.py settle {self.final_run_ref}{repo_arg}           # accept: advance world + write files",
-                f"  python dev.py settle {self.final_run_ref}{repo_arg} --reject  # discard proposal",
+                f"  shepherd-dev settle {self.final_run_ref}{repo_arg}           # accept: advance world + write files",
+                f"  shepherd-dev settle {self.final_run_ref}{repo_arg} --reject  # discard proposal",
             ]
         return "\n".join(lines)
 

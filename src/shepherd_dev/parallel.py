@@ -22,8 +22,8 @@ from pathlib import Path
 
 import shepherd as sp
 
-from policy import ChangesetPolicy
-from supervisor import (
+from .policy import ChangesetPolicy
+from .supervisor import (
     IGNORED_DIRS,
     DevReport,
     GateResult,
@@ -33,7 +33,7 @@ from supervisor import (
     materialize_into,
     run_review,
 )
-from tasks import implement
+from .tasks import implement
 
 PROPOSALS_DIR = ".shepherd-proposals"
 
@@ -79,8 +79,8 @@ class ParallelReport:
             lines += [
                 "",
                 f"combined proposal staged: {PROPOSALS_DIR}/{self.proposal_id} ({len(self.staged_paths)} file(s))",
-                f"  python dev.py settle-par {self.proposal_id} --repo <repo>            # accept: write files",
-                f"  python dev.py settle-par {self.proposal_id} --repo <repo> --reject   # discard",
+                f"  shepherd-dev settle-par {self.proposal_id} --repo <repo>            # accept: write files",
+                f"  shepherd-dev settle-par {self.proposal_id} --repo <repo> --reject   # discard",
             ]
         return "\n".join(lines)
 

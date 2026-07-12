@@ -1,0 +1,24 @@
+[project]
+name = "shepherd-dev"
+version = "0.1.0"
+description = "Supervised AI development layer on Shepherd (arXiv 2605.10913): sandboxed Claude workers, deterministic policy + test gate, human-only settlement, coordinated parallel workers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Andre Fogelman" }]
+dependencies = [
+    "shepherd-ai>=0.3.0",
+]
+
+[project.scripts]
+shepherd-dev = "shepherd_dev.cli:entry"
+
+[project.urls]
+Repository = "https://github.com/andrefogelman/shepherd"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shepherd_dev"]

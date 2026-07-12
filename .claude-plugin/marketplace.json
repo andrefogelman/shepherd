@@ -1,0 +1,13 @@
+{
+  "name": "shepherd",
+  "owner": {
+    "name": "Andre Fogelman"
+  },
+  "plugins": [
+    {
+      "name": "shepherd-dev",
+      "source": "./",
+      "description": "Supervised AI development via Shepherd: sandboxed workers, deterministic test gate, reviewer, human-only settlement, coordinated parallel workers."
+    }
+  ]
+}
