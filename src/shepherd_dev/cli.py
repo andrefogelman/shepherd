@@ -598,15 +598,23 @@ def cmd_init(args) -> int:
         else:
             print(".gitignore already covers the shepherd-dev state")
 
-    # Remember the test command so `run` needs no --test-cmd. Explicit flag wins;
-    # otherwise try to auto-detect and save what we found.
-    test_cmd = args.test_cmd or config.detect_test_cmd(repo_root)
-    if test_cmd:
-        config.save_config(repo_root, {"test_cmd": test_cmd})
-        how = "saved" if args.test_cmd else "detected & saved"
-        print(f"test gate ({how}): {test_cmd}  →  {config.CONFIG_NAME}")
+    # Remember the test command so `run` needs no --test-cmd. Explicit flag is
+    # saved as-is. Otherwise resolve the way `run` will: only persist a real,
+    # runnable detected suite — a dead package-manager gate or a native fallback
+    # is NOT saved, so `run` re-derives the native gate (with its test-writing
+    # hint) every time.
+    if args.test_cmd:
+        config.save_config(repo_root, {"test_cmd": args.test_cmd})
+        print(f"test gate (saved): {args.test_cmd}  →  {config.CONFIG_NAME}")
     else:
-        print("no test command detected — pass --test-cmd on run, or re-init with --test-cmd \"…\"")
+        cmd, source, _ = config.resolve_test_cmd(repo_root, None)
+        if source == "detected":
+            config.save_config(repo_root, {"test_cmd": cmd})
+            print(f"test gate (detected & saved): {cmd}  →  {config.CONFIG_NAME}")
+        elif source == "native":
+            print(f"test gate: no suite found — `run` will use the native runner ({cmd}) and write tests itself")
+        else:
+            print("no test command — pass --test-cmd on run, or re-init with --test-cmd \"…\"")
     return 0
 
 

@@ -55,9 +55,15 @@ cd ~/projetos/meu-app
 shepherd-dev run "adicionar validação de CPF no cadastro"
 ```
 
-Precedência do portão: `--test-cmd` explícito → o salvo em `.shepherd-dev.json`
-→ auto-detecção pelo stack (Node/Python/Elixir/Rust/Go) → erro pedindo. Override
+Precedência do portão: `--test-cmd` explícito → salvo em `.shepherd-dev.json` →
+auto-detecção pelo stack → **gate nativo** (piso universal) → erro. Override
 quando quiser: `--test-cmd "…"`, `--repo <path>`.
+
+**Repo sem testes?** Sem problema. Quando não há suíte configurada nem detectável
+(ou o `npm test` declarado não roda porque falta `node_modules`), o shepherd usa
+um runner nativo sem dependências — `node --test` (com strip-types para `.ts` em
+Node ≥ 22.6) ou `python3 -m unittest` — **e instrui o worker a escrever os testes
+junto com a feature**. Você escreve só a intenção; os testes vêm no pacote.
 
 ```
 ... relatório: tentativas, portão, veredito do revisor ...

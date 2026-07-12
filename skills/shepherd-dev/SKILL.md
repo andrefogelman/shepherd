@@ -18,9 +18,10 @@ user's files until they accept.
 2. Target repo must be Shepherd-initialized once: `.vcscore/` exists, else run
    `shepherd-dev init --repo <path>` (it also gitignores the state AND saves the
    detected test command to `.shepherd-dev.json`).
-3. A test command must resolve for the gate. Precedence: `--test-cmd` > saved
-   `.shepherd-dev.json` > auto-detection (Node/Python/Elixir/Rust/Go). If none
-   resolves, tell the user the gate needs one — do not fake it.
+3. A test command resolves automatically. Precedence: `--test-cmd` > saved
+   `.shepherd-dev.json` > auto-detection > native zero-dep gate (node --test /
+   python unittest) with the worker writing its own tests. It only errors when
+   the language is unrecognized. So usually you pass ONLY the feature.
 
 ## Develop one feature
 
