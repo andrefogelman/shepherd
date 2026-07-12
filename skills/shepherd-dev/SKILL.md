@@ -42,8 +42,11 @@ Leader/follower conflict handoff, combined test gate with repair rounds
 
 ## Settlement — ALWAYS a human decision
 
-Report the run summary (attempts, gate, review verdict) and the retained ref to the
-user, then WAIT for their decision. Never settle on your own initiative.
+`run`/`run2` prompt the user inline at the end (accept / reject / diff) when stdin is a
+TTY. When you drive the CLI yourself (stdin is not a TTY), the prompt is skipped and the
+proposal stays retained — so YOU must report the run summary (attempts, gate, review
+verdict) and the retained ref to the user, then WAIT for their decision. Never settle on
+your own initiative; pass `--no-settle` if you want to be explicit about deferring.
 
 ```bash
 shepherd-dev settle <run-ref> --repo <path>            # accept: writes files

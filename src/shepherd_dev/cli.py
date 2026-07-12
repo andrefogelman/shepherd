@@ -80,6 +80,91 @@ def _refresh_substrate(repo_root: Path) -> str | None:
     return None
 
 
+DIFF_PREVIEW_LINES = 60
+
+
+def _read_run_entries(repo_root: Path, run_ref: str) -> dict[str, bytes]:
+    """Read a retained run's proposed files WITHOUT consuming the output."""
+    with sp.open(repo_root) as workspace:
+        outs = [o for o in workspace.runs.outputs(run_ref=run_ref) if o.output_name == "workspace"]
+        if not outs:
+            return {}
+        return read_changeset_entries(outs[0].changeset())
+
+
+def _print_diff(entries: dict[str, bytes]) -> None:
+    if not entries:
+        print("  (no readable proposed files)")
+        return
+    for rel, content in entries.items():
+        text = content.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        print(f"\n--- {rel} ({len(lines)} lines) ---")
+        for ln in lines[:DIFF_PREVIEW_LINES]:
+            print("  " + ln)
+        if len(lines) > DIFF_PREVIEW_LINES:
+            print(f"  … (+{len(lines) - DIFF_PREVIEW_LINES} more lines)")
+
+
+def _ask_decision(prompt: str) -> str:
+    """Return 'accept' | 'reject' | 'diff' | 'keep'. Empty/EOF => 'keep'."""
+    try:
+        ans = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "keep"
+    if ans in ("a", "aceitar", "accept", "y", "s", "sim"):
+        return "accept"
+    if ans in ("r", "rejeitar", "reject", "n", "nao", "não"):
+        return "reject"
+    if ans in ("d", "diff", "ver"):
+        return "diff"
+    return "keep"
+
+
+def _interactive_settle_run(repo_root: Path, run_ref: str) -> int:
+    """Prompt accept/reject/diff for a single run; act inline."""
+    while True:
+        choice = _ask_decision("\nAceitar (a), rejeitar (r) ou ver o diff (d)? [a/r/d]: ")
+        if choice == "diff":
+            _print_diff(_read_run_entries(repo_root, run_ref))
+            continue
+        if choice == "accept":
+            code, written = settle_run(repo_root, run_ref, reject=False)
+            if code == 0 and written:
+                print("revise e comite no git quando quiser.")
+            return code
+        if choice == "reject":
+            code, _ = settle_run(repo_root, run_ref, reject=True)
+            return code
+        print(f"deixado retido — decida depois:\n  shepherd-dev settle {run_ref} --repo {repo_root} [--reject]")
+        return 0
+
+
+def _interactive_settle_proposal(repo_root: Path, proposal_id: str) -> int:
+    """Prompt accept/reject/diff for a staged (run2/best-of) proposal; act inline."""
+    files_dir = repo_root / PROPOSALS_DIR / proposal_id / "files"
+    while True:
+        choice = _ask_decision("\nAceitar (a), rejeitar (r) ou ver o diff (d)? [a/r/d]: ")
+        if choice == "diff":
+            entries = {
+                str(p.relative_to(files_dir)): p.read_bytes()
+                for p in files_dir.rglob("*") if p.is_file()
+            } if files_dir.is_dir() else {}
+            _print_diff(entries)
+            continue
+        if choice == "accept":
+            code, written = settle_proposal(repo_root, proposal_id, reject=False)
+            if code == 0 and written:
+                print("revise e comite no git quando quiser.")
+            return code
+        if choice == "reject":
+            code, _ = settle_proposal(repo_root, proposal_id, reject=True)
+            return code
+        print(f"deixado staged — decida depois:\n  shepherd-dev settle-par {proposal_id} --repo {repo_root} [--reject]")
+        return 0
+
+
 def _slugify(text: str, limit: int = 28) -> str:
     import re
 
@@ -189,7 +274,19 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement) -> 
             print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
         return 0
 
+    if _wants_interactive(args) and report.proposal_id:
+        return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
+
+
+def _wants_interactive(args) -> bool:
+    """Prompt inline only when asked (or by default on a TTY) and auto-settle
+    is off. Never prompt when stdin is not a terminal (CI, subprocess replay)."""
+    if getattr(args, "auto_settle", False) or getattr(args, "no_settle", False):
+        return False
+    if not sys.stdin.isatty():
+        return False
+    return getattr(args, "interactive", None) is not False  # default on for a TTY
 
 
 def cmd_run(args) -> int:
@@ -277,6 +374,8 @@ def cmd_run(args) -> int:
             print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
         return 0
 
+    if _wants_interactive(args) and report.final_run_ref:
+        return _interactive_settle_run(repo_root, report.final_run_ref)
     return 0 if report.succeeded else 1
 
 
@@ -347,6 +446,8 @@ def cmd_run2(args) -> int:
             print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
         return 0
 
+    if _wants_interactive(args) and report.proposal_id:
+        return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
 
 
@@ -546,6 +647,11 @@ def main() -> int:
         help="on gate PASS + review APPROVED: settle and commit on an isolated shepherd/<slug> branch (never pushes)",
     )
     p_run.add_argument(
+        "--no-settle",
+        action="store_true",
+        help="do not prompt to accept/reject at the end; just leave the proposal retained",
+    )
+    p_run.add_argument(
         "--best-of",
         type=int,
         default=1,
@@ -580,6 +686,11 @@ def main() -> int:
         "--auto-settle",
         action="store_true",
         help="on combined gate PASS + review APPROVED: settle and commit on an isolated shepherd/<slug> branch (never pushes)",
+    )
+    p_run2.add_argument(
+        "--no-settle",
+        action="store_true",
+        help="do not prompt to accept/reject at the end; just leave the proposal staged",
     )
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")

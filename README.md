@@ -27,9 +27,10 @@ shepherd-dev init --repo ~/projects/my-repo
 
 ```bash
 # develop one feature (worker + policy + test gate + retry + reviewer)
+# on an interactive terminal it then prompts: accept (a) / reject (r) / diff (d)
 shepherd-dev run "add CPF validation to signup" --repo ~/projects/my-repo --test-cmd "npm test"
 
-# accept or reject the retained proposal (writes files only on accept)
+# in a pipe/CI, or with --no-settle, the proposal stays retained; settle later:
 shepherd-dev settle <run-ref> --repo ~/projects/my-repo [--reject]
 
 # two coordinated parallel workers (conflict handoff + combined gate + review)

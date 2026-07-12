@@ -43,12 +43,28 @@ O portão precisa de uma suíte de testes que rode (`npm test`, `pytest -q`,
 
 ## Ciclo básico
 
+Um comando só. Ao terminar, num terminal interativo ele **pergunta** o que fazer:
+
 ```bash
-# desenvolver
 shepherd-dev run "adicionar validação de CPF no cadastro" \
   --repo ~/projetos/meu-app --test-cmd "npm test"
+```
 
-# decidir (sua escolha)
+```
+... relatório: tentativas, portão, veredito do revisor ...
+
+Aceitar (a), rejeitar (r) ou ver o diff (d)? [a/r/d]:
+```
+
+- `a` — aceita, grava os arquivos no worktree (revise e comite no git quando quiser).
+- `r` — descarta a proposta.
+- `d` — mostra o diff proposto e pergunta de novo.
+- Enter vazio — deixa retido; você decide depois com `settle`.
+
+O prompt só aparece em terminal interativo. Em pipe/CI (stdin não é um terminal),
+ou com `--no-settle`, a proposta fica retida e você liquida quando quiser:
+
+```bash
 shepherd-dev settle run-abc123 --repo ~/projetos/meu-app            # aceita e grava
 shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 ```
@@ -73,6 +89,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--mode tests` | run | Worker só escreve testes, não código de produção. |
 | `--best-of K` | run | K candidatos paralelos (2–4). |
 | `--auto-settle` | run · run2 | Aceita sozinho se portão passou e revisor aprovou; comita em branch isolada. |
+| `--no-settle` | run · run2 | Não pergunta no fim; deixa a proposta retida. |
 | `--no-review` | run · run2 | Pula o revisor. Incompatível com `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confina mudanças a um prefixo (repetível). |
 | `--max-attempts` | run · run2 | Tentativas por worker (padrão 3). |
