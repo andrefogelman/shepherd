@@ -70,11 +70,20 @@ on first use if a machine doesn't have it.
 The plugin ships a skill (teaches Claude when/how to drive `shepherd-dev`), the slash
 commands above, and the bootstrap script.
 
-## Design docs
+## Documentation
 
-See `docs/2026-07-11-dev-layer-design.md` — including the empirically-verified constraints of
-shepherd-ai 0.3.0 (stateless per-invocation substrate, custody-based reviewer isolation,
-worktree as source of truth) in the F2/F3 addenda.
+- **User manual**: [docs/MANUAL.en.md](docs/MANUAL.en.md) (English) ·
+  [docs/MANUAL.md](docs/MANUAL.md) (português) — mental model, both usage modes
+  (inside Claude Code / CLI), all commands and flags, best-of-N, auto-apply,
+  optimize, token consumption, limits.
+- **Context pack A/B benchmark**:
+  [docs/2026-07-12-context-pack-ab-benchmark.md](docs/2026-07-12-context-pack-ab-benchmark.md)
+  — measured on a real production repo: **448.7s → 128.6s (−71%, 3.5×)** worker
+  wall-clock with the pack on, plus correct code placement.
+- **Design doc**: `docs/2026-07-11-dev-layer-design.md` — including the
+  empirically-verified constraints of shepherd-ai 0.3.0 (stateless
+  per-invocation substrate, custody-based reviewer isolation, worktree as
+  source of truth) in the F2/F3 addenda.
 
 Based on the article https://arxiv.org/html/2605.10913
 Shepherd: Enabling Programmable Meta-Agents via Reversible Agentic Execution Traces
