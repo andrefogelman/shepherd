@@ -95,15 +95,98 @@ def _pytest_available() -> bool:
     return shutil.which("pytest") is not None
 
 
-def resolve_test_cmd(repo_root: Path, explicit: str | None) -> tuple[str | None, str]:
-    """Return (test_cmd, source). Precedence: explicit flag > saved config > detection.
-    source is one of 'flag' | 'config' | 'detected' | 'none'."""
+def detect_language(repo_root: Path) -> str | None:
+    """Dominant language of the repo, for the native-gate fallback."""
+    if (repo_root / "package.json").is_file() or list(repo_root.glob("**/tsconfig.json"))[:1]:
+        return "js"
+    if (repo_root / "mix.exs").is_file():
+        return "elixir"
+    if (repo_root / "Cargo.toml").is_file():
+        return "rust"
+    if (repo_root / "go.mod").is_file():
+        return "go"
+    if (
+        list(repo_root.glob("*.py"))
+        or (repo_root / "pyproject.toml").is_file()
+        or (repo_root / "setup.py").is_file()
+    ):
+        return "python"
+    return None
+
+
+def _node_supports_strip_types() -> bool:
+    """node --test can run .ts via strip-types on Node >= 22.6 (no deps)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5).stdout
+        v = out.strip().lstrip("v").split(".")
+        major, minor = int(v[0]), int(v[1])
+        return major > 22 or (major == 22 and minor >= 6)
+    except Exception:
+        return False
+
+
+def _repo_is_typescript(repo_root: Path) -> bool:
+    return (repo_root / "tsconfig.json").is_file() or bool(list(repo_root.glob("**/tsconfig.json"))[:1])
+
+
+def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
+    """(cmd, worker_hint) for the zero-dependency floor gate, or None."""
+    if lang == "js":
+        ts = _repo_is_typescript(repo_root)
+        if ts and _node_supports_strip_types():
+            cmd = "node --test --experimental-strip-types"
+            files = "*.test.ts (TypeScript)"
+        else:
+            cmd = "node --test"
+            files = "*.test.js / *.test.mjs (plain JavaScript, not TypeScript)"
+        hint = (
+            "Also write tests for this feature using Node's BUILT-IN test runner "
+            f"(`import test from 'node:test'` + `node:assert`), in {files}. "
+            f"They must pass with `{cmd}` and import ONLY the Node standard library "
+            "and the feature's own files — no third-party packages, since node_modules "
+            "may not be installed."
+        )
+        return cmd, hint
+    if lang == "python":
+        cmd = "python3 -m unittest discover -p '*_test.py'"
+        hint = (
+            "Also write tests for this feature using Python's built-in unittest, in "
+            f"files named *_test.py, runnable with `{cmd}`. Import only the standard "
+            "library and the feature's own modules — no third-party packages."
+        )
+        return cmd, hint
+    return None
+
+
+def resolve_test_cmd(repo_root: Path, explicit: str | None) -> tuple[str | None, str, str | None]:
+    """Return (test_cmd, source, worker_hint).
+
+    Precedence: explicit flag > saved config > project detection > native-gate
+    fallback (a zero-dep runner chosen by language, with a hint that makes the
+    worker write the tests itself). source in flag|config|detected|native|none.
+    worker_hint is set only for the native fallback."""
     if explicit:
-        return explicit, "flag"
+        return explicit, "flag", None
     cfg = load_config(repo_root).get("test_cmd")
     if isinstance(cfg, str) and cfg.strip():
-        return cfg, "config"
+        return cfg, "config", None
     detected = detect_test_cmd(repo_root)
-    if detected:
-        return detected, "detected"
-    return None, "none"
+    if detected and not _detected_gate_is_dead(repo_root, detected):
+        return detected, "detected", None
+    lang = detect_language(repo_root)
+    if lang:
+        gate = native_gate(repo_root, lang)
+        if gate:
+            return gate[0], "native", gate[1]
+    return None, "none", None
+
+
+def _detected_gate_is_dead(repo_root: Path, cmd: str) -> bool:
+    """A node package-manager gate (npm/yarn/pnpm/bun test) cannot run without
+    node_modules — treat it as unavailable so we fall back to the native gate."""
+    first = cmd.split()[0] if cmd else ""
+    if first in ("npm", "yarn", "pnpm", "bun"):
+        return not (repo_root / "node_modules").is_dir()
+    return False

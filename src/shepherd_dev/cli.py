@@ -55,22 +55,32 @@ def _resolve_repo(raw: str | None) -> Path | None:
     return repo_root
 
 
-def _resolve_test_cmd(repo_root: Path, explicit: str | None) -> str | None:
-    """Precedence: --test-cmd > saved config > auto-detection. Prints the source
-    so it's transparent which command the gate will use; None on failure."""
-    cmd, source = config.resolve_test_cmd(repo_root, explicit)
+def _resolve_test_cmd(repo_root: Path, explicit: str | None) -> tuple[str | None, str | None]:
+    """Resolve the gate. Precedence: --test-cmd > saved config > project
+    detection > native-gate fallback (zero-dep runner + a hint that makes the
+    worker write its own tests). Prints the source; returns (cmd, worker_hint).
+    (None, None) on failure."""
+    cmd, source, hint = config.resolve_test_cmd(repo_root, explicit)
     if cmd is None:
         print(
-            "error: no test command. Pass --test-cmd \"…\", or save one with "
-            "`shepherd-dev init --test-cmd \"…\"`. The gate needs a runnable suite.",
+            "error: no test command and no recognized language for a native gate. "
+            "Pass --test-cmd \"…\" or save one with `shepherd-dev init --test-cmd \"…\"`.",
             file=sys.stderr,
         )
-        return None
+        return None, None
     if source == "detected":
         print(f"test gate (auto-detected): {cmd}")
     elif source == "config":
         print(f"test gate (from .shepherd-dev.json): {cmd}")
-    return cmd
+    elif source == "native":
+        print(f"test gate (no suite found — using native runner, worker will write tests): {cmd}")
+    return cmd, hint
+
+
+def _with_hint(feature: str, hint: str | None) -> str:
+    """Fold the native-gate hint into the feature request so the worker writes
+    its own tests when the repo has no suite."""
+    return f"{feature}\n\n{hint}" if hint else feature
 
 
 def _refresh_substrate(repo_root: Path) -> str | None:
@@ -246,10 +256,10 @@ def _auto_settle_conditions(report) -> str | None:
     return None
 
 
-def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement) -> int:
+def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, feature: str) -> int:
     report = develop_best_of(
         repo_root,
-        args.feature,
+        feature,
         k=args.best_of,
         test_cmd=args.test_cmd,
         provider=args.provider,
@@ -335,9 +345,10 @@ def cmd_run(args) -> int:
         print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
         return 2
 
-    args.test_cmd = _resolve_test_cmd(repo_root, args.test_cmd)
+    args.test_cmd, gate_hint = _resolve_test_cmd(repo_root, args.test_cmd)
     if args.test_cmd is None:
         return 2
+    feature = _with_hint(args.feature, gate_hint)
 
     error = _refresh_substrate(repo_root)
     if error:
@@ -357,7 +368,7 @@ def cmd_run(args) -> int:
     reviewer = None if (args.no_review or args.provider == "static") else review
 
     if args.best_of > 1:
-        return _run_best_of(args, repo_root, worker, reviewer, policy, placement)
+        return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature)
 
     with sp.open(repo_root) as workspace:
         report = develop(
@@ -365,7 +376,7 @@ def cmd_run(args) -> int:
             worker,
             repo=workspace.git_repo(),
             repo_root=repo_root,
-            feature=args.feature,
+            feature=feature,
             test_cmd=args.test_cmd,
             provider=args.provider,
             placement=placement,
@@ -425,7 +436,7 @@ def cmd_run2(args) -> int:
         print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
         return 2
 
-    args.test_cmd = _resolve_test_cmd(repo_root, args.test_cmd)
+    args.test_cmd, gate_hint = _resolve_test_cmd(repo_root, args.test_cmd)
     if args.test_cmd is None:
         return 2
 
@@ -441,7 +452,7 @@ def cmd_run2(args) -> int:
 
     report = develop_parallel(
         repo_root,
-        [args.feature_a, args.feature_b],
+        [_with_hint(args.feature_a, gate_hint), _with_hint(args.feature_b, gate_hint)],
         test_cmd=args.test_cmd,
         provider=args.provider,
         placement=placement,
