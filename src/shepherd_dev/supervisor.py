@@ -326,19 +326,37 @@ def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
     return test_cmd.replace("{NEW_TESTS}", " ".join(shlex.quote(t) for t in new_tests))
 
 
-def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int) -> GateResult:
+def _start_gate_warmup(repo_root: Path, test_cmd: str | None, timeout: int):
+    """Speculative remote-gate warmup (#2): pre-stage the remote workdir while the
+    worker runs. Returns a GateWarmup, or None when no remote gate is configured."""
+    if test_cmd is None:
+        return None
+    from . import config as _config
+
+    cfg = _config.remote_gate(repo_root)
+    if cfg is None:
+        return None
+    from .remotegate import GateWarmup
+
+    return GateWarmup(cfg, timeout=timeout).start()
+
+
+def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int, warmup=None) -> GateResult:
     """Run the repo's test suite against a materialized copy of the proposal.
 
     If the repo configures a remote gate (test_remote), run it on the remote
     host instead of locally — for stacks whose build/test needs an environment
-    the local sandbox lacks (a DB, a container, another architecture)."""
+    the local sandbox lacks (a DB, a container, another architecture). A warmup,
+    when given, is consumed by the remote gate (or torn down for a local gate)."""
     from . import config as _config
 
     remote_cfg = _config.remote_gate(repo_root)
     if remote_cfg is not None:
         from .remotegate import run_remote_gate
 
-        return run_remote_gate(remote_cfg, entries, timeout)
+        return run_remote_gate(remote_cfg, entries, timeout, warmup=warmup)
+    if warmup is not None:
+        warmup.teardown()  # a local gate can't use a remote warmup
 
     resolved = _resolve_gate_cmd(test_cmd, entries)
     if resolved is None:
@@ -407,6 +425,7 @@ def develop(
     workspace.tasks.register(task)
 
     for number in range(1, max_attempts + 1):
+        warmup = _start_gate_warmup(repo_root, test_cmd, gate_timeout)
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature
@@ -423,6 +442,8 @@ def develop(
                 **args,
             )
         except Exception as exc:
+            if warmup is not None:
+                warmup.teardown()
             report.attempts.append(
                 Attempt(
                     number, "(no run)", [], [], None, "run_failed",
@@ -446,6 +467,8 @@ def develop(
             # Worker produced nothing: either it judged the feature already
             # satisfied in its world basis, or the agent run failed silently.
             output.discard()
+            if warmup is not None:
+                warmup.teardown()
             report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration))
             guidance = (
                 "PREVIOUS ATTEMPT: you produced no file changes at all. "
@@ -457,6 +480,8 @@ def develop(
         verdict_policy = check_paths(changed, policy)
         if not verdict_policy.ok:
             output.discard()
+            if warmup is not None:
+                warmup.teardown()
             report.attempts.append(
                 Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
             )
@@ -465,7 +490,7 @@ def develop(
 
         gate: GateResult | None = None
         if test_cmd is not None:
-            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
+            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup)
             if gate.infra_error:
                 # Suite could not run: abort, do not burn attempts, keep output retained
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))

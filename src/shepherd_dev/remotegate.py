@@ -206,38 +206,130 @@ def _env_prefix(cfg: RemoteGateConfig, run_id: str, workdir: str) -> str:
     return "export " + " ".join(parts) + "; "
 
 
-def run_remote_gate(cfg: RemoteGateConfig, entries: dict[str, bytes], timeout: int):
+def _teardown_workdir(cfg: RemoteGateConfig, run_id: str, workdir: str, did_setup: bool, timeout: int) -> None:
+    """Best-effort remote teardown of a staged/used workdir (+ setup state)."""
+    envp = _env_prefix(cfg, run_id, workdir)
+    wd = shlex.quote(workdir)
+    fin = []
+    if did_setup and cfg.teardown_cmd:
+        fin.append(f"cd {wd} 2>/dev/null && {envp}{_sub(cfg.teardown_cmd, run_id, workdir)} || true")
+    fin.append(f"rm -rf {wd} || true")
+    try:
+        _remote(cfg, "; ".join(fin), timeout)
+    except Exception:
+        pass
+
+
+class GateWarmup:
+    """Speculatively pre-stages a remote gate workdir while the worker runs (#2).
+
+    In a background thread it makes the ephemeral copy of the warm checkout and,
+    for {id}-isolated configs only, runs setup (bringing up the per-run DB /
+    container). Non-isolated setup touches SHARED external state and stays under
+    run_remote_gate's serialization lock, so the warmup pre-copies but does not
+    pre-setup it. When the worker finishes, run_remote_gate adopts this workdir
+    and only overlays + tests, overlapping the copy/setup latency with worker time.
+
+    Always teardown-safe: teardown() joins the staging thread first, so a warmup
+    that is never consumed (worker produced nothing) leaves no orphan.
+    """
+
+    def __init__(self, cfg: RemoteGateConfig, timeout: int = 600):
+        self.cfg = cfg
+        self.timeout = timeout
+        self.run_id = uuid.uuid4().hex[:12]
+        self.workdir = f"{cfg.workdir_base}/sg-{self.run_id}"
+        self.did_setup = False
+        self.error: str | None = None
+        self._thread: threading.Thread | None = None
+        self._torn = False
+        self._td_lock = threading.Lock()
+
+    def start(self) -> "GateWarmup":
+        self._thread = threading.Thread(target=self._stage, daemon=True)
+        self._thread.start()
+        return self
+
+    def _stage(self) -> None:
+        try:
+            copy = _remote(self.cfg, _build_copy_script(self.cfg, self.workdir), self.timeout)
+            if copy.returncode != 0:
+                self.error = f"warmup copy failed: {(copy.stderr or copy.stdout).strip()[-200:]}"
+                return
+            if self.cfg.setup_cmd and self.cfg.is_id_isolated:
+                envp = _env_prefix(self.cfg, self.run_id, self.workdir)
+                wd = shlex.quote(self.workdir)
+                setup = _remote(self.cfg, f"cd {wd} && {envp}{_sub(self.cfg.setup_cmd, self.run_id, self.workdir)}", self.timeout)
+                if setup.returncode != 0:
+                    self.error = f"warmup setup failed: {((setup.stdout or '') + (setup.stderr or '')).strip()[-200:]}"
+                    return
+                self.did_setup = True
+        except Exception as exc:  # never let a background failure escape
+            self.error = f"warmup: {exc}"
+
+    def join(self) -> None:
+        if self._thread is not None:
+            self._thread.join(self.timeout)
+
+    def teardown(self) -> None:
+        with self._td_lock:
+            if self._torn:
+                return
+            self._torn = True
+        self.join()  # staging must finish before we tear its state down
+        _teardown_workdir(self.cfg, self.run_id, self.workdir, self.did_setup, self.timeout)
+
+
+def run_remote_gate(cfg: RemoteGateConfig, entries: dict[str, bytes], timeout: int, warmup: "GateWarmup | None" = None):
     """Run one gate attempt remotely. Returns a GateResult (imported lazily to
-    avoid a cycle). Guarantees teardown + cleanup of the ephemeral workdir."""
+    avoid a cycle). Guarantees teardown + cleanup of the ephemeral workdir.
+
+    If a warmup is passed, run_remote_gate OWNS it: it adopts the pre-staged
+    workdir (skipping the copy, and setup when the warmup already did it) or, if
+    the warmup failed, tears its partial state down and proceeds fresh."""
     from .supervisor import GateResult
 
     if not cfg.test_cmd.strip():
+        if warmup is not None:
+            warmup.teardown()
         return GateResult(False, 1, "remote gate: no test_cmd configured")
+
+    # Adopt a healthy warmup; discard a failed one (clear its partial state).
+    if warmup is not None:
+        warmup.join()
+    staged = warmup if (warmup is not None and warmup.error is None) else None
+    if warmup is not None and staged is None:
+        warmup.teardown()
 
     serialize = not cfg.is_id_isolated
     lock = _REMOTE_GATE_LOCK if serialize else None
     if lock:
         lock.acquire()
     try:
-        run_id = uuid.uuid4().hex[:12]
-        workdir = f"{cfg.workdir_base}/sg-{run_id}"
+        if staged is not None:
+            run_id, workdir, did_setup = staged.run_id, staged.workdir, staged.did_setup
+            staged._torn = True  # this call now owns teardown
+        else:
+            run_id = uuid.uuid4().hex[:12]
+            workdir = f"{cfg.workdir_base}/sg-{run_id}"
+            did_setup = False
         envp = _env_prefix(cfg, run_id, workdir)
         wd = shlex.quote(workdir)
-        did_setup = False
         try:
-            # 1. ephemeral copy of the warm checkout (+ real copy of writable dirs)
-            copy = _remote(cfg, _build_copy_script(cfg, workdir), timeout)
-            if copy.returncode != 0:
-                return GateResult(False, None, "",
-                    infra_error=f"remote copy failed: {(copy.stderr or copy.stdout).strip()[-300:]}")
+            # 1. ephemeral copy of the warm checkout (skipped when pre-staged)
+            if staged is None:
+                copy = _remote(cfg, _build_copy_script(cfg, workdir), timeout)
+                if copy.returncode != 0:
+                    return GateResult(False, None, "",
+                        infra_error=f"remote copy failed: {(copy.stderr or copy.stdout).strip()[-300:]}")
 
             # 2. overlay the proposal's files (remove-then-write)
             err = _overlay(cfg, workdir, entries, timeout)
             if err:
                 return GateResult(False, None, "", infra_error=err)
 
-            # 3. setup (bring up DB/containers/services — user's command)
-            if cfg.setup_cmd:
+            # 3. setup (bring up DB/containers/services — skipped when pre-staged)
+            if cfg.setup_cmd and not did_setup:
                 did_setup = True
                 setup = _remote(cfg, f"cd {wd} && {envp}{_sub(cfg.setup_cmd, run_id, workdir)}", timeout)
                 if setup.returncode != 0:
@@ -259,14 +351,7 @@ def run_remote_gate(cfg: RemoteGateConfig, entries: dict[str, bytes], timeout: i
             return GateResult(passed=proc.returncode == 0, exit_code=proc.returncode, output_tail=tail)
         finally:
             # 5. guaranteed teardown + cleanup — even on timeout/error
-            fin = []
-            if did_setup and cfg.teardown_cmd:
-                fin.append(f"cd {wd} 2>/dev/null && {envp}{_sub(cfg.teardown_cmd, run_id, workdir)} || true")
-            fin.append(f"rm -rf {wd} || true")
-            try:
-                _remote(cfg, "; ".join(fin), timeout)
-            except Exception:
-                pass
+            _teardown_workdir(cfg, run_id, workdir, did_setup, timeout)
     finally:
         if lock:
             lock.release()
