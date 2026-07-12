@@ -254,6 +254,30 @@ hardlink; override for BSD/macOS hosts, e.g. `rsync -a --link-dest={repo}
 the test binary (remote) are independent; the sandbox's network does not affect
 the gate.
 
+### How it works underneath (and why it's safe)
+
+Three points that commonly raise doubts:
+
+- **It's not a flag** (`--remote`/`--ssh`/`--vm` don't exist). It's the
+  `test_remote` config block in `.shepherd-dev.json`. If you looked for a flag and
+  found none, that's why — the remote gate turns on by itself when the config is
+  present.
+- **The worker doesn't need the host's toolchain.** It runs in the local sandbox
+  and only **edits files** — it doesn't compile, bring up a database, or run
+  tests. Editing code doesn't require the stack. So your local machine may have no
+  Docker, no database, not even that language's compiler — none of it blocks the
+  worker.
+- **The gate runs OUTSIDE the sandbox and tests the worker's REAL code.** The gate
+  is a step in the shepherd process (not the sandboxed worker), so it has open
+  network for SSH/rsync. Each run it **syncs the proposal the worker just produced**
+  to the host (overlays the changed files onto an ephemeral copy of the warm
+  checkout) and only then runs the tests. The host never tests a stale copy — it
+  tests exactly what the worker proposed.
+
+In short: local worker (cheap, no stack) + remote gate (in the full environment),
+with the proposal synced automatically between the two. You write no sync or ssh
+script — you only declare the host and the commands in config.
+
 ### Step by step
 
 1. **Prepare a warm checkout on the host** — a clone of the repo with deps/build

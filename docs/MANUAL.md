@@ -246,6 +246,28 @@ GNU/Linux; sobrescreva para hosts BSD/macOS, ex.: `rsync -a
 do worker (edição) e o do teste (remoto) são independentes; a rede do sandbox
 não afeta o portão.
 
+### Como funciona por baixo (e por que é seguro)
+
+Três pontos que costumam gerar dúvida:
+
+- **Não é uma flag** (`--remote`/`--ssh`/`--vm` não existem). É o bloco de config
+  `test_remote` no `.shepherd-dev.json`. Se você procurou uma flag e não achou, é
+  por isso — o remote gate liga sozinho quando a config está presente.
+- **O worker não precisa do toolchain do host.** Ele roda no sandbox local e só
+  **edita arquivos** — não compila, não sobe banco, não roda teste. Editar código
+  não exige a stack. Portanto sua máquina local pode não ter Docker, nem o banco,
+  nem sequer o compilador daquela linguagem — nada disso bloqueia o worker.
+- **O portão roda FORA do sandbox e testa o código REAL do worker.** O gate é um
+  passo separado do processo do shepherd (não do worker sandboxed), então tem
+  rede liberada para SSH/rsync. A cada execução ele **sincroniza a proposta que o
+  worker acabou de gerar** para o host (overlay dos arquivos mudados sobre a cópia
+  efêmera do checkout warm) e só então roda os testes. O host nunca testa uma
+  cópia antiga — testa exatamente o que o worker propôs.
+
+Ou seja: worker local (barato, sem stack) + portão remoto (no ambiente completo),
+com a proposta sincronizada automaticamente entre os dois. Você não escreve
+script de sync nem de ssh — só declara o host e os comandos na config.
+
 ### Passo a passo
 
 1. **Prepare um checkout warm no host** — clone do repo com deps/build já
