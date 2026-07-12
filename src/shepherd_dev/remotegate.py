@@ -104,6 +104,18 @@ def _ssh_base(cfg: RemoteGateConfig) -> list[str]:
     return ["ssh", "-o", "BatchMode=yes", *cfg.ssh_opts, cfg.ssh]
 
 
+def _remote_argv(cfg: RemoteGateConfig, script: str) -> list[str]:
+    """argv for running `script` on the remote via ssh.
+
+    CRITICAL: ssh concatenates every arg after the host into ONE remote command
+    string, which the remote login shell then re-tokenizes. So the whole
+    `bash -lc <script>` must be a SINGLE ssh argument, with the script shell-
+    quoted, or the remote shell splits the script on its own spaces and hands
+    bash -c only the first word. Passing ["bash","-lc",script] as separate argv
+    is the classic bug — it looks right locally but breaks over real ssh."""
+    return [*_ssh_base(cfg), f"bash -lc {shlex.quote(script)}"]
+
+
 def _sub(text: str, run_id: str, workdir: str) -> str:
     return text.replace("{id}", run_id).replace("{workdir}", workdir)
 
@@ -111,7 +123,7 @@ def _sub(text: str, run_id: str, workdir: str) -> str:
 def _remote(cfg: RemoteGateConfig, script: str, timeout: int) -> subprocess.CompletedProcess:
     """Run a shell script on the remote via a single ssh invocation."""
     return subprocess.run(
-        [*_ssh_base(cfg), "bash", "-lc", script],
+        _remote_argv(cfg, script),
         capture_output=True, text=True, timeout=timeout,
     )
 
@@ -158,10 +170,10 @@ def _overlay(cfg: RemoteGateConfig, workdir: str, entries: dict[str, bytes], tim
     semantics (break the hardlink so the warm checkout is never mutated)."""
     quoted = " ".join(shlex.quote(rel) for rel in entries)
     unlink = f"cd {shlex.quote(workdir)} && for f in {quoted}; do rm -f \"$f\"; done" if entries else "true"
+    script = f"{unlink} && mkdir -p {shlex.quote(workdir)} && tar -xf - -C {shlex.quote(workdir)}"
     try:
         proc = subprocess.run(
-            [*_ssh_base(cfg), "bash", "-lc",
-             f"{unlink} && mkdir -p {shlex.quote(workdir)} && tar -xf - -C {shlex.quote(workdir)}"],
+            _remote_argv(cfg, script),
             input=_tar_entries(entries), capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
