@@ -84,6 +84,26 @@ def _with_hint(feature: str, hint: str | None) -> str:
     return f"{feature}\n\n{hint}" if hint else feature
 
 
+def _resolve_gate(repo_root: Path, explicit_test_cmd: str | None, provider: str):
+    """Resolve the gate, remote-aware. Returns (test_cmd, gate_hint, ok).
+
+    When the repo configures a remote gate (test_remote), preflight the remote
+    BEFORE any worker runs (fail loud on an unreachable host instead of burning
+    attempts) and let the remote config carry its own test_cmd."""
+    remote_cfg = config.remote_gate(repo_root)
+    if remote_cfg is not None and provider != "static":
+        from .remotegate import preflight
+
+        print(f"remote gate: {remote_cfg.ssh}:{remote_cfg.repo_dir} — {remote_cfg.test_cmd}")
+        err = preflight(remote_cfg)
+        if err:
+            print(f"error: {err}", file=sys.stderr)
+            return None, None, False
+        return remote_cfg.test_cmd, None, True
+    cmd, hint = _resolve_test_cmd(repo_root, explicit_test_cmd)
+    return cmd, hint, cmd is not None
+
+
 def _refresh_substrate(repo_root: Path) -> str | None:
     """Recreate .vcscore so the run basis equals the current worktree.
 
@@ -432,8 +452,8 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
         return 2
 
-    args.test_cmd, gate_hint = _resolve_test_cmd(repo_root, args.test_cmd)
-    if args.test_cmd is None:
+    args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
+    if not ok:
         return 2
     feature = _with_hint(args.feature, gate_hint)
     pack, pack_stats = _build_pack(args, repo_root, args.feature)
@@ -536,8 +556,8 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
         return 2
 
-    args.test_cmd, gate_hint = _resolve_test_cmd(repo_root, args.test_cmd)
-    if args.test_cmd is None:
+    args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
+    if not ok:
         return 2
     pack, pack_stats = _build_pack(args, repo_root, f"{args.feature_a} {args.feature_b}")
 

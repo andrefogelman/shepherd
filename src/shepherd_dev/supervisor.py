@@ -308,7 +308,19 @@ def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
 
 
 def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int) -> GateResult:
-    """Run the repo's test suite against a materialized copy of the proposal."""
+    """Run the repo's test suite against a materialized copy of the proposal.
+
+    If the repo configures a remote gate (test_remote), run it on the remote
+    host instead of locally — for stacks whose build/test needs an environment
+    the local sandbox lacks (a DB, a container, another architecture)."""
+    from . import config as _config
+
+    remote_cfg = _config.remote_gate(repo_root)
+    if remote_cfg is not None:
+        from .remotegate import run_remote_gate
+
+        return run_remote_gate(remote_cfg, entries, timeout)
+
     resolved = _resolve_gate_cmd(test_cmd, entries)
     if resolved is None:
         return GateResult(

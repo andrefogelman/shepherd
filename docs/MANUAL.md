@@ -207,6 +207,45 @@ padrão (3/3). Fica útil depois que o histórico acumular execuções reais.
   zera). Custo controlado: nada roda sem material novo. Config do repo vence a
   global; sem config, o automático fica desligado.
 
+## Portão remoto (build/test em outro host)
+
+Alguns repos só compilam/testam num ambiente que a máquina local não tem — um
+banco, um container, outra arquitetura, GPU. O worker continua **local** (só
+edita arquivos); o **portão** roda num host remoto arbitrário via SSH. Shepherd
+não conhece nenhum banco/serviço — você descreve tudo na config (`test_remote`):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host",
+  "repo_dir": "/caminho/do/checkout/warm",
+  "test_cmd": "<comando do portão>",
+  "setup_cmd": "<opcional: sobe DB/containers/serviços>",
+  "teardown_cmd": "<opcional: derruba — roda SEMPRE>",
+  "writable": ["_build"],
+  "env": { "DATABASE_URL": "postgres://localhost/app_{id}" }
+} }
+```
+
+Cada comando e valor de `env` aceita `{id}` (token único por execução do portão)
+e `{workdir}` (a cópia efêmera remota). É assim que você isola serviço com
+estado **sem** shepherd saber qual serviço é — dê um nome por-`{id}` ao banco /
+projeto compose / container. Funciona com **qualquer** base (Postgres, MySQL,
+Mongo, Redis, SQLite), fila, ou serviço — é só o texto da sua config que muda.
+
+Por execução, o portão: faz preflight do SSH **antes** de gastar worker (falha
+claro num host offline, não queima tentativas); copia o checkout warm de forma
+efêmera (o warm nunca é alterado); sobrepõe os arquivos da proposta; roda
+`setup_cmd` → `test_cmd` (com timeout **remoto**) → `teardown_cmd`; e limpa tudo
+**sempre**, mesmo em timeout/erro. Modos paralelos (`run2`/`best-of`) com serviço
+com estado: use `{id}` na config para rodar em paralelo; sem isso, shepherd
+serializa os portões remotos para não corromper estado compartilhado.
+
+Chaves opcionais: `copy_cmd` (default `cp -al {repo} {workdir}` — hardlink
+GNU/Linux; sobrescreva para hosts BSD/macOS, ex.: `rsync -a
+--link-dest={repo} {repo}/ {workdir}/`), `workdir_base`, `ssh_opts`. O binário
+do worker (edição) e o do teste (remoto) são independentes; a rede do sandbox
+não afeta o portão.
+
 ## Onde vive o quê
 
 | Local | Conteúdo |

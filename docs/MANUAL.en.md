@@ -214,6 +214,46 @@ default (3/3). Becomes useful once the history has accumulated real runs.
   resets it). Cost stays controlled: nothing runs without new material. Repo
   config wins over global; with no config, the automatic layer is off.
 
+## Remote gate (build/test on another host)
+
+Some repos only build/test in an environment the local machine lacks — a
+database, a container, another architecture, a GPU. The worker still runs
+**locally** (it only edits files); the **gate** runs on an arbitrary remote host
+over SSH. Shepherd knows no database or service — you describe it all in config
+(`test_remote`):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host",
+  "repo_dir": "/path/to/warm/checkout",
+  "test_cmd": "<the gate command>",
+  "setup_cmd": "<optional: bring up DB/containers/services>",
+  "teardown_cmd": "<optional: tear them down — ALWAYS runs>",
+  "writable": ["_build"],
+  "env": { "DATABASE_URL": "postgres://localhost/app_{id}" }
+} }
+```
+
+Every command and `env` value may reference `{id}` (a unique per-gate-run token)
+and `{workdir}` (the ephemeral remote copy). That is how you isolate a stateful
+service **without** shepherd knowing the service — name a per-`{id}` database /
+compose project / container. It works with **any** database (Postgres, MySQL,
+Mongo, Redis, SQLite), queue, or service — only your config text changes.
+
+Per run, the gate: preflights SSH **before** spending a worker (fails clearly on
+an offline host instead of burning attempts); makes an ephemeral copy of the
+warm checkout (the warm one is never mutated); overlays the proposal's files;
+runs `setup_cmd` → `test_cmd` (with a **remote** timeout) → `teardown_cmd`; and
+cleans up **always**, even on timeout/error. Parallel modes (`run2`/`best-of`)
+with a stateful service: use `{id}` in the config to run in parallel; without it,
+shepherd serializes the remote gates so shared state can't be corrupted.
+
+Optional keys: `copy_cmd` (default `cp -al {repo} {workdir}` — GNU/Linux
+hardlink; override for BSD/macOS hosts, e.g. `rsync -a --link-dest={repo}
+{repo}/ {workdir}/`), `workdir_base`, `ssh_opts`. The worker binary (editing) and
+the test binary (remote) are independent; the sandbox's network does not affect
+the gate.
+
 ## Where things live
 
 | Location | Contents |

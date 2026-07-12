@@ -10,6 +10,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .remotegate import RemoteGateConfig
 
 CONFIG_NAME = ".shepherd-dev.json"
 
@@ -289,3 +293,16 @@ def auto_optimize_config(repo_root: Path) -> dict | None:
         if isinstance(cfg, dict):
             return cfg
     return None
+
+
+def remote_gate(repo_root: Path) -> "RemoteGateConfig | None":
+    """Parse the repo's `test_remote` config into a RemoteGateConfig, or None.
+
+    Generic: shepherd knows no service/DB/toolchain — the user's config carries
+    the ssh target, warm repo dir, and the setup/test/teardown commands."""
+    raw = load_config(repo_root).get("test_remote")
+    if not isinstance(raw, dict):
+        return None
+    from .remotegate import parse_remote_config
+
+    return parse_remote_config(raw, detect_language(repo_root))
