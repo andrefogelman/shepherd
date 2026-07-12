@@ -22,6 +22,7 @@ from pathlib import Path
 
 import shepherd as sp
 
+from . import history
 from .parallel import PROPOSALS_DIR, develop_parallel
 from .policy import ChangesetPolicy
 from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
@@ -117,6 +118,14 @@ def cmd_run(args) -> int:
             review_task=reviewer,
         )
 
+    history.record_event(
+        "run",
+        history.run_payload(
+            report, repo_root,
+            mode=args.mode, test_cmd=args.test_cmd, provider=args.provider,
+            flags={"max_attempts": args.max_attempts, "allowed_prefix": args.allowed_prefix},
+        ),
+    )
     print(report.summary())
     return 0 if report.succeeded else 1
 
@@ -148,6 +157,14 @@ def cmd_run2(args) -> int:
         gate_timeout=args.gate_timeout,
         review_task=reviewer,
     )
+    history.record_event(
+        "run2",
+        history.parallel_payload(
+            report, repo_root,
+            test_cmd=args.test_cmd, provider=args.provider,
+            flags={"max_attempts": args.max_attempts, "max_repairs": args.max_repairs},
+        ),
+    )
     print(report.summary())
     return 0 if report.succeeded else 1
 
@@ -166,6 +183,10 @@ def cmd_settle_par(args) -> int:
         import shutil
 
         shutil.rmtree(staging)
+        history.record_event(
+            "settle_par",
+            {"repo": str(repo_root), "ref": args.proposal_id, "action": "reject", "auto": False},
+        )
         print(f"{args.proposal_id}: staged proposal discarded")
         return 0
 
@@ -178,6 +199,10 @@ def cmd_settle_par(args) -> int:
     import shutil
 
     shutil.rmtree(staging)
+    history.record_event(
+        "settle_par",
+        {"repo": str(repo_root), "ref": args.proposal_id, "action": "accept", "auto": False, "written": written},
+    )
     print(f"{args.proposal_id}: accepted — {len(written)} file(s) written:")
     for rel in written:
         print(f"  {rel}")
@@ -205,50 +230,63 @@ def cmd_init(args) -> int:
     return proc.returncode
 
 
-def cmd_settle(args) -> int:
-    repo_root = _resolve_repo(args.repo)
-    if repo_root is None:
-        return 2
-
+def settle_run(repo_root: Path, run_ref: str, *, reject: bool, auto: bool = False) -> tuple[int, list[str]]:
+    """Core settlement for a retained run output. Returns (exit_code, written_paths)."""
     with sp.open(repo_root) as workspace:
         outputs = [
-            o for o in workspace.runs.outputs(run_ref=args.run_ref) if o.output_name == "workspace"
+            o for o in workspace.runs.outputs(run_ref=run_ref) if o.output_name == "workspace"
         ]
         if not outputs:
-            print(f"error: no workspace output found for {args.run_ref}", file=sys.stderr)
-            return 2
+            print(f"error: no workspace output found for {run_ref}", file=sys.stderr)
+            return 2, []
         output = outputs[0]
 
         state = output.state
         if state != "unconsumed":
             print(
-                f"error: {args.run_ref} output is already consumed (state={state!r}); "
+                f"error: {run_ref} output is already consumed (state={state!r}); "
                 "settlement verbs are consume-once",
                 file=sys.stderr,
             )
-            return 2
+            return 2, []
 
-        if args.reject:
+        if reject:
             output.discard()
-            print(f"{args.run_ref}: proposal discarded")
-            return 0
+            history.record_event(
+                "settle", {"repo": str(repo_root), "ref": run_ref, "action": "reject", "auto": auto}
+            )
+            print(f"{run_ref}: proposal discarded")
+            return 0, []
 
         # Snapshot the changeset BEFORE selecting (settlement consumes the output).
         entries = read_changeset_entries(output.changeset())
         if not entries:
-            print(f"error: {args.run_ref} has an empty changeset; nothing to accept", file=sys.stderr)
-            return 2
+            print(f"error: {run_ref} has an empty changeset; nothing to accept", file=sys.stderr)
+            return 2, []
         output.select()
 
     # Mirror files only after the workspace closes: while it is active, vcs-core
     # blocks unscoped mutations of workspace files (UnscopedMutationError).
     written = materialize_into(repo_root, entries)
+    history.record_event(
+        "settle",
+        {"repo": str(repo_root), "ref": run_ref, "action": "accept", "auto": auto, "written": written},
+    )
 
-    print(f"{args.run_ref}: accepted — world advanced, {len(written)} file(s) written:")
+    print(f"{run_ref}: accepted — world advanced, {len(written)} file(s) written:")
     for rel in written:
         print(f"  {rel}")
-    print("review and commit them with git.")
-    return 0
+    return 0, written
+
+
+def cmd_settle(args) -> int:
+    repo_root = _resolve_repo(args.repo)
+    if repo_root is None:
+        return 2
+    code, written = settle_run(repo_root, args.run_ref, reject=args.reject)
+    if code == 0 and written:
+        print("review and commit them with git.")
+    return code
 
 
 def main() -> int:
