@@ -17,25 +17,27 @@ Requirements per machine: Python 3.11+, `git`, the `claude` CLI installed and au
 (subscription or API key), and a jail-capable OS (macOS Seatbelt / Linux with Landlock,
 kernel 5.13+). Windows: use WSL.
 
-One-time per target repo (also gitignores the Shepherd state for you):
+One-time per target repo (gitignores the Shepherd state and saves the detected
+test command, so later `run`s need no flags):
 
 ```bash
-shepherd-dev init --repo ~/projects/my-repo
+cd ~/projects/my-repo && shepherd-dev init
 ```
 
 ## Use
 
 ```bash
-# develop one feature (worker + policy + test gate + retry + reviewer)
+# from inside the repo: --repo and --test-cmd are inferred
 # on an interactive terminal it then prompts: accept (a) / reject (r) / diff (d)
-shepherd-dev run "add CPF validation to signup" --repo ~/projects/my-repo --test-cmd "npm test"
+cd ~/projects/my-repo
+shepherd-dev run "add CPF validation to signup"
 
 # in a pipe/CI, or with --no-settle, the proposal stays retained; settle later:
-shepherd-dev settle <run-ref> --repo ~/projects/my-repo [--reject]
+shepherd-dev settle <run-ref> [--reject]
 
 # two coordinated parallel workers (conflict handoff + combined gate + review)
-shepherd-dev run2 "feature A" "feature B" --repo ~/projects/my-repo --test-cmd "npm test"
-shepherd-dev settle-par <proposal-id> --repo ~/projects/my-repo [--reject]
+shepherd-dev run2 "feature A" "feature B"
+shepherd-dev settle-par <proposal-id> [--reject]
 ```
 
 Useful flags: `--mode tests` (only write tests), `--no-review`, `--provider static` (offline

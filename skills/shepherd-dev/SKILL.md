@@ -16,14 +16,19 @@ user's files until they accept.
 1. `command -v shepherd-dev` — if missing, run the plugin bootstrap:
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"` and show the user its output.
 2. Target repo must be Shepherd-initialized once: `.vcscore/` exists, else run
-   `shepherd-dev init --repo <path>` (it also gitignores the Shepherd state).
-3. A test command must exist for the gate (`npm test`, `pytest -q`, `mix test`...).
-   If the repo has no runnable suite, tell the user the gate needs one — do not fake it.
+   `shepherd-dev init --repo <path>` (it also gitignores the state AND saves the
+   detected test command to `.shepherd-dev.json`).
+3. A test command must resolve for the gate. Precedence: `--test-cmd` > saved
+   `.shepherd-dev.json` > auto-detection (Node/Python/Elixir/Rust/Go). If none
+   resolves, tell the user the gate needs one — do not fake it.
 
 ## Develop one feature
 
 ```bash
-shepherd-dev run "<feature in natural language>" --repo <path> --test-cmd "<suite cmd>"
+# --repo defaults to the enclosing workspace; --test-cmd to the saved/detected one
+shepherd-dev run "<feature in natural language>"
+# override either when needed:
+shepherd-dev run "<feature>" --repo <path> --test-cmd "<suite cmd>"
 ```
 
 Options: `--mode tests` (only write/update tests), `--no-review`, `--max-attempts N`
@@ -33,7 +38,7 @@ Options: `--mode tests` (only write/update tests), `--no-review`, `--max-attempt
 ## Two coordinated parallel workers
 
 ```bash
-shepherd-dev run2 "<feature A>" "<feature B>" --repo <path> --test-cmd "<suite cmd>"
+shepherd-dev run2 "<feature A>" "<feature B>"
 ```
 
 Leader/follower conflict handoff, combined test gate with repair rounds

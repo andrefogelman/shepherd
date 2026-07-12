@@ -31,24 +31,33 @@ Linux com Landlock (kernel ≥ 5.13). Windows: WSL.
 ## Preparar um repo (uma vez)
 
 ```bash
-shepherd-dev init --repo ~/projetos/meu-app
+cd ~/projetos/meu-app
+shepherd-dev init
 ```
 
-Um comando só: inicializa o workspace do Shepherd **e** adiciona ao `.gitignore`
-o estado local (`.vcscore/`, `REVIEW.json`, `.shepherd-proposals/`), preservando
-o que já estava lá e sem duplicar. Use `--no-gitignore` para pular essa parte.
+Um comando só: inicializa o workspace do Shepherd, adiciona ao `.gitignore` o
+estado local (`.vcscore/`, `REVIEW.json`, `.shepherd-proposals/`) sem duplicar,
+**e detecta o comando de teste** salvando em `.shepherd-dev.json` (metadata do
+projeto — pode commitar). Assim os `run` seguintes não precisam de `--test-cmd`.
 
-O portão precisa de uma suíte de testes que rode (`npm test`, `pytest -q`,
-`mix test`). Sem testes, não há portão — a ferramenta avisa em vez de fingir.
+Se seu stack não for auto-detectado, informe uma vez: `shepherd-dev init
+--test-cmd "…"`. Sem nenhum comando de teste não há portão — a ferramenta avisa
+em vez de fingir. `--no-gitignore` pula a parte do gitignore.
 
 ## Ciclo básico
 
-Um comando só. Ao terminar, num terminal interativo ele **pergunta** o que fazer:
+De dentro do repo, o comando do dia a dia é só a feature. O `--repo` assume o
+repo que envolve o diretório atual; o `--test-cmd` vem do que o `init` salvou (ou
+é auto-detectado). Ao terminar, num terminal interativo ele **pergunta** o que fazer:
 
 ```bash
-shepherd-dev run "adicionar validação de CPF no cadastro" \
-  --repo ~/projetos/meu-app --test-cmd "npm test"
+cd ~/projetos/meu-app
+shepherd-dev run "adicionar validação de CPF no cadastro"
 ```
+
+Precedência do portão: `--test-cmd` explícito → o salvo em `.shepherd-dev.json`
+→ auto-detecção pelo stack (Node/Python/Elixir/Rust/Go) → erro pedindo. Override
+quando quiser: `--test-cmd "…"`, `--repo <path>`.
 
 ```
 ... relatório: tentativas, portão, veredito do revisor ...

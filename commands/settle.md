@@ -1,6 +1,6 @@
 ---
 description: Accept or reject a retained shepherd-dev proposal (writes files only on accept)
-argument-hint: <run-ref | proposal-id> --repo <path> [--reject]
+argument-hint: <run-ref | proposal-id> [--repo <path>] [--reject]
 ---
 
 The user is settling a shepherd-dev proposal: $ARGUMENTS.

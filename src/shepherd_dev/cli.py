@@ -22,25 +22,55 @@ from pathlib import Path
 
 import shepherd as sp
 
-from . import history
+from . import config, history
 from .parallel import PROPOSALS_DIR, develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
 from .tasks import implement, review, write_tests
 
 
-def _resolve_repo(raw: str) -> Path | None:
+def _resolve_repo(raw: str | None) -> Path | None:
+    """Resolve the target repo. raw=None (or '.') means: find the enclosing
+    Shepherd workspace by walking up from the cwd, like git finds .git."""
+    if raw in (None, "."):
+        found = config.find_repo_root()
+        if found is None:
+            print(
+                "error: not inside a Shepherd workspace. cd into an initialized repo, "
+                "pass --repo <path>, or run `shepherd-dev init` first.",
+                file=sys.stderr,
+            )
+            return None
+        return found
     repo_root = Path(raw).expanduser().resolve()
     if not repo_root.is_dir():
         print(f"error: repo not found: {repo_root}", file=sys.stderr)
         return None
     if not (repo_root / ".vcscore").exists():
         print(
-            f"error: {repo_root} is not a Shepherd workspace. Run once inside it: shepherd init",
+            f"error: {repo_root} is not a Shepherd workspace. Run once inside it: shepherd-dev init",
             file=sys.stderr,
         )
         return None
     return repo_root
+
+
+def _resolve_test_cmd(repo_root: Path, explicit: str | None) -> str | None:
+    """Precedence: --test-cmd > saved config > auto-detection. Prints the source
+    so it's transparent which command the gate will use; None on failure."""
+    cmd, source = config.resolve_test_cmd(repo_root, explicit)
+    if cmd is None:
+        print(
+            "error: no test command. Pass --test-cmd \"…\", or save one with "
+            "`shepherd-dev init --test-cmd \"…\"`. The gate needs a runnable suite.",
+            file=sys.stderr,
+        )
+        return None
+    if source == "detected":
+        print(f"test gate (auto-detected): {cmd}")
+    elif source == "config":
+        print(f"test gate (from .shepherd-dev.json): {cmd}")
+    return cmd
 
 
 def _refresh_substrate(repo_root: Path) -> str | None:
@@ -305,6 +335,10 @@ def cmd_run(args) -> int:
         print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
         return 2
 
+    args.test_cmd = _resolve_test_cmd(repo_root, args.test_cmd)
+    if args.test_cmd is None:
+        return 2
+
     error = _refresh_substrate(repo_root)
     if error:
         print(f"error: {error}", file=sys.stderr)
@@ -389,6 +423,10 @@ def cmd_run2(args) -> int:
         return 2
     if args.auto_settle and args.provider == "static":
         print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
+        return 2
+
+    args.test_cmd = _resolve_test_cmd(repo_root, args.test_cmd)
+    if args.test_cmd is None:
         return 2
 
     if args.provider == "claude":
@@ -531,7 +569,7 @@ def cmd_init(args) -> int:
     """
     import subprocess
 
-    repo_root = Path(args.repo).expanduser().resolve()
+    repo_root = Path(args.repo or ".").expanduser().resolve()
     if not repo_root.is_dir():
         print(f"error: repo not found: {repo_root}", file=sys.stderr)
         return 2
@@ -548,6 +586,16 @@ def cmd_init(args) -> int:
             print(f"gitignored: {'  '.join(added)}")
         else:
             print(".gitignore already covers the shepherd-dev state")
+
+    # Remember the test command so `run` needs no --test-cmd. Explicit flag wins;
+    # otherwise try to auto-detect and save what we found.
+    test_cmd = args.test_cmd or config.detect_test_cmd(repo_root)
+    if test_cmd:
+        config.save_config(repo_root, {"test_cmd": test_cmd})
+        how = "saved" if args.test_cmd else "detected & saved"
+        print(f"test gate ({how}): {test_cmd}  →  {config.CONFIG_NAME}")
+    else:
+        print("no test command detected — pass --test-cmd on run, or re-init with --test-cmd \"…\"")
     return 0
 
 
@@ -627,8 +675,8 @@ def main() -> int:
 
     p_run = sub.add_parser("run", help="develop a feature under supervision")
     p_run.add_argument("feature", help="feature request in natural language")
-    p_run.add_argument("--repo", required=True, help="path to the target repo (shepherd-initialized)")
-    p_run.add_argument("--test-cmd", required=True, help='test gate command, e.g. "pytest -q"')
+    p_run.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
+    p_run.add_argument("--test-cmd", default=None, help='test gate; default: saved config, else auto-detected')
     p_run.add_argument("--provider", default="claude", choices=["claude", "static"])
     p_run.add_argument(
         "--mode",
@@ -678,8 +726,8 @@ def main() -> int:
     p_run2 = sub.add_parser("run2", help="develop two features with parallel coordinated workers")
     p_run2.add_argument("feature_a", help="first feature (leader on conflicts)")
     p_run2.add_argument("feature_b", help="second feature (reworks on conflicts)")
-    p_run2.add_argument("--repo", required=True, help="path to the target repo (shepherd-initialized)")
-    p_run2.add_argument("--test-cmd", required=True, help="combined test gate command")
+    p_run2.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
+    p_run2.add_argument("--test-cmd", default=None, help="combined gate; default: saved config, else auto-detected")
     p_run2.add_argument("--provider", default="claude", choices=["claude", "static"])
     p_run2.add_argument("--no-review", action="store_true")
     p_run2.add_argument(
@@ -702,18 +750,19 @@ def main() -> int:
 
     p_spar = sub.add_parser("settle-par", help="accept or reject a staged parallel proposal")
     p_spar.add_argument("proposal_id", help="staged proposal id (see run2 output)")
-    p_spar.add_argument("--repo", required=True, help="path to the target repo")
+    p_spar.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
     p_spar.add_argument("--reject", action="store_true", help="discard instead of accept")
     p_spar.set_defaults(func=cmd_settle_par)
 
     p_settle = sub.add_parser("settle", help="accept or reject a retained proposal")
     p_settle.add_argument("run_ref", help="full run ref, e.g. run-fc83a2df3eaa")
-    p_settle.add_argument("--repo", required=True, help="path to the target repo")
+    p_settle.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
     p_settle.add_argument("--reject", action="store_true", help="discard instead of accept")
     p_settle.set_defaults(func=cmd_settle)
 
     p_init = sub.add_parser("init", help="initialize a repo as a Shepherd workspace + gitignore its state (one-time)")
     p_init.add_argument("--repo", default=".", help="path to the target repo (default: cwd)")
+    p_init.add_argument("--test-cmd", default=None, help="save this gate command (else auto-detect and save)")
     p_init.add_argument("--no-gitignore", action="store_true", help="do not touch .gitignore")
     p_init.set_defaults(func=cmd_init)
 

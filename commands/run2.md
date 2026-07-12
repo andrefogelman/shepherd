@@ -1,6 +1,6 @@
 ---
 description: Develop two features with coordinated parallel workers (conflict handoff, combined gate + review)
-argument-hint: "<feature A>" "<feature B>" --repo <path> --test-cmd "<suite cmd>"
+argument-hint: "<feature A>" "<feature B>" [--repo <path>] [--test-cmd "<suite cmd>"]
 ---
 
 Use the shepherd-dev skill (invoke it first if not loaded) to run TWO coordinated
