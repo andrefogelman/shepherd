@@ -60,3 +60,6 @@ that installs the CLI if missing.
 See `docs/2026-07-11-dev-layer-design.md` — including the empirically-verified constraints of
 shepherd-ai 0.3.0 (stateless per-invocation substrate, custody-based reviewer isolation,
 worktree as source of truth) in the F2/F3 addenda.
+
+Based on the article https://arxiv.org/html/2605.10913
+Shepherd: Enabling Programmable Meta-Agents via Reversible Agentic Execution Traces
