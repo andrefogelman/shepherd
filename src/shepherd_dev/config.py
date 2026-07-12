@@ -8,6 +8,7 @@ metadata, not local state). Only `test_cmd` is stored today.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 CONFIG_NAME = ".shepherd-dev.json"
@@ -236,3 +237,26 @@ def _detected_gate_is_dead(repo_root: Path, cmd: str) -> bool:
     if first in ("npm", "yarn", "pnpm", "bun"):
         return not (repo_root / "node_modules").is_dir()
     return False
+
+
+GLOBAL_CONFIG = Path(
+    os.environ.get("SHEPHERD_DEV_CONFIG") or Path.home() / ".shepherd-dev" / "config.json"
+)
+
+
+def load_global_config() -> dict:
+    try:
+        data = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def auto_optimize_config(repo_root: Path) -> dict | None:
+    """auto_optimize settings; per-repo .shepherd-dev.json wins over the global
+    ~/.shepherd-dev/config.json. None = feature off (the default)."""
+    for source in (load_config(repo_root), load_global_config()):
+        cfg = source.get("auto_optimize")
+        if isinstance(cfg, dict):
+            return cfg
+    return None

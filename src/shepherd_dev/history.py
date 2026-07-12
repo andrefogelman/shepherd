@@ -162,3 +162,20 @@ def _gbrain_capture(kind: str, event: dict) -> None:
                 os.unlink(tmp)
             except Exception:
                 pass
+
+
+def failures_since_last_optimize(events: list[dict] | None = None) -> int:
+    """Count claude-provider development failures recorded after the most
+    recent 'optimize' event — the trigger counter for auto-optimize. Prompt
+    edits are global, so failures across all repos feed the same counter."""
+    if events is None:
+        events = load_events()
+    count = 0
+    for event in events:
+        if event.get("kind") == "optimize":
+            count = 0
+            continue
+        if event.get("kind") in ("run", "run2", "best_of") and event.get("succeeded") is False:
+            if event.get("provider", "claude") == "claude":
+                count += 1
+    return count

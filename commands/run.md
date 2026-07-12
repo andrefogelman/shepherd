@@ -26,3 +26,4 @@ Flags for `run`:
 - `--max-attempts N` — attempts before giving up (default 3).
 - `--worker-budget S` — wall-clock seconds per attempt (default 900); raise for large features.
 - `--provider static` — offline dry-run of the machinery, no LLM, no cost.
+- `--optimize-after` — run `optimize` after this run (dry-run; `--optimize-apply` persists a passing edit).

@@ -154,6 +154,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--worker-budget` | run · run2 | Seconds per attempt (default 900). |
 | `--max-repairs` | run2 | Repair rounds on the combined gate (default 2). |
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
+| `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
 
 ## Best-of-N
 
@@ -195,6 +196,22 @@ shepherd-dev optimize --apply    # persists the edit if it passes
 
 Costs real tokens (no cheap replay in the public lane) — small sets by
 default (3/3). Becomes useful once the history has accumulated real runs.
+
+**Automatic (two layers):**
+
+- **Per-run flag**: `shepherd-dev run … --optimize-after` triggers `optimize`
+  when the run finishes (dry-run; add `--optimize-apply` to persist).
+- **Config default with a threshold trigger** — in `.shepherd-dev.json`
+  (per repo) or `~/.shepherd-dev/config.json` (global):
+
+  ```json
+  { "auto_optimize": { "every_failures": 5, "apply": false } }
+  ```
+
+  `run` only fires optimize once N gate failures accumulate since the last
+  optimize (counter in the history; any optimize — manual or automatic —
+  resets it). Cost stays controlled: nothing runs without new material. Repo
+  config wins over global; with no config, the automatic layer is off.
 
 ## Where things live
 

@@ -354,10 +354,72 @@ def _wants_interactive(args) -> bool:
     return getattr(args, "interactive", None) is not False  # default on for a TTY
 
 
+def _record_optimize_event(report, *, auto: bool, applied: bool) -> None:
+    history.record_event(
+        "optimize",
+        {
+            "auto": auto,
+            "accepted": report.accepted,
+            "applied": applied and report.accepted,
+            "candidate_key": (report.candidate.key if report.candidate else None),
+            "fix": [report.fix_before, report.fix_after],
+            "guard": [report.guard_before, report.guard_after],
+            "reason": report.reason,
+        },
+    )
+
+
+def _maybe_optimize_after(args, repo_root: Path) -> None:
+    """Post-run optimize trigger (both layers, user-approved design):
+
+    - --optimize-after forces one optimize pass after this run
+      (--optimize-apply persists a passing edit);
+    - otherwise the auto_optimize config ({"every_failures": N, "apply": bool}
+      in .shepherd-dev.json or ~/.shepherd-dev/config.json) fires only once N
+      claude-run failures accumulate since the last optimize — cost stays
+      controlled because optimize replays real cases (~7 Claude sessions).
+    Never raises: a failed optimize must not change the run's exit code.
+    """
+    if args.provider == "static":
+        return
+    forced = getattr(args, "optimize_after", False)
+    apply_edit = getattr(args, "optimize_apply", False)
+    if not forced:
+        cfg = config.auto_optimize_config(repo_root)
+        if not cfg:
+            return
+        try:
+            every = int(cfg.get("every_failures", 5))
+        except (TypeError, ValueError):
+            every = 5
+        pending = history.failures_since_last_optimize()
+        if pending < max(every, 1):
+            return
+        apply_edit = bool(cfg.get("apply", False))
+        print(f"\nauto-optimize: {pending} failure(s) accumulated since the last optimize — running it now")
+    else:
+        print("\noptimize-after: running optimize as requested")
+    try:
+        from .optimize import optimize
+
+        report = optimize(apply=apply_edit, worker_budget=getattr(args, "worker_budget", 900))
+        print(report.summary())
+        _record_optimize_event(report, auto=not forced, applied=apply_edit)
+    except Exception as exc:
+        print(f"optimize failed (run result unaffected): {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def cmd_run(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
         return 2
+    try:
+        return _cmd_run_inner(args, repo_root)
+    finally:
+        _maybe_optimize_after(args, repo_root)
+
+
+def _cmd_run_inner(args, repo_root: Path) -> int:
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -459,6 +521,13 @@ def cmd_run2(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
         return 2
+    try:
+        return _cmd_run2_inner(args, repo_root)
+    finally:
+        _maybe_optimize_after(args, repo_root)
+
+
+def _cmd_run2_inner(args, repo_root: Path) -> int:
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -726,6 +795,7 @@ def cmd_optimize(args) -> int:
         worker_budget=args.worker_budget, apply=args.apply,
     )
     print(report.summary())
+    _record_optimize_event(report, auto=False, applied=args.apply)
     return 0
 
 
@@ -775,6 +845,16 @@ def main() -> int:
         help="skip the pre-computed context pack (worker explores the repo itself)",
     )
     p_run.add_argument(
+        "--optimize-after",
+        action="store_true",
+        help="run `optimize` after this run finishes (dry-run unless --optimize-apply)",
+    )
+    p_run.add_argument(
+        "--optimize-apply",
+        action="store_true",
+        help="with --optimize-after (or auto_optimize): persist a passing prompt edit",
+    )
+    p_run.add_argument(
         "--best-of",
         type=int,
         default=1,
@@ -819,6 +899,16 @@ def main() -> int:
         "--no-context-pack",
         action="store_true",
         help="skip the pre-computed context pack (workers explore the repo themselves)",
+    )
+    p_run2.add_argument(
+        "--optimize-after",
+        action="store_true",
+        help="run `optimize` after this run finishes (dry-run unless --optimize-apply)",
+    )
+    p_run2.add_argument(
+        "--optimize-apply",
+        action="store_true",
+        help="with --optimize-after (or auto_optimize): persist a passing prompt edit",
     )
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")

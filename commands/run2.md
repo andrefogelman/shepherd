@@ -24,3 +24,4 @@ Flags for `run2`:
 - `--allowed-prefix <p>` — confine changes to a path prefix (repeatable).
 - `--worker-budget S` — wall-clock seconds per attempt (default 900).
 - `--provider static` — offline dry-run, no LLM.
+- `--optimize-after` — run `optimize` after this run (dry-run; `--optimize-apply` persists a passing edit).

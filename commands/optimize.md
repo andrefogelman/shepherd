@@ -19,3 +19,6 @@ Flags:
 - `--fix-n N` — past failures to replay, must improve (default 3).
 - `--guard-n N` — past passes to replay, must not regress (default 3).
 - `--model M` — meta-optimizer model (default `claude-opus-4-8`).
+
+Automatic triggering also exists: `run --optimize-after`, or `auto_optimize`
+(`{"every_failures": N, "apply": bool}`) in `.shepherd-dev.json` / `~/.shepherd-dev/config.json`.
