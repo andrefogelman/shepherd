@@ -396,12 +396,37 @@ def cmd_settle_par(args) -> int:
     return code
 
 
+GITIGNORE_ENTRIES = (".vcscore/", "REVIEW.json", ".shepherd-proposals/")
+
+
+def _ensure_gitignore(repo_root: Path) -> list[str]:
+    """Append the Shepherd state entries to the repo's .gitignore, once.
+
+    Idempotent (skips lines already present). Returns the entries it added.
+    """
+    path = repo_root / ".gitignore"
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    present = {ln.strip() for ln in existing_lines}
+    missing = [e for e in GITIGNORE_ENTRIES if e not in present]
+    if not missing:
+        return []
+    block: list[str] = []
+    if existing_lines and existing_lines[-1].strip():
+        block.append("")
+    block.append("# shepherd-dev local state")
+    block.extend(missing)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(("\n".join(block)) + "\n")
+    return missing
+
+
 def cmd_init(args) -> int:
-    """Initialize PATH as a Shepherd workspace using the bundled shepherd CLI.
+    """Initialize a repo as a Shepherd workspace AND gitignore its local state.
 
     The `shepherd` console script lives inside this tool's venv (dependency
     shepherd-ai) but is not exposed on the user's PATH by uv/pipx — only
-    shepherd-dev is. This subcommand bridges that.
+    shepherd-dev is. This subcommand bridges that, then wires .gitignore so the
+    user does not have to.
     """
     import subprocess
 
@@ -411,9 +436,18 @@ def cmd_init(args) -> int:
         return 2
     shepherd_bin = Path(sys.executable).parent / "shepherd"
     proc = subprocess.run([str(shepherd_bin), "init"], cwd=repo_root)
-    if proc.returncode == 0:
-        print("remember to gitignore: .vcscore/  REVIEW.json  .shepherd-proposals/")
-    return proc.returncode
+    if proc.returncode != 0:
+        return proc.returncode
+
+    if args.no_gitignore:
+        print("skipped .gitignore (--no-gitignore); add: " + "  ".join(GITIGNORE_ENTRIES))
+    else:
+        added = _ensure_gitignore(repo_root)
+        if added:
+            print(f"gitignored: {'  '.join(added)}")
+        else:
+            print(".gitignore already covers the shepherd-dev state")
+    return 0
 
 
 def settle_run(repo_root: Path, run_ref: str, *, reject: bool, auto: bool = False) -> tuple[int, list[str]]:
@@ -567,8 +601,9 @@ def main() -> int:
     p_settle.add_argument("--reject", action="store_true", help="discard instead of accept")
     p_settle.set_defaults(func=cmd_settle)
 
-    p_init = sub.add_parser("init", help="initialize a repo as a Shepherd workspace (one-time)")
+    p_init = sub.add_parser("init", help="initialize a repo as a Shepherd workspace + gitignore its state (one-time)")
     p_init.add_argument("--repo", default=".", help="path to the target repo (default: cwd)")
+    p_init.add_argument("--no-gitignore", action="store_true", help="do not touch .gitignore")
     p_init.set_defaults(func=cmd_init)
 
     p_opt = sub.add_parser("optimize", help="CRO-lite: mine run history, propose a prompt edit, validate by replay")

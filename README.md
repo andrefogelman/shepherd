@@ -17,11 +17,10 @@ Requirements per machine: Python 3.11+, `git`, the `claude` CLI installed and au
 (subscription or API key), and a jail-capable OS (macOS Seatbelt / Linux with Landlock,
 kernel 5.13+). Windows: use WSL.
 
-One-time per target repo:
+One-time per target repo (also gitignores the Shepherd state for you):
 
 ```bash
 shepherd-dev init --repo ~/projects/my-repo
-# add to .gitignore: .vcscore/  REVIEW.json  .shepherd-proposals/
 ```
 
 ## Use

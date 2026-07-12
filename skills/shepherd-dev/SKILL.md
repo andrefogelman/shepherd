@@ -16,8 +16,7 @@ user's files until they accept.
 1. `command -v shepherd-dev` — if missing, run the plugin bootstrap:
    `bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"` and show the user its output.
 2. Target repo must be Shepherd-initialized once: `.vcscore/` exists, else run
-   `shepherd-dev init --repo <path>` (and ensure `.gitignore` has `.vcscore/`, `REVIEW.json`,
-   `.shepherd-proposals/`).
+   `shepherd-dev init --repo <path>` (it also gitignores the Shepherd state).
 3. A test command must exist for the gate (`npm test`, `pytest -q`, `mix test`...).
    If the repo has no runnable suite, tell the user the gate needs one — do not fake it.
 

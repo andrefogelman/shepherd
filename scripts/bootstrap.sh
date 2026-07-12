@@ -49,5 +49,4 @@ case "$(uname -s)" in
 esac
 
 say ""
-say "Per-repo setup (once): shepherd-dev init --repo <repo>"
-say "  and gitignore: .vcscore/  REVIEW.json  .shepherd-proposals/"
+say "Per-repo setup (once): shepherd-dev init --repo <repo>   (also gitignores the state)"

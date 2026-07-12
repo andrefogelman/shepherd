@@ -34,13 +34,9 @@ Linux com Landlock (kernel ≥ 5.13). Windows: WSL.
 shepherd-dev init --repo ~/projetos/meu-app
 ```
 
-Gitignore do repo alvo:
-
-```
-.vcscore/
-REVIEW.json
-.shepherd-proposals/
-```
+Um comando só: inicializa o workspace do Shepherd **e** adiciona ao `.gitignore`
+o estado local (`.vcscore/`, `REVIEW.json`, `.shepherd-proposals/`), preservando
+o que já estava lá e sem duplicar. Use `--no-gitignore` para pular essa parte.
 
 O portão precisa de uma suíte de testes que rode (`npm test`, `pytest -q`,
 `mix test`). Sem testes, não há portão — a ferramenta avisa em vez de fingir.
