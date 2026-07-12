@@ -140,6 +140,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--best-of K` | run | K candidatos paralelos (2–4). |
 | `--auto-settle` | run · run2 | Aceita sozinho se portão passou e revisor aprovou; comita em branch isolada. |
 | `--no-settle` | run · run2 | Não pergunta no fim; deixa a proposta retida. |
+| `--no-context-pack` | run · run2 | Desliga o context pack (worker explora o repo sozinho — mais caro). |
 | `--no-review` | run · run2 | Pula o revisor. Incompatível com `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confina mudanças a um prefixo (repetível). |
 | `--max-attempts` | run · run2 | Tentativas por worker (padrão 3). |
@@ -197,7 +198,69 @@ padrão (3/3). Fica útil depois que o histórico acumular execuções reais.
 | `<repo>/.shepherd-proposals/` | Propostas staged de `run2` / `--best-of`. |
 
 Envs de redirecionamento: `SHEPHERD_DEV_HISTORY_DIR`,
-`SHEPHERD_DEV_PROMPTS_OVERRIDES`.
+`SHEPHERD_DEV_PROMPTS_OVERRIDES`, `SHEPHERD_DEV_MEMORY_DIR`.
+
+## Consumo de tokens
+
+### Quem consome
+
+**Só as chamadas ao Claude.** A orquestração do shepherd (Python: fork, gate,
+policy, ranking, settlement, context pack, memória) é **zero token** — roda
+local. Todo o gasto está nas sessões `claude -p` do worker, do reviewer e do
+otimizador.
+
+Ponto importante: o provider é o **`claude` CLI da sua assinatura Max**, não a
+API paga por token. Então o "custo" é **consumo da sua cota Max**, não dólares.
+Cada worker/reviewer é uma sessão Claude Code headless (agêntica — lê arquivos,
+edita, itera) que conta contra a quota como uma sessão de dev normal sua.
+
+### Por comando (em "sessões Claude")
+
+| Comando | Worker | Reviewer | Total típico |
+|---|---|---|---|
+| `run` (1 feature) | 1 por tentativa (até `--max-attempts`, def. 3) | 1 (só se passar no gate) | 1–3 workers + 1 review |
+| `run2` | 2 paralelos + handoff + reparos (`--max-repairs`) | 1 (do diff combinado) | ~2–5 + 1 |
+| `run --best-of K` | K workers | até K (um por candidato que passa) | K + até K |
+| `optimize` | replay: 1 por caso (fix-n + guard-n, def. 3+3 = 6) | — | 6 workers + 1 meta (Opus) |
+| qualquer `--provider static` | **0** | 0 | **grátis** (offline) |
+
+### Context pack + memória: a otimização nativa
+
+Cada `run`/`run2`/`best-of` monta localmente (custo zero, ~2s) um **context
+pack**: árvore do repo + arquivos relevantes à feature (inteiros quando
+pequenos, esqueletos de assinaturas quando grandes, orçamento de 25k chars) +
+a **memória do repo** (fatos confirmados de execuções anteriores: gotchas de
+gate corrigidos, notas de reviewer aprovado). O pack é computado **uma vez por
+comando** e reusado em todas as tentativas/candidatos/reviewer — o análogo
+honesto, nesta lane, do reuso de prefixo (KV-cache) do paper.
+
+O worker deixa de explorar o repo às cegas — a maior fonte de gasto. **A/B
+medido no a private repo (repo real, mesma feature, mesmas condições): 448.7s sem
+pack → 128.6s com pack (−71%, 3.5× mais rápido)** — e com localização melhor
+(o worker com pack seguiu o padrão do módulo existente; o sem pack inventou
+diretório errado). Duração é proxy direto de tokens num worker agêntico.
+Opt-out: `--no-context-pack`.
+
+### Multiplicadores
+
+- **Retries somam**: cada falha de gate re-roda o worker inteiro (com o mesmo
+  pack — o custo de montagem não se repete).
+- **Tamanho do repo/feature**: o worker é agêntico; feature ampla = mais tokens
+  por sessão. O pack corta a exploração, não a implementação.
+- **Dentro de cada sessão**, o claude CLI já aplica o prompt caching automático
+  da Anthropic. O que o paper faz além disso (replay byte-idêntico entre
+  sessões, ~95%) exige a lane baixa do framework + API por token — fora do
+  modelo de assinatura; o context pack é a resposta desta camada.
+
+### Como controlar
+
+- `--provider static` — ensaia a mecânica sem gastar nada.
+- `--no-review` — corta a sessão do reviewer.
+- `--max-attempts 1`, `--max-repairs 0` — sem retries.
+- `--allowed-prefix` — confina o worker (e foca o pack).
+- `--best-of` e `optimize` são os mais caros; use quando o ganho justifica.
+- Telemetria: cada tentativa grava `duration_s` no history
+  (`~/.shepherd-dev/history/`) — dá para auditar o gasto real por run.
 
 ## Limites & avisos
 

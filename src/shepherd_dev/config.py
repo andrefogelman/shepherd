@@ -143,11 +143,16 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
         # match `test-*.js`, which would sweep build artifacts (e.g. lucide
         # `test-tube*.js` icons under dist/) and fail the gate. node --test skips
         # node_modules on its own; scoping to *.test.* also avoids dist output.
+        # {NEW_TESTS} is replaced by the gate with the *.test.* files FROM THE
+        # PROPOSAL itself. Scoping to the proposal's own tests (not a repo-wide
+        # glob) keeps the native gate honest: a repo without a runnable suite
+        # may still contain tests written for other runners (e.g. a Vitest
+        # compat.test.ts) that crash node --test with ERR_MODULE_NOT_FOUND.
         if ts and _node_supports_strip_types():
-            cmd = "node --test --experimental-strip-types '**/*.test.ts'"
+            cmd = "node --test --experimental-strip-types {NEW_TESTS}"
             files = "*.test.ts (TypeScript)"
         else:
-            cmd = "node --test '**/*.test.js' '**/*.test.mjs'"
+            cmd = "node --test {NEW_TESTS}"
             files = "*.test.js / *.test.mjs (plain JavaScript, not TypeScript)"
         hint = (
             "Also write tests for this feature using Node's BUILT-IN test runner "
@@ -158,11 +163,12 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
         )
         return cmd, hint
     if lang == "python":
-        cmd = "python3 -m unittest discover -p '*_test.py'"
+        cmd = "python3 -m unittest {NEW_TESTS}"
         hint = (
             "Also write tests for this feature using Python's built-in unittest, in "
-            f"files named *_test.py, runnable with `{cmd}`. Import only the standard "
-            "library and the feature's own modules — no third-party packages."
+            "files named *_test.py (the gate runs exactly the test files you add). "
+            "Import only the standard library and the feature's own modules — no "
+            "third-party packages."
         )
         return cmd, hint
     if lang == "elixir":

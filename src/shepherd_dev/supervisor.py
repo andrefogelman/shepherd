@@ -9,6 +9,7 @@ stays retained; settlement (select/apply/discard) is always a human decision.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -268,8 +269,34 @@ def run_review(
     )
 
 
+_TEST_FILE_RE = re.compile(r"(\.test\.(ts|tsx|js|jsx|mjs)|_test\.py|_test\.exs)$")
+
+
+def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
+    """Substitute {NEW_TESTS} with the proposal's own test files (native gate).
+
+    Returns None when the placeholder is present but the proposal added no
+    tests — the gate must then fail loudly instead of running nothing."""
+    if "{NEW_TESTS}" not in test_cmd:
+        return test_cmd
+    import shlex
+
+    new_tests = sorted(rel for rel in entries if _TEST_FILE_RE.search(rel))
+    if not new_tests:
+        return None
+    return test_cmd.replace("{NEW_TESTS}", " ".join(shlex.quote(t) for t in new_tests))
+
+
 def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int) -> GateResult:
     """Run the repo's test suite against a materialized copy of the proposal."""
+    resolved = _resolve_gate_cmd(test_cmd, entries)
+    if resolved is None:
+        return GateResult(
+            False, 1,
+            "native gate: the proposal contains no test files (*.test.* / *_test.*) — "
+            "write tests for the feature; the gate runs exactly the tests you add.",
+        )
+    test_cmd = resolved
     with tempfile.TemporaryDirectory(prefix="shepherd-gate-") as tmp:
         staged = Path(tmp) / "staged"
         try:
