@@ -55,9 +55,13 @@ def detect_test_cmd(repo_root: Path) -> str | None:
             )
             return f"{mgr} test" if mgr != "npm" else "npm test"
 
-    # Elixir
+    # Elixir — only claim a real suite when tests already exist; otherwise fall
+    # through to the native gate (same "mix test", but carrying the ExUnit hint
+    # so the worker writes tests).
     if (repo_root / "mix.exs").is_file():
-        return "mix test"
+        if list(repo_root.glob("test/**/*_test.exs")):
+            return "mix test"
+        return None
 
     # Rust
     if (repo_root / "Cargo.toml").is_file():
@@ -157,7 +161,39 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
             "library and the feature's own modules — no third-party packages."
         )
         return cmd, hint
+    if lang == "elixir":
+        cmd = "mix test"
+        hint = (
+            "Also write ExUnit tests for this feature under test/, in *_test.exs "
+            "files using `use ExUnit.Case` (async: true when possible), runnable "
+            "with `mix test`. Test the feature's own modules directly; do NOT touch "
+            "Ecto/the database unless the repo's test setup already provides it."
+        )
+        return cmd, hint
     return None
+
+
+# ── ExUnit coverage guard (Elixir) ──────────────────────────────────────────
+# ExUnit is not zero-dependency like node --test: `mix test` needs the ExUnit
+# scaffold (test/test_helper.exs calling ExUnit.start()). `init` verifies it and
+# generates a minimal one if missing, so the gate has somewhere to run.
+
+def exunit_ready(repo_root: Path) -> bool:
+    helper = repo_root / "test" / "test_helper.exs"
+    try:
+        return helper.is_file() and "ExUnit.start" in helper.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+
+def ensure_exunit_scaffold(repo_root: Path) -> bool:
+    """Create test/test_helper.exs (ExUnit.start()) if absent. Returns True if
+    it generated the file, False if it was already present."""
+    if exunit_ready(repo_root):
+        return False
+    (repo_root / "test").mkdir(parents=True, exist_ok=True)
+    (repo_root / "test" / "test_helper.exs").write_text("ExUnit.start()\n", encoding="utf-8")
+    return True
 
 
 def resolve_test_cmd(repo_root: Path, explicit: str | None) -> tuple[str | None, str, str | None]:

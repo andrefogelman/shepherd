@@ -598,6 +598,19 @@ def cmd_init(args) -> int:
         else:
             print(".gitignore already covers the shepherd-dev state")
 
+    # Elixir coverage guard: mix test needs the ExUnit scaffold. If a mix project
+    # has no ExUnit set up, STOP and tell the user we are generating it, then do.
+    if (repo_root / "mix.exs").is_file() and not config.exunit_ready(repo_root):
+        print(
+            "\nElixir project without ExUnit configured (no test/test_helper.exs "
+            "calling ExUnit.start()).\nGenerating the minimal ExUnit scaffold so the "
+            "`mix test` gate has somewhere to run:"
+        )
+        config.ensure_exunit_scaffold(repo_root)
+        print("  created test/test_helper.exs  (ExUnit.start())")
+        print("  note: a Phoenix `mix test` may also need deps (mix deps.get) and a "
+              "test DB (mix ecto.create/migrate, MIX_ENV=test).")
+
     # Remember the test command so `run` needs no --test-cmd. Explicit flag is
     # saved as-is. Otherwise resolve the way `run` will: only persist a real,
     # runnable detected suite — a dead package-manager gate or a native fallback
