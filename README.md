@@ -9,8 +9,8 @@ everything for **human-only settlement** — nothing touches your files until yo
 ## Install (any machine)
 
 ```bash
-uv tool install git+ssh://git@github.com/andrefogelman/shepherd.git
-# or: pipx install git+ssh://git@github.com/andrefogelman/shepherd.git
+uv tool install git+https://github.com/andrefogelman/shepherd.git
+# or: pipx install git+https://github.com/andrefogelman/shepherd.git
 ```
 
 Requirements per machine: Python 3.11+, `git`, the `claude` CLI installed and authenticated

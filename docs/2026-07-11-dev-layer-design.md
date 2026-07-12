@@ -87,7 +87,7 @@ Saída: relatório da execução + instruções de settlement (`shepherd run sel
 1. Arcabouço (supervisor, gate, retry, settlement) smoke-testado com o provider
    `static` (determinístico, offline, custo zero) — valida a mecânica sem LLM.
 2. Smoke real: 1 feature pequena num repo de brinquedo com Claude, ponta a ponta.
-3. Só depois: uso num repo real do Andre.
+3. Só depois: uso num repo real.
 
 ## Fases de entrega
 

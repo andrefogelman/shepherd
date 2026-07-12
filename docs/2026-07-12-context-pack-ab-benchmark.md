@@ -10,10 +10,10 @@ code placement.
 
 | Parameter | Value |
 |---|---|
-| Repository | `a private repo` (private production repo; ~1,785 scannable text files after build-dir exclusion) |
+| Repository | a private production monorepo (~1,785 scannable text files after build-dir exclusion) |
 | Feature (identical in both arms) | "criar um utilitário puro de validação de CEP brasileiro (8 dígitos, aceita com ou sem hífen) no mesmo estilo do validador de CNPJ existente" — a pure Brazilian CEP validation utility (8 digits, with or without hyphen) in the same style as the existing CNPJ validator |
 | Provider | `claude` CLI (Max subscription), native jail (macOS Seatbelt) |
-| Machine | Mac (M4 Max), same machine and conditions for both arms |
+| Machine | Apple Silicon laptop, same machine and conditions for both arms |
 | Flags | `--no-review --max-attempts 1 --no-settle` (isolates a single worker session) |
 | Gate | native `node --test --experimental-strip-types` (repo has no runnable suite) |
 | Metric | worker wall-clock `duration_s` from the run history — the direct proxy for tokens in an agentic worker (usage is not exposed by the shepherd-ai 0.3.0 run record) |

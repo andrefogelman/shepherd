@@ -55,7 +55,7 @@ machine, the plugin's bootstrap installs it on first use.
 ## Install (per machine)
 
 ```bash
-uv tool install git+ssh://git@github.com/andrefogelman/shepherd.git
+uv tool install git+https://github.com/andrefogelman/shepherd.git
 # or, with Claude Code (brings the skill + /shepherd-dev:* commands):
 #   /plugin marketplace add andrefogelman/shepherd
 #   /plugin install shepherd-dev@shepherd
@@ -262,7 +262,7 @@ candidates / reviewer — the honest analogue, in this lane, of the paper's
 prefix reuse (KV-cache).
 
 The worker stops exploring the repo blindly — the biggest source of spend.
-**Measured A/B on a private repo (real repo, same feature, same conditions):
+**Measured A/B on a real production repo (same feature, same conditions):
 448.7s without pack → 128.6s with pack (−71%, 3.5× faster)** — and with
 better placement (the packed worker followed the existing module's pattern;
 the unpacked one invented the wrong directory). Duration is a direct proxy

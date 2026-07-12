@@ -1,6 +1,6 @@
 # Estudo: incorporar CRO, Tree-RL e auto-apply ao shepherd-dev
 
-Data: 2026-07-12 · Status: estudo para decisão do Andre
+Data: 2026-07-12 · Status: estudo de decisão
 Base: shepherd-ai 0.3.0 (restrições empíricas dos adendos F2/F3), paper arXiv 2605.10913,
 repo de experimentos `shepherd-agents/shepherd-experiments` (MIT; `exp/cbo/` = CRO,
 `exp/mcts-rl/` = Tree-GRPO, `code/` = snapshot congelado do substrato como uv workspace).

@@ -51,10 +51,10 @@ máquina, o bootstrap do plugin a instala na primeira vez.
 
 ## Instalar (por máquina)
 
-Já instalado no Mac e no a build machine. Máquina nova:
+Uma linha por máquina:
 
 ```bash
-uv tool install git+ssh://git@github.com/andrefogelman/shepherd.git
+uv tool install git+https://github.com/andrefogelman/shepherd.git
 # ou, com Claude Code (traz skill + comandos /shepherd-dev:*):
 #   /plugin marketplace add andrefogelman/shepherd
 #   /plugin install shepherd-dev@shepherd
@@ -252,7 +252,7 @@ comando** e reusado em todas as tentativas/candidatos/reviewer — o análogo
 honesto, nesta lane, do reuso de prefixo (KV-cache) do paper.
 
 O worker deixa de explorar o repo às cegas — a maior fonte de gasto. **A/B
-medido no a private repo (repo real, mesma feature, mesmas condições): 448.7s sem
+medido num repo real de produção (mesma feature, mesmas condições): 448.7s sem
 pack → 128.6s com pack (−71%, 3.5× mais rápido)** — e com localização melhor
 (o worker com pack seguiu o padrão do módulo existente; o sem pack inventou
 diretório errado). Duração é proxy direto de tokens num worker agêntico.
