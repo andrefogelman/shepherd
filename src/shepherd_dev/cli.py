@@ -23,7 +23,7 @@ from pathlib import Path
 import shepherd as sp
 
 from . import history
-from .parallel import PROPOSALS_DIR, develop_parallel
+from .parallel import PROPOSALS_DIR, develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
 from .tasks import implement, review, write_tests
@@ -131,6 +131,67 @@ def _auto_settle_conditions(report) -> str | None:
     return None
 
 
+def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement) -> int:
+    report = develop_best_of(
+        repo_root,
+        args.feature,
+        k=args.best_of,
+        test_cmd=args.test_cmd,
+        provider=args.provider,
+        placement=placement,
+        policy=policy,
+        max_attempts=args.max_attempts,
+        gate_timeout=args.gate_timeout,
+        review_task=reviewer,
+        worker_task=worker,
+    )
+    history.record_event(
+        "best_of",
+        {
+            "feature": args.feature,
+            "repo": str(repo_root),
+            "k": args.best_of,
+            "succeeded": report.succeeded,
+            "winner": report.winner_index,
+            "proposal_id": report.proposal_id,
+            "candidates": [
+                {
+                    "index": c.index,
+                    "verdict": c.verdict,
+                    "gate_passed": c.gate_passed,
+                    "review_approved": (c.review.approved if c.review else None),
+                    "files": c.files,
+                    "diff_bytes": c.diff_bytes,
+                }
+                for c in report.candidates
+            ],
+            "flags": {"auto_settle": args.auto_settle, "mode": args.mode},
+        },
+    )
+    print(report.summary())
+
+    if args.auto_settle and report.proposal_id:
+        reason = _auto_settle_conditions(report)
+        if reason:
+            print(f"\nauto-settle: NOT applied ({reason}) — proposal stays staged for manual settlement")
+            return 0 if report.succeeded else 1
+        code, written = settle_proposal(repo_root, report.proposal_id, reject=False, auto=True)
+        if code != 0 or not written:
+            return 1
+        branch, err = auto_commit_branch(
+            repo_root, written, _slugify(args.feature),
+            f"feat: {args.feature}\n\nshepherd-dev auto-settle (best-of-{args.best_of}, "
+            f"proposal {report.proposal_id}); gate passed, review approved.",
+        )
+        if err:
+            print(f"auto-settle: files written but NOT committed — {err}")
+        else:
+            print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
+        return 0
+
+    return 0 if report.succeeded else 1
+
+
 def cmd_run(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
@@ -141,6 +202,10 @@ def cmd_run(args) -> int:
         return 2
     if args.auto_settle and args.provider == "static":
         print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
+        return 2
+
+    if args.best_of > 1 and args.no_review and args.provider != "static":
+        print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
         return 2
 
     error = _refresh_substrate(repo_root)
@@ -159,6 +224,9 @@ def cmd_run(args) -> int:
     worker = implement if args.mode == "feature" else write_tests
     # reviewer needs a live model; skip it on the deterministic provider
     reviewer = None if (args.no_review or args.provider == "static") else review
+
+    if args.best_of > 1:
+        return _run_best_of(args, repo_root, worker, reviewer, policy, placement)
 
     with sp.open(repo_root) as workspace:
         report = develop(
@@ -431,6 +499,13 @@ def main() -> int:
         "--auto-settle",
         action="store_true",
         help="on gate PASS + review APPROVED: settle and commit on an isolated shepherd/<slug> branch (never pushes)",
+    )
+    p_run.add_argument(
+        "--best-of",
+        type=int,
+        default=1,
+        choices=[1, 2, 3, 4],
+        help="branch K candidates from the same state, gate+review all, stage the winner (Tree-RL essence at inference)",
     )
     p_run.add_argument("--max-attempts", type=int, default=3)
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")

@@ -288,31 +288,228 @@ def develop_parallel(
                     placement=placement,
                 )
 
-        report.proposal_id = time.strftime("%Y%m%d-%H%M%S")
-        staging = repo_root / PROPOSALS_DIR / report.proposal_id
-        files_dir = staging / "files"
-        written = materialize_into(files_dir, combined)
-        manifest = {
-            "features": report.features,
-            "worker_runs": [w.final_run_ref for w in report.workers],
-            "conflicts": report.conflicts,
-            "handoff_used": report.handoff_used,
-            "repairs": report.repairs,
-            "gate": {"passed": gate.passed, "exit_code": gate.exit_code},
-            "review": (
-                None
-                if report.review is None
-                else {
-                    "approved": report.review.approved,
-                    "summary": report.review.summary,
-                    "issues": report.review.issues,
-                    "error": report.review.error,
-                }
-            ),
-            "paths": sorted(combined),
-        }
-        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-        report.staged_paths = written
+        report.proposal_id, report.staged_paths = _stage_proposal(
+            repo_root,
+            combined,
+            {
+                "features": report.features,
+                "worker_runs": [w.final_run_ref for w in report.workers],
+                "conflicts": report.conflicts,
+                "handoff_used": report.handoff_used,
+                "repairs": report.repairs,
+                "gate": {"passed": gate.passed, "exit_code": gate.exit_code},
+                "review": _review_manifest(report.review),
+            },
+        )
+        report.succeeded = True
+        return report
+    finally:
+        for clone in clones:
+            shutil.rmtree(clone.parent, ignore_errors=True)
+
+
+def _review_manifest(review: ReviewVerdict | None) -> dict | None:
+    if review is None:
+        return None
+    return {
+        "approved": review.approved,
+        "summary": review.summary,
+        "issues": review.issues,
+        "error": review.error,
+    }
+
+
+def _stage_proposal(repo_root: Path, entries: dict[str, bytes], manifest_extra: dict) -> tuple[str, list[str]]:
+    """Stage a combined/winning proposal under .shepherd-proposals/<id>/."""
+    proposal_id = time.strftime("%Y%m%d-%H%M%S")
+    staging = repo_root / PROPOSALS_DIR / proposal_id
+    written = materialize_into(staging / "files", entries)
+    manifest = {**manifest_extra, "paths": sorted(entries)}
+    (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    return proposal_id, written
+
+
+# ── Best-of-N (phase C): the incorporable essence of the paper's Tree-RL ────
+# Branch K candidates from the SAME repo state (one ephemeral clone each, with
+# varied emphasis seeds), gate every candidate on the real suite, review the
+# survivors, rank deterministically, stage the winner for settlement.
+
+EMPHASES = [
+    "",
+    "Prioritize the SIMPLEST correct implementation with the smallest possible diff.",
+    "Prioritize robustness: handle edge cases and invalid inputs defensively.",
+    "Prioritize matching the existing codebase's idioms, naming and structure exactly.",
+]
+
+
+@dataclass
+class BestOfCandidate:
+    index: int
+    succeeded: bool
+    run_ref: str | None
+    files: int
+    diff_bytes: int
+    gate_passed: bool
+    review: ReviewVerdict | None
+    verdict: str  # short human label
+
+
+@dataclass
+class BestOfReport:
+    feature: str
+    k: int
+    succeeded: bool
+    candidates: list[BestOfCandidate] = field(default_factory=list)
+    winner_index: int | None = None
+    proposal_id: str | None = None
+    staged_paths: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def review(self) -> ReviewVerdict | None:
+        """Winner's review — lets auto-settle apply the same hard conditions."""
+        if self.winner_index is None:
+            return None
+        for c in self.candidates:
+            if c.index == self.winner_index:
+                return c.review
+        return None
+
+    def summary(self) -> str:
+        lines = [f"best-of-{self.k}: {self.feature}", f"succeeded: {self.succeeded}"]
+        if self.error:
+            lines.append(f"error: {self.error}")
+        for c in self.candidates:
+            mark = " ← WINNER" if c.index == self.winner_index else ""
+            rev = "-" if c.review is None else ("APPROVED" if c.review.approved else "rejected")
+            lines.append(
+                f"  candidate {c.index + 1}: {c.verdict} gate={'PASS' if c.gate_passed else 'fail'} "
+                f"review={rev} files={c.files} diff={c.diff_bytes}B{mark}"
+            )
+        if self.proposal_id:
+            lines += [
+                "",
+                f"winner staged: {PROPOSALS_DIR}/{self.proposal_id} ({len(self.staged_paths)} file(s))",
+                f"  shepherd-dev settle-par {self.proposal_id} --repo <repo>            # accept",
+                f"  shepherd-dev settle-par {self.proposal_id} --repo <repo> --reject   # discard",
+            ]
+        return "\n".join(lines)
+
+
+def develop_best_of(
+    repo_root: Path,
+    feature: str,
+    *,
+    k: int,
+    test_cmd: str,
+    provider: str = "claude",
+    placement: str = "jail",
+    policy: ChangesetPolicy | None = None,
+    max_attempts: int = 1,
+    gate_timeout: int = 600,
+    review_task=None,
+    worker_task=None,
+    worker_extra_args: list[dict | None] | None = None,
+) -> BestOfReport:
+    """K parallel candidates from the same state; winner staged for settlement."""
+    assert 2 <= k <= len(EMPHASES), f"k must be 2..{len(EMPHASES)}"
+    policy = policy or ChangesetPolicy()
+    report = BestOfReport(feature=feature, k=k, succeeded=False)
+    task = worker_task or implement
+    extras = worker_extra_args or [None] * k
+    clones: list[Path] = []
+
+    try:
+        clones = [_clone_workspace(repo_root) for _ in range(k)]
+        with ThreadPoolExecutor(max_workers=k) as pool:
+            futures = [
+                pool.submit(
+                    _run_worker,
+                    clones[i],
+                    feature,
+                    EMPHASES[i],
+                    task=task,
+                    extra_args=extras[i],
+                    provider=provider,
+                    placement=placement,
+                    policy=policy,
+                    max_attempts=max_attempts,
+                )
+                for i in range(k)
+            ]
+            workers = [f.result() for f in futures]
+
+        entries_by_idx: dict[int, dict[str, bytes]] = {}
+        for i, w in enumerate(workers):
+            if not (w.succeeded and w.entries):
+                verdict = w.attempts[-1].verdict if w.attempts else "did not run"
+                report.candidates.append(
+                    BestOfCandidate(i, False, w.final_run_ref, 0, 0, False, None, verdict)
+                )
+                continue
+            entries_by_idx[i] = w.entries
+            gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout)
+            review = None
+            if gate.passed and review_task is not None:
+                with sp.open(clones[i]) as workspace:
+                    review = run_review(
+                        workspace,
+                        review_task,
+                        feature=feature,
+                        diff_text=_entries_diff_text(w.entries),
+                        provider=provider,
+                        placement=placement,
+                    )
+            report.candidates.append(
+                BestOfCandidate(
+                    i,
+                    True,
+                    w.final_run_ref,
+                    len(w.entries),
+                    sum(len(v) for v in w.entries.values()),
+                    gate.passed,
+                    review,
+                    "passed" if gate.passed else "gate_failed",
+                )
+            )
+
+        # Deterministic ranking: gate first, then review approval, fewer review
+        # issues, fewer files, smaller diff. Candidate order breaks ties.
+        def rank_key(c: BestOfCandidate):
+            approved = c.review.approved if (c.review and not c.review.error) else False
+            issues = len(c.review.issues) if (c.review and not c.review.error) else 99
+            return (not c.gate_passed, not approved, issues, c.files, c.diff_bytes, c.index)
+
+        viable = [c for c in report.candidates if c.gate_passed]
+        if not viable:
+            report.error = "no candidate passed the gate"
+            return report
+        winner = min(viable, key=rank_key)
+        report.winner_index = winner.index
+
+        report.proposal_id, report.staged_paths = _stage_proposal(
+            repo_root,
+            entries_by_idx[winner.index],
+            {
+                "best_of": {
+                    "feature": feature,
+                    "k": k,
+                    "winner": winner.index,
+                    "candidates": [
+                        {
+                            "index": c.index,
+                            "verdict": c.verdict,
+                            "gate_passed": c.gate_passed,
+                            "review_approved": (c.review.approved if c.review else None),
+                            "files": c.files,
+                            "diff_bytes": c.diff_bytes,
+                        }
+                        for c in report.candidates
+                    ],
+                },
+                "review": _review_manifest(winner.review),
+            },
+        )
         report.succeeded = True
         return report
     finally:
