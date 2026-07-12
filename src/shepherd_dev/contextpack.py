@@ -32,6 +32,10 @@ SKELETON_LINE_LIMIT = 60      # max signature lines per skeleton
 SCAN_FILE_CAP = 4_000         # max files scored per repo
 READ_CAP = 100_000            # bytes read per file for scoring/skeleton
 MAX_FILE_BYTES = 400_000      # bigger than this: listed in tree only
+TARGET_N = 6                  # top-scored files treated as targets for enrichment
+NEIGHBOR_CAP = 12             # import-graph neighbor blocks added
+TEST_CONTRACT_CAP = 8         # sibling test-file blocks added
+HEADER_BYTES = 4_000          # bytes read to extract a file's import lines
 
 _STOPWORDS = {
     # pt
@@ -164,6 +168,120 @@ def _tree(repo_root: Path, files: list[Path]) -> str:
     return "\n".join(rels) + suffix
 
 
+# --- #3 enrichment: import-graph slice + test contract -----------------------
+# Resolve only LOCAL imports (paths that map to an actual repo file); bare /
+# third-party / stdlib imports are ignored. Everything deterministic.
+
+_JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+_PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))", re.M)
+_JS_IMPORT_RE = re.compile(r"""(?:from|import|require\()\s*['"]([^'"]+)['"]""")
+_TEST_NAME_RE = re.compile(r"(^|/)(test_|.*_test\.|.*\.test\.|.*\.spec\.)|(^|/)tests?/")
+
+
+def _norm(rel: str | Path) -> str:
+    return Path(rel).as_posix()
+
+
+def _resolve_py_import(module: str, importer_rel: str, repo_rels: set[str]) -> str | None:
+    """Map a Python import target to a repo file, or None if not local."""
+    if module.startswith("."):
+        dots = len(module) - len(module.lstrip("."))
+        rest = module[dots:]
+        base = Path(importer_rel).parent
+        for _ in range(dots - 1):  # one dot = same package
+            base = base.parent
+        target = base / rest.replace(".", "/") if rest else base
+        cands = [f"{target}.py", f"{target}/__init__.py"]
+    else:
+        path = module.replace(".", "/")
+        cands = [f"{path}.py", f"{path}/__init__.py"]
+        if "." in module:  # `from a.b import c` may name package a/b
+            head = module.rsplit(".", 1)[0].replace(".", "/")
+            cands += [f"{head}.py", f"{head}/__init__.py"]
+    for c in cands:
+        c = _norm(c)
+        if c in repo_rels:
+            return c
+    return None
+
+
+def _resolve_js_import(spec: str, importer_rel: str, repo_rels: set[str]) -> str | None:
+    """Map a relative JS/TS specifier to a repo file, or None if bare/package."""
+    if not spec.startswith("."):
+        return None
+    base = _norm((Path(importer_rel).parent / spec))
+    cands: list[str]
+    if Path(spec).suffix in _JS_EXTS:
+        cands = [base]
+    else:
+        cands = [base + e for e in _JS_EXTS]
+        cands += [_norm(Path(base) / f"index{e}") for e in _JS_EXTS]
+    for c in cands:
+        if c in repo_rels:
+            return c
+    return None
+
+
+def _import_edges(files: list[Path], repo_root: Path, repo_rels: set[str]) -> dict[str, set[str]]:
+    """importer_rel -> set of local rels it imports (from each file's header)."""
+    edges: dict[str, set[str]] = {}
+    for path in files:
+        suf = path.suffix.lower()
+        if suf != ".py" and suf not in _JS_EXTS:
+            continue
+        rel = _norm(str(path.relative_to(repo_root)))
+        try:
+            header = path.read_bytes()[:HEADER_BYTES].decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        neigh: set[str] = set()
+        if suf == ".py":
+            for m in _PY_IMPORT_RE.finditer(header):
+                r = _resolve_py_import(m.group(1) or m.group(2), rel, repo_rels)
+                if r and r != rel:
+                    neigh.add(r)
+        else:
+            for m in _JS_IMPORT_RE.finditer(header):
+                r = _resolve_js_import(m.group(1), rel, repo_rels)
+                if r and r != rel:
+                    neigh.add(r)
+        if neigh:
+            edges[rel] = neigh
+    return edges
+
+
+def _is_test_file(rel: str) -> bool:
+    return bool(_TEST_NAME_RE.search(_norm(rel).lower()))
+
+
+def _test_files_for(rel: str, repo_rels: set[str]) -> list[str]:
+    """Sibling test files for a source file that actually exist in the repo."""
+    p = Path(rel)
+    stem, suf = p.stem, p.suffix.lower()
+    d = p.parent.as_posix()
+    d = "" if d == "." else f"{d}/"
+    if suf == ".py":
+        cands = [f"{d}test_{stem}.py", f"{d}{stem}_test.py",
+                 f"tests/test_{stem}.py", f"test/test_{stem}.py", f"tests/{stem}_test.py"]
+    elif suf in _JS_EXTS:
+        cands = [f"{d}{stem}{te}" for te in
+                 (".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+                  ".spec.ts", ".spec.js", suf.replace(".", ".test."), suf.replace(".", ".spec."))]
+        cands += [f"{d}__tests__/{stem}{suf}"]
+    elif suf == ".ex":
+        cands = [f"test/{d}{stem}_test.exs", f"{d}{stem}_test.exs"]
+    elif suf == ".rs":
+        cands = [f"tests/{stem}.rs"]
+    else:
+        cands = []
+    out: list[str] = []
+    for c in cands:
+        c = _norm(c)
+        if c in repo_rels and c != _norm(rel) and c not in out:
+            out.append(c)
+    return out
+
+
 def build_pack(
     repo_root: Path,
     feature: str,
@@ -171,10 +289,13 @@ def build_pack(
     allowed_prefixes: tuple[str, ...] = (),
     memory_text: str = "",
     budget: int = PACK_BUDGET,
+    target_n: int = TARGET_N,
 ) -> tuple[str, dict]:
     """Build the pack. Returns (pack_text, stats).
 
-    stats: {"chars": int, "files_full": int, "files_skeleton": int, "scanned": int}
+    stats keys: chars, files_full, files_skeleton, scanned, targets, neighbors,
+    test_contracts. Beyond the keyword-scored files, the top `target_n` files are
+    enriched with their import-graph neighbors and sibling test files (#3).
     """
     keywords = extract_keywords(feature)
     files = _iter_files(repo_root, tuple(allowed_prefixes))
@@ -196,10 +317,14 @@ def build_pack(
         sections.append(f"== REPO MEMORY (learned from previous runs) ==\n{memory_text}\n")
     sections.append(f"== REPO FILE TREE ==\n{_tree(repo_root, files)}\n")
 
+    repo_rels = {_norm(str(f.relative_to(repo_root))) for f in files}
+    files_by_rel = {_norm(str(f.relative_to(repo_root))): f for f in files}
+
     used = sum(len(s) for s in sections)
     full_n = 0
     skel_n = 0
-    for _score, rel, path, text in scored:
+    emitted: set[str] = set()
+    for _, rel, path, text in scored:
         if len(text) <= FULL_FILE_LIMIT:
             block = f"== FILE: {rel} (full) ==\n{text}\n"
             kind = "full"
@@ -210,10 +335,74 @@ def build_pack(
             continue
         sections.append(block)
         used += len(block)
+        emitted.add(_norm(rel))
         if kind == "full":
             full_n += 1
         else:
             skel_n += 1
+
+    # #3 enrichment: for the top-scored TARGET files, pull import-graph neighbors
+    # (what they import + who imports them) and their sibling test files — so the
+    # worker sees the structural neighborhood and the test contract up front.
+    targets = [_norm(rel) for _, rel, _, _ in scored[:target_n]]
+    neighbors_n = 0
+    contracts_n = 0
+    if targets:
+        edges = _import_edges(files, repo_root, repo_rels)
+        target_set = set(targets)
+
+        # Test files are labelled by the test-contract pass, not as generic
+        # neighbors, so exclude them here.
+        neigh_blocks: list[tuple[str, str]] = []  # (rel, marker)
+        seen: set[str] = set()
+        for target in targets:
+            for imp in sorted(edges.get(target, ())):          # target imports imp
+                if imp in emitted or imp in target_set or imp in seen or _is_test_file(imp):
+                    continue
+                seen.add(imp)
+                neigh_blocks.append((imp, f"imported by {target}"))
+            for src in sorted(edges):                           # src imports target
+                if target in edges[src] and src not in emitted and src not in target_set \
+                        and src not in seen and not _is_test_file(src):
+                    seen.add(src)
+                    neigh_blocks.append((src, f"imports {target}"))
+        for rel_n, marker in neigh_blocks[:NEIGHBOR_CAP]:
+            path = files_by_rel.get(rel_n)
+            if path is None:
+                continue
+            block = f"== FILE: {rel_n} ({marker}; signatures) ==\n{skeleton(_read_text(path), path.suffix.lower())}\n"
+            if used + len(block) > budget:
+                continue
+            sections.append(block)
+            used += len(block)
+            emitted.add(rel_n)
+            neighbors_n += 1
+
+        tc_blocks: list[tuple[str, str]] = []  # (test_rel, target)
+        seen_tc: set[str] = set()
+        for target in targets:
+            if _is_test_file(target):
+                continue
+            for t in _test_files_for(target, repo_rels):
+                if t in emitted or t in target_set or t in seen_tc:
+                    continue
+                seen_tc.add(t)
+                tc_blocks.append((t, target))
+        for rel_n, target in tc_blocks[:TEST_CONTRACT_CAP]:
+            path = files_by_rel.get(rel_n)
+            if path is None:
+                continue
+            text = _read_text(path)
+            if len(text) <= FULL_FILE_LIMIT:
+                block = f"== FILE: {rel_n} (test contract for {target}; full) ==\n{text}\n"
+            else:
+                block = f"== FILE: {rel_n} (test contract for {target}; signatures) ==\n{skeleton(text, path.suffix.lower())}\n"
+            if used + len(block) > budget:
+                continue
+            sections.append(block)
+            used += len(block)
+            emitted.add(rel_n)
+            contracts_n += 1
 
     pack = "\n".join(sections)
     stats = {
@@ -221,5 +410,8 @@ def build_pack(
         "files_full": full_n,
         "files_skeleton": skel_n,
         "scanned": len(files),
+        "targets": len(targets),
+        "neighbors": neighbors_n,
+        "test_contracts": contracts_n,
     }
     return pack, stats

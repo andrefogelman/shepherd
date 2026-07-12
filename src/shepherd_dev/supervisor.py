@@ -171,6 +171,25 @@ def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: Ga
     raise ValueError(f"unknown guidance kind: {kind}")
 
 
+def _prior_attempt_guidance(entries: dict[str, bytes], limit: int = 8000) -> str:
+    """Render the worker's own last proposal so the next attempt iterates on it
+    instead of restarting from scratch (#3c). Capped; empty when no entries."""
+    if not entries:
+        return ""
+    parts = [
+        f"--- {rel} ---\n{content.decode('utf-8', errors='replace')}"
+        for rel, content in entries.items()
+    ]
+    body = "\n\n".join(parts)
+    if len(body) > limit:
+        body = body[:limit] + "\n[... truncated ...]"
+    return (
+        "YOUR PREVIOUS ATTEMPT proposed the files below. Build on this — fix the "
+        "specific failure called out beneath; do NOT start from scratch:\n"
+        f"{body}\n\n"
+    )
+
+
 def set_worker_budget(seconds: int) -> None:
     """Raise the Claude workspace provider's wall-clock budget.
 
@@ -441,7 +460,7 @@ def develop(
             report.attempts.append(
                 Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
             )
-            guidance = _format_guidance("policy", violations=verdict_policy.violations)
+            guidance = _prior_attempt_guidance(entries) + _format_guidance("policy", violations=verdict_policy.violations)
             continue
 
         gate: GateResult | None = None
@@ -456,7 +475,7 @@ def develop(
             if not gate.passed:
                 output.discard()
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
-                guidance = _format_guidance("gate", gate=gate)
+                guidance = _prior_attempt_guidance(entries) + _format_guidance("gate", gate=gate)
                 continue
 
         report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed", duration_s=duration))
