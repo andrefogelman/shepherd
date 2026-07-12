@@ -282,6 +282,15 @@ def _test_files_for(rel: str, repo_rels: set[str]) -> list[str]:
     return out
 
 
+def repo_file_view(repo_root: Path, allowed_prefixes: tuple[str, ...] = ()) -> tuple[str, set[str]]:
+    """The pack's file listing as (tree_text, repo_rels) — the same filtered view
+    build_pack uses, reused by the planning prefetch (#4) to build its prompt."""
+    files = _iter_files(repo_root, tuple(allowed_prefixes))
+    tree_text = _tree(repo_root, files)
+    repo_rels = {_norm(str(f.relative_to(repo_root))) for f in files}
+    return tree_text, repo_rels
+
+
 def build_pack(
     repo_root: Path,
     feature: str,
@@ -290,12 +299,17 @@ def build_pack(
     memory_text: str = "",
     budget: int = PACK_BUDGET,
     target_n: int = TARGET_N,
+    planned_targets: tuple[str, ...] = (),
+    plan_text: str = "",
 ) -> tuple[str, dict]:
     """Build the pack. Returns (pack_text, stats).
 
     stats keys: chars, files_full, files_skeleton, scanned, targets, neighbors,
-    test_contracts. Beyond the keyword-scored files, the top `target_n` files are
-    enriched with their import-graph neighbors and sibling test files (#3).
+    test_contracts, planned. Beyond the keyword-scored files, the top `target_n`
+    files are enriched with their import-graph neighbors and sibling test files
+    (#3). planned_targets/plan_text come from the planning prefetch (#4): the
+    planned files are force-included and treated as targets, and plan_text is
+    surfaced as a stable section the worker should follow.
     """
     keywords = extract_keywords(feature)
     files = _iter_files(repo_root, tuple(allowed_prefixes))
@@ -313,6 +327,8 @@ def build_pack(
         "ONLY if something you need is missing):\n"
     )
     sections: list[str] = [header]
+    if plan_text:
+        sections.append(f"== FEATURE PLAN (pre-computed; follow it) ==\n{plan_text}\n")
     if memory_text:
         sections.append(f"== REPO MEMORY (learned from previous runs) ==\n{memory_text}\n")
     sections.append(f"== REPO FILE TREE ==\n{_tree(repo_root, files)}\n")
@@ -341,10 +357,36 @@ def build_pack(
         else:
             skel_n += 1
 
-    # #3 enrichment: for the top-scored TARGET files, pull import-graph neighbors
-    # (what they import + who imports them) and their sibling test files — so the
-    # worker sees the structural neighborhood and the test contract up front.
-    targets = [_norm(rel) for _, rel, _, _ in scored[:target_n]]
+    # #4 planning prefetch: force-include planned targets that scoring missed, so
+    # the worker always gets the files the planner named.
+    planned = [n for n in (_norm(t) for t in planned_targets) if n in repo_rels]
+    planned_n = 0
+    for rel_n in planned:
+        if rel_n in emitted:
+            continue
+        path = files_by_rel.get(rel_n)
+        if path is None:
+            continue
+        text = _read_text(path)
+        if len(text) <= FULL_FILE_LIMIT:
+            block = f"== FILE: {rel_n} (planned target; full) ==\n{text}\n"
+            is_full = True
+        else:
+            block = f"== FILE: {rel_n} (planned target; signatures only; open it for bodies) ==\n{skeleton(text, path.suffix.lower())}\n"
+            is_full = False
+        if used + len(block) > budget:
+            continue
+        sections.append(block)
+        used += len(block)
+        emitted.add(rel_n)
+        planned_n += 1
+        full_n += int(is_full)
+        skel_n += int(not is_full)
+
+    # #3 enrichment: for the TARGET files (planned + top keyword-scored), pull
+    # import-graph neighbors (what they import + who imports them) and their
+    # sibling test files — the worker sees the neighborhood + contract up front.
+    targets = list(dict.fromkeys(planned + [_norm(rel) for _, rel, _, _ in scored[:target_n]]))
     neighbors_n = 0
     contracts_n = 0
     if targets:
@@ -413,5 +455,6 @@ def build_pack(
         "targets": len(targets),
         "neighbors": neighbors_n,
         "test_contracts": contracts_n,
+        "planned": planned_n,
     }
     return pack, stats

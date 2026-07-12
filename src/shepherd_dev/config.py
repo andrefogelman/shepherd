@@ -295,6 +295,24 @@ def auto_optimize_config(repo_root: Path) -> dict | None:
     return None
 
 
+def planning_config(repo_root: Path) -> dict:
+    """Planning-prefetch (#4) settings; per-repo .shepherd-dev.json wins over the
+    global config. Returns {"enabled": bool, "model": str} — enabled by default
+    with a cheap model, so `run` gets the prefetch with no setup."""
+    from .planning import DEFAULT_PLAN_MODEL
+
+    out = {"enabled": True, "model": DEFAULT_PLAN_MODEL}
+    for source in (load_global_config(), load_config(repo_root)):  # repo wins (last)
+        cfg = source.get("planning")
+        if isinstance(cfg, dict):
+            if "enabled" in cfg:
+                out["enabled"] = bool(cfg["enabled"])
+            model = cfg.get("model")
+            if isinstance(model, str) and model.strip():
+                out["model"] = model.strip()
+    return out
+
+
 def remote_gate(repo_root: Path) -> "RemoteGateConfig | None":
     """Parse the repo's `test_remote` config into a RemoteGateConfig, or None.
 

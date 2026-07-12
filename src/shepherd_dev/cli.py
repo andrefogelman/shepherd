@@ -345,21 +345,51 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
     return 0 if report.succeeded else 1
 
 
+def _run_planning(args, repo_root: Path, feature_text: str) -> tuple[tuple[str, ...], str]:
+    """Cheap-model planning prefetch (#4). Returns (planned_targets, plan_text).
+
+    Best-effort: disabled by --no-plan / static / config, and any failure returns
+    empty so the run proceeds on keyword-scored targets exactly as before."""
+    if getattr(args, "no_plan", False) or args.provider == "static":
+        return (), ""
+    from . import config as _config
+    from .contextpack import repo_file_view
+    from .planning import plan_targets
+
+    cfg = _config.planning_config(repo_root)
+    if not cfg["enabled"]:
+        return (), ""
+    tree_text, repo_rels = repo_file_view(repo_root, tuple(args.allowed_prefix))
+    if not repo_rels:
+        return (), ""
+    result = plan_targets(feature_text, tree_text, repo_rels, model=cfg["model"])
+    if result.error:
+        print(f"planning: skipped ({result.error})")
+        return (), ""
+    print(f"planning: {len(result.targets)} target(s) via {cfg['model']}")
+    return tuple(result.targets), result.plan
+
+
 def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, dict]:
-    """Build the context pack (+ repo memory) once per command. Disabled by
-    --no-context-pack or on the static provider (no LLM to feed)."""
+    """Build the context pack (+ repo memory + planning prefetch) once per command.
+    Disabled by --no-context-pack or on the static provider (no LLM to feed)."""
     if getattr(args, "no_context_pack", False) or args.provider == "static":
         return None, {}
+    planned, plan_text = _run_planning(args, repo_root, feature_text)
     pack, stats = build_pack(
         repo_root,
         feature_text,
         allowed_prefixes=tuple(args.allowed_prefix),
         memory_text=repo_memory.memory_text(repo_root),
+        planned_targets=planned,
+        plan_text=plan_text,
     )
     print(
         f"context pack: {stats['chars']} chars "
         f"({stats['files_full']} full + {stats['files_skeleton']} skeleton files, "
-        f"{stats['scanned']} scanned)"
+        f"{stats['scanned']} scanned"
+        + (f", {stats['planned']} planned" if stats.get('planned') else "")
+        + ")"
     )
     return pack, stats
 
@@ -865,6 +895,11 @@ def main() -> int:
         help="skip the pre-computed context pack (worker explores the repo itself)",
     )
     p_run.add_argument(
+        "--no-plan",
+        action="store_true",
+        help="skip the cheap-model planning prefetch (no target/plan hints)",
+    )
+    p_run.add_argument(
         "--optimize-after",
         action="store_true",
         help="run `optimize` after this run finishes (dry-run unless --optimize-apply)",
@@ -919,6 +954,11 @@ def main() -> int:
         "--no-context-pack",
         action="store_true",
         help="skip the pre-computed context pack (workers explore the repo themselves)",
+    )
+    p_run2.add_argument(
+        "--no-plan",
+        action="store_true",
+        help="skip the cheap-model planning prefetch (no target/plan hints)",
     )
     p_run2.add_argument(
         "--optimize-after",

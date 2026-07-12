@@ -101,8 +101,31 @@ class ContextPackEnrichment(unittest.TestCase):
     def test_stats_has_new_keys(self):
         root = _repo({"a.py": "x = 1\n"})
         _, stats = build_pack(root, "a thing")
-        for k in ("neighbors", "test_contracts", "targets"):
+        for k in ("neighbors", "test_contracts", "targets", "planned"):
             self.assertIn(k, stats)
+
+    def test_planned_target_force_included(self):
+        # a file that scores 0 on the feature is still emitted when the planner
+        # names it (that is the whole point of #4 feeding targets to the pack).
+        root = _repo({
+            "alpha.py": "# csv normalization module\ndef a():\n    return 1\n",
+            "zeta.py": "def z():\n    return 2\n",  # no keyword -> scores 0
+        })
+        pack, stats = build_pack(root, "csv normalization", planned_targets=("zeta.py",))
+        self.assertIn("zeta.py", pack)
+        self.assertIn("planned target", pack)
+        self.assertGreaterEqual(stats["planned"], 1)
+
+    def test_plan_text_section_emitted(self):
+        root = _repo({"a.py": "x = 1\n"})
+        pack, _ = build_pack(root, "a thing", plan_text="1. do X\n2. do Y")
+        self.assertIn("FEATURE PLAN", pack)
+        self.assertIn("do X", pack)
+
+    def test_planned_hallucination_ignored(self):
+        root = _repo({"a.py": "x = 1\n"})
+        _, stats = build_pack(root, "thing", planned_targets=("nope.py",))
+        self.assertEqual(stats["planned"], 0)
 
 
 if __name__ == "__main__":
