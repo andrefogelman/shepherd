@@ -44,18 +44,31 @@ Useful flags: `--mode tests` (only write tests), `--no-review`, `--provider stat
 dry-run of the machinery), `--allowed-prefix src/` (scope confinement), `--max-attempts`,
 `--worker-budget` (wall-clock seconds per attempt), `--max-repairs` (run2).
 
-## Claude Code plugin
+## Use inside Claude Code (recommended)
 
-This repo is also a Claude Code plugin marketplace. On any machine with Claude Code:
+This repo is also a Claude Code plugin marketplace — so you never touch a terminal.
+Install once:
 
 ```
 /plugin marketplace add andrefogelman/shepherd
 /plugin install shepherd-dev@shepherd
 ```
 
-The plugin ships a skill (teaches Claude when/how to drive `shepherd-dev`), slash commands
-(`/shepherd-dev:run`, `/shepherd-dev:run2`, `/shepherd-dev:settle`) and a bootstrap script
-that installs the CLI if missing.
+Restart Claude Code (plugins load at startup). Then drive it from the conversation
+in three ways, all conducted in-chat:
+
+- **Natural language** — "develop a CPF validator in repo X with shepherd" — the
+  `shepherd-dev` skill triggers on its own.
+- **Slash commands** — `/shepherd-dev:run "<feature>"`, `/shepherd-dev:run2 "<A>" "<B>"`,
+  `/shepherd-dev:settle <ref>`.
+
+Claude runs `shepherd-dev` under the hood, shows the report (attempts, gate, review
+verdict) and the proposed diff, then **asks you in chat to accept or reject** —
+nothing touches your files until you answer. A bundled bootstrap installs the CLI
+on first use if a machine doesn't have it.
+
+The plugin ships a skill (teaches Claude when/how to drive `shepherd-dev`), the slash
+commands above, and the bootstrap script.
 
 ## Design docs
 

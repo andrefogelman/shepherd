@@ -14,6 +14,41 @@ Worker (implementa) → Política (guarda) → Portão (testa) → Revisor (audi
 Um resultado que passa fica **retido** com uma referência (`run-…`). Só vira
 arquivo no worktree quando você roda `settle`. O commit no git continua seu.
 
+## Duas formas de usar
+
+**1. Dentro do Claude Code (recomendado).** Instale o plugin uma vez e fale com o
+Claude — ele roda o shepherd-dev por baixo e conduz tudo na conversa, sem você
+tocar o terminal. Ver "Usar dentro do Claude Code" abaixo.
+
+**2. CLI direto no terminal.** O binário `shepherd-dev` no seu PATH. Ver o resto
+deste manual.
+
+Os dois usam a mesma ferramenta; o plugin é só a camada conversacional.
+
+## Usar dentro do Claude Code
+
+Instale uma vez (marketplace + plugin do repo):
+
+```
+/plugin marketplace add andrefogelman/shepherd
+/plugin install shepherd-dev@shepherd
+```
+
+Reinicie o Claude Code (plugins carregam no startup). Depois, três jeitos de
+disparar, todos conduzidos na conversa:
+
+- **Linguagem natural** — "desenvolve um validador de CPF no repo X com shepherd".
+  A skill `shepherd-dev` dispara sozinha.
+- **Slash commands**:
+  - `/shepherd-dev:run "<feature>"` — desenvolve uma feature.
+  - `/shepherd-dev:run2 "<A>" "<B>"` — dois workers paralelos.
+  - `/shepherd-dev:settle <ref>` — aceita/rejeita uma proposta.
+
+O Claude executa o `shepherd-dev`, mostra o relatório (tentativas, portão, veredito
+do revisor) e o diff proposto, e **pergunta a você no chat**: aceitar ou rejeitar.
+Nada toca seus arquivos até você responder. Se a CLI não estiver instalada na
+máquina, o bootstrap do plugin a instala na primeira vez.
+
 ## Instalar (por máquina)
 
 Já instalado no Mac e no a build machine. Máquina nova:
