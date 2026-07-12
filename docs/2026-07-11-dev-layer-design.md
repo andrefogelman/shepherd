@@ -137,3 +137,40 @@ Descobertas empíricas (validadas em 4 workspaces de teste) que alteraram o desi
 5. **Recomendações operacionais**: `.vcscore/` e `REVIEW.json` no .gitignore dos
    repos alvo; nunca usar verbos crus `shepherd run select/apply` fora do
    `dev.py settle` (dessincroniza mundo × worktree).
+
+---
+
+## Adendo F3 (2026-07-11): workers paralelos coordenados
+
+Implementado em `parallel.py` + subcomandos `dev.py run2` / `dev.py settle-par`.
+
+**Arquitetura.** Ativação de workspace é exclusiva por diretório na 0.3.0, então o
+paralelismo usa um CLONE efêmero do repo por worker (copytree + `shepherd init` em
+tmpdir), executados em threads. Cada worker roda o loop F1/F2 no seu clone com
+gate individual desligado (policy-only); o juiz é o GATE COMBINADO sobre a
+proposta mesclada. Réplica prática do supervisor de runtime do paper com as
+ferramentas equivalentes: contexto do teammate no prompt (inject), rework do
+follower sobre a proposta do leader (handoff), descarte de tentativa (discard).
+
+**Fluxo run2:**
+1. 2 clones; workers em paralelo, cada um sabendo a feature do outro (interfaces
+   compatíveis, sem implementar a parte alheia).
+2. Conflito = interseção de paths das duas propostas. Havendo conflito: handoff —
+   novo clone com a proposta do leader APLICADA; follower re-implementa por cima.
+3. Gate combinado (worktree + proposta mesclada). Falha → rodadas de reparo
+   (`--max-repairs`, default 2): worker de reparo num clone semeado com tudo,
+   guiado pelo tail do erro.
+4. Review F2 do diff combinado.
+5. Proposta staged em `.shepherd-proposals/<id>/` (files/ + manifest.json com
+   runs, conflitos, gate, verdict). `settle-par <id>` escreve no worktree e
+   remove o staging; `--reject` descarta. Commit git fica com o humano.
+
+**Validação:** offline static (disjunto, conflito+handoff, manifests) ALL-PASS;
+real com 2 workers Claude em paralelo (fizzbuzz + greet): ambos passaram, gate
+combinado PASS sem reparos, review APPROVED cobrindo as duas features,
+settle-par materializou os 2 arquivos e as suites passaram.
+
+**Limitações herdadas:** deleções reais de worker seguem inexpressáveis;
+traces dos clones são efêmeros (destruídos com o clone); veto ao vivo por
+intents (stream) continua fora — exigiria a lane baixa (Scope/Device), próximo
+candidato de evolução.

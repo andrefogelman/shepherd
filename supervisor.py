@@ -17,7 +17,15 @@ from pathlib import Path
 
 from policy import ChangesetPolicy, check_paths
 
-IGNORED_DIRS = {".vcscore", ".venv", "node_modules", "__pycache__", ".shepherd", ".review"}
+IGNORED_DIRS = {
+    ".vcscore",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".shepherd",
+    ".review",
+    ".shepherd-proposals",
+}
 DIFF_TEXT_LIMIT = 60_000  # chars of proposal content handed to the reviewer
 
 
@@ -57,6 +65,9 @@ class DevReport:
     settlement_hint: str | None = None
     review: ReviewVerdict | None = None
     repo: str = ""
+    # content entries of the passing proposal (set on success) — consumed by
+    # the parallel coordinator; per-file bytes, small by policy cap
+    entries: dict[str, bytes] | None = None
 
     def summary(self) -> str:
         lines = [f"feature: {self.feature}", f"succeeded: {self.succeeded}"]
@@ -197,7 +208,8 @@ def run_review(
     review_task,
     *,
     feature: str,
-    changeset,
+    changeset=None,
+    diff_text: str | None = None,
     provider: str = "claude",
     placement: str = "jail",
 ) -> ReviewVerdict:
@@ -210,6 +222,8 @@ def run_review(
     changeset to be exactly {REVIEW.json}, and the output is always discarded
     after the verdict is read.
     """
+    if diff_text is None:
+        diff_text = build_diff_text(changeset)
     workspace.tasks.register(review_task)
     try:
         run = workspace.run(
@@ -217,7 +231,7 @@ def run_review(
             repo=workspace.git_repo(),
             placement=placement,
             runtime={"provider": provider},
-            args={"feature": feature, "diff": build_diff_text(changeset)},
+            args={"feature": feature, "diff": diff_text},
         )
     except Exception as exc:
         return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
@@ -282,7 +296,7 @@ def develop(
     repo,
     repo_root: Path,
     feature: str,
-    test_cmd: str,
+    test_cmd: str | None,
     provider: str = "claude",
     placement: str = "jail",
     max_attempts: int = 3,
@@ -290,11 +304,18 @@ def develop(
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
     review_task=None,
+    initial_guidance: str = "",
 ) -> DevReport:
-    """Supervised development loop. Returns a report; never mutates the workspace."""
+    """Supervised development loop. Returns a report; never mutates the workspace.
+
+    test_cmd=None skips the test gate (policy-only pass) — used by the parallel
+    coordinator, whose combined gate judges the merged proposal instead.
+    initial_guidance seeds the first attempt (e.g. teammate/handoff context);
+    later attempts replace it with concrete failure feedback.
+    """
     policy = policy or ChangesetPolicy()
     report = DevReport(feature=feature, succeeded=False, repo=str(repo_root))
-    guidance = ""
+    guidance = initial_guidance
 
     workspace.tasks.register(task)
 
@@ -347,22 +368,25 @@ def develop(
             guidance = _format_guidance("policy", violations=verdict_policy.violations)
             continue
 
-        gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
-        if gate.infra_error:
-            # Suite could not run: abort, do not burn attempts, keep output retained
-            report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
-            report.settlement_hint = f"gate infra error: {gate.infra_error}"
-            return report
+        gate: GateResult | None = None
+        if test_cmd is not None:
+            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
+            if gate.infra_error:
+                # Suite could not run: abort, do not burn attempts, keep output retained
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
+                report.settlement_hint = f"gate infra error: {gate.infra_error}"
+                return report
 
-        if not gate.passed:
-            output.discard()
-            report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
-            guidance = _format_guidance("gate", gate=gate)
-            continue
+            if not gate.passed:
+                output.discard()
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed"))
+                guidance = _format_guidance("gate", gate=gate)
+                continue
 
         report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed"))
         report.succeeded = True
         report.final_run_ref = run.run_ref
+        report.entries = entries
         if review_task is not None:
             report.review = run_review(
                 workspace,

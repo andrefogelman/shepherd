@@ -22,6 +22,7 @@ from pathlib import Path
 
 import shepherd as sp
 
+from parallel import PROPOSALS_DIR, develop_parallel
 from policy import ChangesetPolicy
 from supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
 from tasks import implement, review, write_tests
@@ -120,6 +121,70 @@ def cmd_run(args) -> int:
     return 0 if report.succeeded else 1
 
 
+def cmd_run2(args) -> int:
+    repo_root = _resolve_repo(args.repo)
+    if repo_root is None:
+        return 2
+
+    if args.provider == "claude":
+        set_worker_budget(args.worker_budget)
+
+    policy = ChangesetPolicy(
+        max_changed_paths=args.max_changed_paths,
+        allowed_prefixes=tuple(args.allowed_prefix),
+    )
+    placement = "jail" if args.provider == "claude" else "advisory"
+    reviewer = None if (args.no_review or args.provider == "static") else review
+
+    report = develop_parallel(
+        repo_root,
+        [args.feature_a, args.feature_b],
+        test_cmd=args.test_cmd,
+        provider=args.provider,
+        placement=placement,
+        policy=policy,
+        max_attempts=args.max_attempts,
+        max_repairs=args.max_repairs,
+        gate_timeout=args.gate_timeout,
+        review_task=reviewer,
+    )
+    print(report.summary())
+    return 0 if report.succeeded else 1
+
+
+def cmd_settle_par(args) -> int:
+    repo_root = _resolve_repo(args.repo)
+    if repo_root is None:
+        return 2
+    staging = repo_root / PROPOSALS_DIR / args.proposal_id
+    files_dir = staging / "files"
+    if not files_dir.is_dir():
+        print(f"error: staged proposal not found: {staging}", file=sys.stderr)
+        return 2
+
+    if args.reject:
+        import shutil
+
+        shutil.rmtree(staging)
+        print(f"{args.proposal_id}: staged proposal discarded")
+        return 0
+
+    entries = {
+        str(path.relative_to(files_dir)): path.read_bytes()
+        for path in files_dir.rglob("*")
+        if path.is_file()
+    }
+    written = materialize_into(repo_root, entries)
+    import shutil
+
+    shutil.rmtree(staging)
+    print(f"{args.proposal_id}: accepted — {len(written)} file(s) written:")
+    for rel in written:
+        print(f"  {rel}")
+    print("review and commit them with git.")
+    return 0
+
+
 def cmd_settle(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
@@ -202,6 +267,27 @@ def main() -> int:
         help="restrict changes to this path prefix (repeatable)",
     )
     p_run.set_defaults(func=cmd_run)
+
+    p_run2 = sub.add_parser("run2", help="develop two features with parallel coordinated workers")
+    p_run2.add_argument("feature_a", help="first feature (leader on conflicts)")
+    p_run2.add_argument("feature_b", help="second feature (reworks on conflicts)")
+    p_run2.add_argument("--repo", required=True, help="path to the target repo (shepherd-initialized)")
+    p_run2.add_argument("--test-cmd", required=True, help="combined test gate command")
+    p_run2.add_argument("--provider", default="claude", choices=["claude", "static"])
+    p_run2.add_argument("--no-review", action="store_true")
+    p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
+    p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")
+    p_run2.add_argument("--gate-timeout", type=int, default=600)
+    p_run2.add_argument("--worker-budget", type=int, default=900)
+    p_run2.add_argument("--max-changed-paths", type=int, default=40)
+    p_run2.add_argument("--allowed-prefix", action="append", default=[])
+    p_run2.set_defaults(func=cmd_run2)
+
+    p_spar = sub.add_parser("settle-par", help="accept or reject a staged parallel proposal")
+    p_spar.add_argument("proposal_id", help="staged proposal id (see run2 output)")
+    p_spar.add_argument("--repo", required=True, help="path to the target repo")
+    p_spar.add_argument("--reject", action="store_true", help="discard instead of accept")
+    p_spar.set_defaults(func=cmd_settle_par)
 
     p_settle = sub.add_parser("settle", help="accept or reject a retained proposal")
     p_settle.add_argument("run_ref", help="full run ref, e.g. run-fc83a2df3eaa")

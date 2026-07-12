@@ -22,6 +22,7 @@ class ChangesetPolicy:
     forbidden_paths: tuple[str, ...] = (
         ".git/",
         ".vcscore/",
+        ".shepherd-proposals/",
         ".env",
         ".venv/",
         "node_modules/",
