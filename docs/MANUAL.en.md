@@ -254,6 +254,65 @@ hardlink; override for BSD/macOS hosts, e.g. `rsync -a --link-dest={repo}
 the test binary (remote) are independent; the sandbox's network does not affect
 the gate.
 
+### Step by step
+
+1. **Prepare a warm checkout on the host** — a clone of the repo with deps/build
+   already compiled (`repo_dir`). Each gate run starts from it and never mutates it.
+2. **Ensure passwordless SSH** — key/agent already set up (`ssh user@host` works
+   on its own). Shepherd uses `BatchMode=yes`.
+3. **Write `test_remote` in `.shepherd-dev.json`** (commit it — project metadata).
+   Use `{id}` to isolate anything stateful.
+4. **Run as usual**: `shepherd-dev run "<feature>"`. A preflight confirms the host
+   before spending a worker; everything else is like the local flow.
+
+### Recipes (change only the text — shepherd is agnostic)
+
+**Elixir + Postgres in Docker Compose** (the `compose.yml` lives in the repo):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host", "repo_dir": "/srv/app",
+  "setup_cmd": "docker compose -p sg-{id} up -d db && until docker compose -p sg-{id} exec -T db pg_isready; do sleep 1; done && MIX_ENV=test mix ecto.migrate",
+  "test_cmd": "mix test",
+  "teardown_cmd": "docker compose -p sg-{id} down -v",
+  "writable": ["_build"],
+  "env": { "MIX_ENV": "test", "DATABASE_URL": "postgres://postgres@localhost:5432/app_{id}" }
+} }
+```
+
+**Rails + Postgres already running on the host** (no Docker):
+
+```json
+{ "test_remote": {
+  "ssh": "ci@host", "repo_dir": "/home/ci/app",
+  "setup_cmd": "createdb app_{id} && RAILS_ENV=test DB=app_{id} bin/rails db:schema:load",
+  "test_cmd": "DB=app_{id} bundle exec rspec",
+  "teardown_cmd": "dropdb app_{id}",
+  "env": { "RAILS_ENV": "test" }
+} }
+```
+
+**MySQL** (only the setup/teardown text changes):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host", "repo_dir": "/app",
+  "setup_cmd": "mysql -e 'CREATE DATABASE app_{id}' && DB=app_{id} npm run migrate",
+  "test_cmd": "DB=app_{id} npm test",
+  "teardown_cmd": "mysql -e 'DROP DATABASE app_{id}'"
+} }
+```
+
+**Testcontainers / a service the test brings up itself** (no external
+setup/teardown):
+
+```json
+{ "test_remote": { "ssh": "user@host", "repo_dir": "/app", "test_cmd": "go test ./..." } }
+```
+
+Redis, MongoDB, SQL Server, Kafka, cross-compile, GPU: same pattern — `setup_cmd`
+brings it up, `teardown_cmd` tears it down, `{id}` isolates. Shepherd doesn't change.
+
 ## Where things live
 
 | Location | Contents |

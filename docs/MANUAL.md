@@ -246,6 +246,65 @@ GNU/Linux; sobrescreva para hosts BSD/macOS, ex.: `rsync -a
 do worker (edição) e o do teste (remoto) são independentes; a rede do sandbox
 não afeta o portão.
 
+### Passo a passo
+
+1. **Prepare um checkout warm no host** — clone do repo com deps/build já
+   compilados (`repo_dir`). O portão parte dele a cada execução; nunca o altera.
+2. **Garanta SSH sem senha** — chave/agent já configurados (`ssh user@host`
+   funciona sozinho). Shepherd usa `BatchMode=yes`.
+3. **Escreva `test_remote` no `.shepherd-dev.json`** (commite — é metadata do
+   projeto). Use `{id}` para isolar tudo que tenha estado.
+4. **Rode normal**: `shepherd-dev run "<feature>"`. Um preflight confirma o host
+   antes de gastar worker; o resto é igual ao fluxo local.
+
+### Receitas (troque só o texto — shepherd é agnóstico)
+
+**Elixir + Postgres em Docker Compose** (o `compose.yml` vive no repo):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host", "repo_dir": "/srv/app",
+  "setup_cmd": "docker compose -p sg-{id} up -d db && until docker compose -p sg-{id} exec -T db pg_isready; do sleep 1; done && MIX_ENV=test mix ecto.migrate",
+  "test_cmd": "mix test",
+  "teardown_cmd": "docker compose -p sg-{id} down -v",
+  "writable": ["_build"],
+  "env": { "MIX_ENV": "test", "DATABASE_URL": "postgres://postgres@localhost:5432/app_{id}" }
+} }
+```
+
+**Rails + Postgres já rodando no host** (sem Docker):
+
+```json
+{ "test_remote": {
+  "ssh": "ci@host", "repo_dir": "/home/ci/app",
+  "setup_cmd": "createdb app_{id} && RAILS_ENV=test DB=app_{id} bin/rails db:schema:load",
+  "test_cmd": "DB=app_{id} bundle exec rspec",
+  "teardown_cmd": "dropdb app_{id}",
+  "env": { "RAILS_ENV": "test" }
+} }
+```
+
+**MySQL** (só muda o texto do setup/teardown):
+
+```json
+{ "test_remote": {
+  "ssh": "user@host", "repo_dir": "/app",
+  "setup_cmd": "mysql -e 'CREATE DATABASE app_{id}' && DB=app_{id} npm run migrate",
+  "test_cmd": "DB=app_{id} npm test",
+  "teardown_cmd": "mysql -e 'DROP DATABASE app_{id}'"
+} }
+```
+
+**Testcontainers / serviço efêmero por conta do próprio teste** (o teste sobe
+tudo; sem setup/teardown externos):
+
+```json
+{ "test_remote": { "ssh": "user@host", "repo_dir": "/app", "test_cmd": "go test ./..." } }
+```
+
+Redis, MongoDB, SQL Server, Kafka, cross-compile, GPU: mesmo padrão — `setup_cmd`
+sobe, `teardown_cmd` derruba, `{id}` isola. Shepherd não muda.
+
 ## Onde vive o quê
 
 | Local | Conteúdo |
