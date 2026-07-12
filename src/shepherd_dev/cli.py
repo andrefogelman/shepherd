@@ -80,9 +80,67 @@ def _refresh_substrate(repo_root: Path) -> str | None:
     return None
 
 
+def _slugify(text: str, limit: int = 28) -> str:
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:limit].rstrip("-") or "feature"
+
+
+def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: str) -> tuple[str | None, str | None]:
+    """Commit accepted files on an isolated shepherd/<slug> branch, then return
+    to the original branch. Never pushes. Returns (branch_name, error)."""
+    import subprocess
+
+    def git(*argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *argv], cwd=repo_root, capture_output=True, text=True)
+
+    cur = git("rev-parse", "--abbrev-ref", "HEAD")
+    original = cur.stdout.strip()
+    if cur.returncode != 0 or original == "HEAD":
+        return None, "not on a branch (detached HEAD) — files left in the working tree, commit manually"
+
+    branch = f"shepherd/{slug}"
+    n = 2
+    while git("rev-parse", "--verify", "--quiet", branch).returncode == 0:
+        branch = f"shepherd/{slug}-{n}"
+        n += 1
+
+    steps = [
+        ("checkout -b", git("checkout", "-b", branch)),
+        ("add", git("add", "--", *written)),
+        ("commit", git("commit", "-m", message)),
+        ("checkout back", git("checkout", original)),
+    ]
+    for name, proc in steps:
+        if proc.returncode != 0:
+            return None, f"git {name} failed: {(proc.stderr or proc.stdout).strip()[:300]}"
+    return branch, None
+
+
+def _auto_settle_conditions(report) -> str | None:
+    """None = all hard conditions met; otherwise the human-readable reason."""
+    if not report.succeeded:
+        return "run did not succeed"
+    if report.review is None:
+        return "no review was run"
+    if report.review.error:
+        return f"review unavailable: {report.review.error}"
+    if not report.review.approved:
+        return "review REJECTED the proposal"
+    return None
+
+
 def cmd_run(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
+        return 2
+
+    if args.auto_settle and args.no_review:
+        print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
+        return 2
+    if args.auto_settle and args.provider == "static":
+        print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
         return 2
 
     error = _refresh_substrate(repo_root)
@@ -123,16 +181,47 @@ def cmd_run(args) -> int:
         history.run_payload(
             report, repo_root,
             mode=args.mode, test_cmd=args.test_cmd, provider=args.provider,
-            flags={"max_attempts": args.max_attempts, "allowed_prefix": args.allowed_prefix},
+            flags={
+                "max_attempts": args.max_attempts,
+                "allowed_prefix": args.allowed_prefix,
+                "auto_settle": args.auto_settle,
+            },
         ),
     )
     print(report.summary())
+
+    if args.auto_settle and report.final_run_ref:
+        reason = _auto_settle_conditions(report)
+        if reason:
+            print(f"\nauto-settle: NOT applied ({reason}) — proposal stays retained for manual settlement")
+            return 0 if report.succeeded else 1
+        code, written = settle_run(repo_root, report.final_run_ref, reject=False, auto=True)
+        if code != 0 or not written:
+            return 1
+        branch, err = auto_commit_branch(
+            repo_root, written, _slugify(args.feature),
+            f"feat: {args.feature}\n\nshepherd-dev auto-settle ({report.final_run_ref}); "
+            f"gate passed, review approved.",
+        )
+        if err:
+            print(f"auto-settle: files written but NOT committed — {err}")
+        else:
+            print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
+        return 0
+
     return 0 if report.succeeded else 1
 
 
 def cmd_run2(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
+        return 2
+
+    if args.auto_settle and args.no_review:
+        print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
+        return 2
+    if args.auto_settle and args.provider == "static":
+        print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
         return 2
 
     if args.provider == "claude":
@@ -162,33 +251,55 @@ def cmd_run2(args) -> int:
         history.parallel_payload(
             report, repo_root,
             test_cmd=args.test_cmd, provider=args.provider,
-            flags={"max_attempts": args.max_attempts, "max_repairs": args.max_repairs},
+            flags={
+                "max_attempts": args.max_attempts,
+                "max_repairs": args.max_repairs,
+                "auto_settle": args.auto_settle,
+            },
         ),
     )
     print(report.summary())
+
+    if args.auto_settle and report.proposal_id:
+        reason = _auto_settle_conditions(report)
+        if reason:
+            print(f"\nauto-settle: NOT applied ({reason}) — proposal stays staged for manual settlement")
+            return 0 if report.succeeded else 1
+        code, written = settle_proposal(repo_root, report.proposal_id, reject=False, auto=True)
+        if code != 0 or not written:
+            return 1
+        branch, err = auto_commit_branch(
+            repo_root, written, _slugify(f"{args.feature_a}-{args.feature_b}"),
+            f"feat: {args.feature_a} + {args.feature_b}\n\nshepherd-dev auto-settle "
+            f"(proposal {report.proposal_id}); combined gate passed, review approved.",
+        )
+        if err:
+            print(f"auto-settle: files written but NOT committed — {err}")
+        else:
+            print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
+        return 0
+
     return 0 if report.succeeded else 1
 
 
-def cmd_settle_par(args) -> int:
-    repo_root = _resolve_repo(args.repo)
-    if repo_root is None:
-        return 2
-    staging = repo_root / PROPOSALS_DIR / args.proposal_id
+def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bool = False) -> tuple[int, list[str]]:
+    """Core settlement for a staged run2/best-of proposal. Returns (exit_code, written)."""
+    import shutil
+
+    staging = repo_root / PROPOSALS_DIR / proposal_id
     files_dir = staging / "files"
     if not files_dir.is_dir():
         print(f"error: staged proposal not found: {staging}", file=sys.stderr)
-        return 2
+        return 2, []
 
-    if args.reject:
-        import shutil
-
+    if reject:
         shutil.rmtree(staging)
         history.record_event(
             "settle_par",
-            {"repo": str(repo_root), "ref": args.proposal_id, "action": "reject", "auto": False},
+            {"repo": str(repo_root), "ref": proposal_id, "action": "reject", "auto": auto},
         )
-        print(f"{args.proposal_id}: staged proposal discarded")
-        return 0
+        print(f"{proposal_id}: staged proposal discarded")
+        return 0, []
 
     entries = {
         str(path.relative_to(files_dir)): path.read_bytes()
@@ -196,18 +307,25 @@ def cmd_settle_par(args) -> int:
         if path.is_file()
     }
     written = materialize_into(repo_root, entries)
-    import shutil
-
     shutil.rmtree(staging)
     history.record_event(
         "settle_par",
-        {"repo": str(repo_root), "ref": args.proposal_id, "action": "accept", "auto": False, "written": written},
+        {"repo": str(repo_root), "ref": proposal_id, "action": "accept", "auto": auto, "written": written},
     )
-    print(f"{args.proposal_id}: accepted — {len(written)} file(s) written:")
+    print(f"{proposal_id}: accepted — {len(written)} file(s) written:")
     for rel in written:
         print(f"  {rel}")
-    print("review and commit them with git.")
-    return 0
+    return 0, written
+
+
+def cmd_settle_par(args) -> int:
+    repo_root = _resolve_repo(args.repo)
+    if repo_root is None:
+        return 2
+    code, written = settle_proposal(repo_root, args.proposal_id, reject=args.reject)
+    if code == 0 and written:
+        print("review and commit them with git.")
+    return code
 
 
 def cmd_init(args) -> int:
@@ -309,6 +427,11 @@ def main() -> int:
         action="store_true",
         help="skip the reviewer pass after the gate passes",
     )
+    p_run.add_argument(
+        "--auto-settle",
+        action="store_true",
+        help="on gate PASS + review APPROVED: settle and commit on an isolated shepherd/<slug> branch (never pushes)",
+    )
     p_run.add_argument("--max-attempts", type=int, default=3)
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
     p_run.add_argument(
@@ -333,6 +456,11 @@ def main() -> int:
     p_run2.add_argument("--test-cmd", required=True, help="combined test gate command")
     p_run2.add_argument("--provider", default="claude", choices=["claude", "static"])
     p_run2.add_argument("--no-review", action="store_true")
+    p_run2.add_argument(
+        "--auto-settle",
+        action="store_true",
+        help="on combined gate PASS + review APPROVED: settle and commit on an isolated shepherd/<slug> branch (never pushes)",
+    )
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")
     p_run2.add_argument("--gate-timeout", type=int, default=600)
