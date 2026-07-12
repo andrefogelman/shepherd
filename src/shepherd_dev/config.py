@@ -139,11 +139,15 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
     """(cmd, worker_hint) for the zero-dependency floor gate, or None."""
     if lang == "js":
         ts = _repo_is_typescript(repo_root)
+        # Explicit `.test.` glob, NOT node --test's default patterns — those also
+        # match `test-*.js`, which would sweep build artifacts (e.g. lucide
+        # `test-tube*.js` icons under dist/) and fail the gate. node --test skips
+        # node_modules on its own; scoping to *.test.* also avoids dist output.
         if ts and _node_supports_strip_types():
-            cmd = "node --test --experimental-strip-types"
+            cmd = "node --test --experimental-strip-types '**/*.test.ts'"
             files = "*.test.ts (TypeScript)"
         else:
-            cmd = "node --test"
+            cmd = "node --test '**/*.test.js' '**/*.test.mjs'"
             files = "*.test.js / *.test.mjs (plain JavaScript, not TypeScript)"
         hint = (
             "Also write tests for this feature using Node's BUILT-IN test runner "
