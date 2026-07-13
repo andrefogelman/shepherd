@@ -865,6 +865,14 @@ def cmd_settle(args) -> int:
     return code
 
 
+def cmd_mcp(args) -> int:
+    """Run as an MCP stdio server so any MCP client (Codex, Cursor, Claude Code,
+    the ChatGPT desktop app) can drive shepherd-dev as native tools."""
+    from .mcpserver import serve
+
+    return serve()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Supervised AI development via Shepherd")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1019,6 +1027,9 @@ def main() -> int:
     p_opt.add_argument("--worker-budget", type=int, default=900)
     p_opt.add_argument("--apply", action="store_true", help="persist the edit if it passes (default: dry-run)")
     p_opt.set_defaults(func=cmd_optimize)
+
+    p_mcp = sub.add_parser("mcp", help="run as an MCP stdio server (Codex / Cursor / Claude Code / ChatGPT desktop)")
+    p_mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args()
     return args.func(args)
