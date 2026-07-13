@@ -406,6 +406,7 @@ def develop(
     review_task=None,
     initial_guidance: str = "",
     context_pack: str | None = None,
+    reporter=None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace.
 
@@ -414,10 +415,14 @@ def develop(
     initial_guidance seeds the first attempt (e.g. teammate/handoff context);
     later attempts replace it with concrete failure feedback. context_pack, when
     given, is prepended to the guidance of EVERY attempt (built once per command,
-    reused across retries — the lane-honest analogue of prefix reuse).
+    reused across retries — the lane-honest analogue of prefix reuse). reporter
+    surfaces live per-phase progress (#A); defaults to a silent NullProgress.
     """
     import time as _time
 
+    from .progress import NullProgress, worker_activity_summary
+
+    reporter = reporter or NullProgress()
     policy = policy or ChangesetPolicy()
     report = DevReport(feature=feature, succeeded=False, repo=str(repo_root))
     guidance = initial_guidance
@@ -426,6 +431,7 @@ def develop(
 
     for number in range(1, max_attempts + 1):
         warmup = _start_gate_warmup(repo_root, test_cmd, gate_timeout)
+        reporter.step(f"attempt {number}/{max_attempts} · worker running")
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature
@@ -444,6 +450,7 @@ def develop(
         except Exception as exc:
             if warmup is not None:
                 warmup.teardown()
+            reporter.fail(f"worker run failed: {type(exc).__name__}")
             report.attempts.append(
                 Attempt(
                     number, "(no run)", [], [], None, "run_failed",
@@ -462,6 +469,7 @@ def develop(
         changeset = output.changeset()
         entries = read_changeset_entries(changeset)
         changed = list(entries)
+        reporter.note(worker_activity_summary(run, entries))  # post-hoc #B
 
         if not changed:
             # Worker produced nothing: either it judged the feature already
@@ -469,6 +477,7 @@ def develop(
             output.discard()
             if warmup is not None:
                 warmup.teardown()
+            reporter.fail("no file changes")
             report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration))
             guidance = (
                 "PREVIOUS ATTEMPT: you produced no file changes at all. "
@@ -482,6 +491,7 @@ def develop(
             output.discard()
             if warmup is not None:
                 warmup.teardown()
+            reporter.fail(f"policy: {len(verdict_policy.violations)} violation(s)")
             report.attempts.append(
                 Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
             )
@@ -490,15 +500,18 @@ def develop(
 
         gate: GateResult | None = None
         if test_cmd is not None:
+            reporter.step(f"attempt {number} · gate")
             gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup)
             if gate.infra_error:
                 # Suite could not run: abort, do not burn attempts, keep output retained
+                reporter.fail(f"gate infra: {gate.infra_error[:80]}")
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
                 report.settlement_hint = f"gate infra error: {gate.infra_error}"
                 return report
 
             if not gate.passed:
                 output.discard()
+                reporter.fail(f"gate failed (exit {gate.exit_code})")
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
                 guidance = _prior_attempt_guidance(entries) + _format_guidance("gate", gate=gate)
                 continue
@@ -508,6 +521,7 @@ def develop(
         report.final_run_ref = run.run_ref
         report.entries = entries
         if review_task is not None:
+            reporter.step(f"attempt {number} · review")
             report.review = run_review(
                 workspace,
                 review_task,

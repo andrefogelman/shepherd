@@ -508,6 +508,9 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.best_of > 1:
         return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature, pack, pack_stats)
 
+    from .progress import NullProgress, ProgressReporter
+
+    reporter = NullProgress() if getattr(args, "quiet", False) else ProgressReporter()
     with sp.open(repo_root) as workspace:
         report = develop(
             workspace,
@@ -523,7 +526,9 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             policy=policy,
             review_task=reviewer,
             context_pack=pack,
+            reporter=reporter,
         )
+    reporter.close(ok=report.succeeded)
 
     learned = repo_memory.learn_from_report(repo_root, report)
     if learned:
@@ -898,6 +903,11 @@ def main() -> int:
         "--no-plan",
         action="store_true",
         help="skip the cheap-model planning prefetch (no target/plan hints)",
+    )
+    p_run.add_argument(
+        "--quiet",
+        action="store_true",
+        help="silence the live per-phase progress reporter",
     )
     p_run.add_argument(
         "--optimize-after",

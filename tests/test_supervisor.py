@@ -9,6 +9,7 @@ carry attempt 1's proposed files. Runnable with:
 
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from shepherd_dev.progress import ProgressReporter  # noqa: E402
 from shepherd_dev.supervisor import _prior_attempt_guidance, develop  # noqa: E402
 
 
@@ -110,6 +112,24 @@ class RetryCarriesPriorDiff(unittest.TestCase):
         self.assertNotIn("ATTEMPT_ONE_MARKER", ws.seen_guidance[0])
         self.assertIn("ATTEMPT_ONE_MARKER", ws.seen_guidance[1])
         self.assertIn("PREVIOUS ATTEMPT", ws.seen_guidance[1])
+
+
+class ProgressWiring(unittest.TestCase):
+    def test_reporter_receives_phase_lines_and_activity(self):
+        repo_root = Path(tempfile.mkdtemp())
+        (repo_root / "seed.txt").write_text("seed\n")
+        ws = _Workspace([{"impl.py": b"def f():\n    return 1\n"}])
+        buf = io.StringIO()
+        develop(
+            ws, task=object(), repo="r", repo_root=repo_root, feature="thing",
+            test_cmd="false", max_attempts=2, gate_timeout=30,
+            reporter=ProgressReporter(stream=buf, enabled=False),
+        )
+        out = buf.getvalue()
+        self.assertIn("attempt 1/2 · worker running", out)
+        self.assertIn("worker: 1 file(s): impl.py", out)   # post-hoc #B note
+        self.assertIn("attempt 1 · gate", out)
+        self.assertIn("✗", out)                             # gate 'false' fails
 
 
 if __name__ == "__main__":
