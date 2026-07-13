@@ -79,6 +79,37 @@ Either way the worker is a headless `claude` session, so an authenticated
 `claude` CLI is required — Cursor's own AI does not power the worker. Nothing
 touches your files until you accept.
 
+## Using inside Codex (or any MCP client)
+
+Two ways, both cross-agent (they also work in Cursor, Claude Code, and the
+ChatGPT desktop app).
+
+**1. The skill (portable).** `codex/skills/shepherd-dev/SKILL.md` is the
+[agentskills.io](https://agentskills.io) open standard — the same skill Codex,
+Claude Code and Cursor read. Copy it into `~/.codex/skills/shepherd-dev/`
+(personal) or `.codex/skills/shepherd-dev/` (project, version-controlled).
+Restart Codex, then in chat: "develop X with shepherd" — the agent invokes the
+skill, runs the CLI, shows the report, and asks you to accept or reject.
+
+**2. The MCP server (native tools).** shepherd-dev ships an MCP stdio server —
+`shepherd-dev mcp` — exposing `shepherd_run`, `shepherd_run2`, `shepherd_settle`,
+`shepherd_settle_par`. Add it once to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.shepherd-dev]
+command = "shepherd-dev"
+args = ["mcp"]
+```
+
+(or `codex mcp add shepherd-dev -- shepherd-dev mcp`). The same server works in
+Cursor (`.cursor/mcp.json`), Claude Code, and the ChatGPT desktop app — one
+server, every client. `shepherd_run`/`run2` always run with `--no-settle`, so
+nothing is applied through MCP; you settle explicitly. See
+[codex/README.md](../codex/README.md).
+
+As always the worker is a headless `claude` session — an authenticated `claude`
+CLI is required; the host agent's own model does not power it.
+
 ## Install (per machine)
 
 ```bash
