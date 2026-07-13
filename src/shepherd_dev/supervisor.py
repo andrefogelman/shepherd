@@ -45,7 +45,7 @@ class Attempt:
     changed_paths: list[str]
     policy_violations: list[str]
     gate: GateResult | None
-    verdict: str  # "run_failed" | "no_change" | "policy_rejected" | "tests_failed" | "passed"
+    verdict: str  # run_failed | no_change | policy_rejected | tests_failed | passed | timed_out
     error: str | None = None
     duration_s: float | None = None  # worker wall-clock (cost/speed telemetry)
 
@@ -171,6 +171,13 @@ def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: Ga
     raise ValueError(f"unknown guidance kind: {kind}")
 
 
+_TIMEOUT_GUIDANCE = (
+    "PREVIOUS ATTEMPT: you exceeded the wall-clock budget and were stopped "
+    "mid-run. Be far more direct — make the minimal change and write it now; "
+    "do not keep exploring or re-reading files."
+)
+
+
 def _prior_attempt_guidance(entries: dict[str, bytes], limit: int = 8000) -> str:
     """Render the worker's own last proposal so the next attempt iterates on it
     instead of restarting from scratch (#3c). Capped; empty when no entries."""
@@ -190,24 +197,64 @@ def _prior_attempt_guidance(entries: dict[str, bytes], limit: int = 8000) -> str
     )
 
 
+# #A hard-kill at the source: reap the WHOLE worker process group on budget
+# expiry. The base provider launches `perl -e 'alarm B; exec node runner …'` —
+# SIGALRM kills only the runner, orphaning claude + MCP subprocesses. This perl
+# forks the runner into its own session (setsid) and, on the alarm, kills the
+# group (kill -PGID). It degrades safely at every step: fork failure → plain
+# exec (framework-equivalent), setsid blocked → eval-guarded, killpg blocked →
+# single-pid kill. So it can only match or improve the framework, never break
+# the launch (which already relies on perl+exec).
+_KILLTREE_PERL = (
+    "my $b = shift @ARGV; my $pid = fork();"
+    ' if (!defined $pid) { exec @ARGV or die "exec: $!" }'
+    ' if ($pid == 0) { eval { require POSIX; POSIX::setsid() }; exec @ARGV or die "exec: $!" }'
+    " $SIG{ALRM} = sub { kill('KILL', -$pid) or kill('KILL', $pid); exit 124 };"
+    " alarm $b; waitpid($pid, 0); exit($? >> 8)"
+)
+
+
+def _swap_perl_killtree(argv: list) -> list:
+    """Swap the base provider's perl `alarm; exec` script (argv[2]) for the
+    killtree one, preserving everything else. A no-op if argv is not `perl -e …`."""
+    if len(argv) >= 3 and str(argv[0]).endswith("perl") and argv[1] == "-e":
+        argv = list(argv)
+        argv[2] = _KILLTREE_PERL
+    return argv
+
+
 def set_worker_budget(seconds: int) -> None:
-    """Raise the Claude workspace provider's wall-clock budget.
+    """Raise the Claude workspace provider's wall-clock budget AND make it a hard
+    kill of the whole worker process group (#A).
 
     Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
     runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
     too little for real features. Rebinds the internal transport seam
-    (private API — revisit on framework upgrade).
+    (private API — revisit on framework upgrade), installing a provider whose
+    launch perl reaps the process group at the budget instead of orphaning the
+    worker's children. The watchdog (#B) is the belt-and-suspenders backstop.
     """
     from shepherd_dialect import providers
     from shepherd_dialect.workspace_control import runtime_provider as rp
 
+    class _KillTreeProvider(providers.ClaudeHeadlessProvider):
+        def command_argv(self, working_path, cli, prompt=None):
+            # Reuse the framework's exact argv (all flags preserved) and swap ONLY
+            # the perl script slot for the killtree one — robust to any change in
+            # the body, and a no-op if the shape is ever not `perl -e`.
+            return _swap_perl_killtree(list(super().command_argv(working_path, cli, prompt)))
+
     def transport(invocation):
-        return providers.ClaudeHeadlessProvider(
+        kwargs = dict(
             provider_id=invocation.provider_id,
             prompt=invocation.prompt,
             model=invocation.model_name,
             budget_seconds=seconds,
         )
+        try:
+            return _KillTreeProvider(**kwargs)
+        except Exception:
+            return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
 
     rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
         claude=transport
@@ -407,6 +454,7 @@ def develop(
     initial_guidance: str = "",
     context_pack: str | None = None,
     reporter=None,
+    worker_budget: int | None = None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace.
 
@@ -439,6 +487,13 @@ def develop(
                 f"{context_pack}\n\n{guidance}".strip() if context_pack else guidance
             )
 
+        # #B backstop: hard-kill the worker subtree `grace` past the budget (serial
+        # claude runs only — parallel best-of can't tell workers apart by signature).
+        wd = None
+        if worker_budget and provider == "claude" and test_cmd is not None:
+            from .worker_watchdog import WorkerWatchdog
+
+            wd = WorkerWatchdog(worker_budget).start()
         started = _time.monotonic()
         try:
             run = workspace.run(
@@ -448,8 +503,18 @@ def develop(
                 **args,
             )
         except Exception as exc:
+            if wd is not None:
+                wd.cancel()
             if warmup is not None:
                 warmup.teardown()
+            if wd is not None and wd.fired:
+                reporter.fail("worker timed out (budget hard-kill)")
+                report.attempts.append(Attempt(
+                    number, "(timed out)", [], [], None, "timed_out",
+                    error="worker exceeded budget and was hard-killed",
+                    duration_s=round(_time.monotonic() - started, 1)))
+                guidance = _TIMEOUT_GUIDANCE
+                continue
             reporter.fail(f"worker run failed: {type(exc).__name__}")
             report.attempts.append(
                 Attempt(
@@ -464,6 +529,22 @@ def develop(
                 "wall-clock budget: read only what you need, then write the change."
             )
             continue
+        if wd is not None:
+            wd.cancel()
+            if wd.fired:  # killed but workspace.run returned — its output is garbage
+                try:
+                    run.output().discard()
+                except Exception:
+                    pass
+                if warmup is not None:
+                    warmup.teardown()
+                reporter.fail("worker timed out (budget hard-kill)")
+                report.attempts.append(Attempt(
+                    number, getattr(run, "run_ref", "(timed out)"), [], [], None, "timed_out",
+                    error="worker exceeded budget and was hard-killed",
+                    duration_s=round(_time.monotonic() - started, 1)))
+                guidance = _TIMEOUT_GUIDANCE
+                continue
         duration = round(_time.monotonic() - started, 1)
         output = run.output()
         changeset = output.changeset()

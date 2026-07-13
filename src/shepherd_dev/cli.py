@@ -527,6 +527,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             review_task=reviewer,
             context_pack=pack,
             reporter=reporter,
+            worker_budget=(None if getattr(args, "no_watchdog", False) else args.worker_budget),
         )
     reporter.close(ok=report.succeeded)
 
@@ -908,6 +909,11 @@ def main() -> int:
         "--quiet",
         action="store_true",
         help="silence the live per-phase progress reporter",
+    )
+    p_run.add_argument(
+        "--no-watchdog",
+        action="store_true",
+        help="disable the worker budget hard-kill backstop (#B)",
     )
     p_run.add_argument(
         "--optimize-after",
