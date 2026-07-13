@@ -156,6 +156,34 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--max-repairs` | run2 | Repair rounds on the combined gate (default 2). |
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
+| `--no-plan` | run · run2 | Turns off the planning prefetch (no target/plan hints). |
+| `--quiet` | run | Silences the live progress reporter. |
+| `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
+
+## Accelerators & robustness
+
+Three mechanisms turn on by themselves (no setup) and make each run faster and
+safer. All degrade cleanly: if something fails, the run proceeds as usual.
+
+**Planning prefetch.** Before the worker starts, a quick pass with a cheap model
+decomposes the feature into a plan and the exact target files, which feed the
+context pack — the worker starts knowing where to touch instead of exploring the
+repo from scratch. Best-effort: on any failure (no network, missing CLI) the run
+continues. Disable with `--no-plan`; change the model via `planning.model` in
+`.shepherd-dev.json`.
+
+**Live feedback.** While the run happens, the terminal shows per-phase progress —
+`attempt k/N · worker → gate → review` — with a spinner and elapsed time,
+committing a `✓/✗` line as each phase settles. After each attempt, a summary of
+what the worker did (files touched + a tool tally read from the run trace). On a
+non-interactive terminal (CI) it degrades to plain lines. Silence with `--quiet`.
+
+**Budget hard-kill.** `--worker-budget` (default 900s) is the wall-clock cap per
+attempt. On expiry the whole worker is really killed — its entire process tree,
+leaving no orphan — in two layers: (A) at the source, the worker's process group
+is reaped on expiry; (B) an independent backstop guarantees the kill even if
+layer A doesn't apply in your environment. A stuck worker dies at the budget, not
+in an open-ended wait. Disable the backstop with `--no-watchdog`.
 
 ## Best-of-N
 
@@ -247,6 +275,13 @@ runs `setup_cmd` → `test_cmd` (with a **remote** timeout) → `teardown_cmd`; 
 cleans up **always**, even on timeout/error. Parallel modes (`run2`/`best-of`)
 with a stateful service: use `{id}` in the config to run in parallel; without it,
 shepherd serializes the remote gates so shared state can't be corrupted.
+
+While the worker edits, shepherd already **pre-stages** the remote gate in
+parallel (the ephemeral copy of the warm checkout and, when the config isolates
+by `{id}`, the service `setup_cmd`) — so when the proposal is ready only the
+overlay + test remain, and the staging latency is hidden behind the worker's
+time. The staging never leaves residue: if the worker produces nothing, the
+pre-staged workdir/service is torn down.
 
 Optional keys: `copy_cmd` (default `cp -al {repo} {workdir}` — GNU/Linux
 hardlink; override for BSD/macOS hosts, e.g. `rsync -a --link-dest={repo}

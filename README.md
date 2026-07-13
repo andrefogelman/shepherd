@@ -42,7 +42,16 @@ shepherd-dev settle-par <proposal-id> [--reject]
 
 Useful flags: `--mode tests` (only write tests), `--no-review`, `--provider static` (offline
 dry-run of the machinery), `--allowed-prefix src/` (scope confinement), `--max-attempts`,
-`--worker-budget` (wall-clock seconds per attempt), `--max-repairs` (run2).
+`--worker-budget` (wall-clock seconds per attempt), `--max-repairs` (run2), `--no-plan`,
+`--quiet`, `--no-watchdog`.
+
+Every run also ships four zero-setup mechanisms (each degrades cleanly and can be turned off):
+a **planning prefetch** (a cheap model names the target files + plan up front, feeding the
+context pack), **live progress** (per-phase spinner + a post-hoc summary of the worker's
+files/tools), a **remote-gate warmup** (pre-stages the remote copy + service while the worker
+edits), and a **budget hard-kill** (on `--worker-budget` expiry the worker's whole process
+tree is reaped — killpg at the source plus an independent watchdog backstop — so a stuck
+worker never survives to an outer timeout).
 
 ## Use inside Claude Code (recommended)
 

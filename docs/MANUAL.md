@@ -150,6 +150,35 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--max-repairs` | run2 | Rodadas de reparo no portão combinado (padrão 2). |
 | `--provider static` | run · run2 | Ensaio offline sem LLM (custo zero). |
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
+| `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
+| `--quiet` | run | Silencia o feedback vivo de progresso. |
+| `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
+
+## Aceleradores & robustez do run
+
+Três mecanismos ligam sozinhos (sem setup) e tornam cada run mais rápido e mais
+seguro. Todos degradam de forma limpa: se algo falha, o run segue normal.
+
+**Planejamento prévio (prefetch).** Antes de o worker começar, um passo rápido
+com um modelo barato decompõe a feature num plano e nos arquivos-alvo exatos, que
+entram no context pack — o worker já começa sabendo onde mexer, em vez de
+explorar o repo do zero. Best-effort: se falhar (sem rede, CLI ausente), o run
+continua. Desligue com `--no-plan`; troque o modelo em `planning.model` no
+`.shepherd-dev.json`.
+
+**Feedback vivo.** Enquanto o run acontece, o terminal mostra o progresso por
+fase — `tentativa k/N · worker → portão → revisão` — com spinner e tempo
+decorrido, fixando uma linha `✓/✗` a cada fase. Depois de cada tentativa, um
+resumo do que o worker fez (arquivos tocados + contagem de ferramentas, lido do
+trace). Em terminal não-interativo (CI) vira linhas simples. Silencie com
+`--quiet`.
+
+**Hard-kill do budget.** `--worker-budget` (padrão 900s) é o teto de tempo por
+tentativa. Ao estourar, o worker inteiro é morto de verdade — a árvore de
+processos toda, sem deixar órfão — em duas camadas: (A) na origem, o grupo de
+processos do worker é reapado no estouro; (B) um backstop independente garante a
+morte mesmo se a camada A não valer no seu ambiente. Um worker travado morre no
+budget, não numa espera indefinida. Desligue o backstop com `--no-watchdog`.
 
 ## Best-of-N
 
@@ -239,6 +268,13 @@ efêmera (o warm nunca é alterado); sobrepõe os arquivos da proposta; roda
 **sempre**, mesmo em timeout/erro. Modos paralelos (`run2`/`best-of`) com serviço
 com estado: use `{id}` na config para rodar em paralelo; sem isso, shepherd
 serializa os portões remotos para não corromper estado compartilhado.
+
+Enquanto o worker edita, shepherd já **pré-prepara** o portão remoto em paralelo
+(cópia efêmera do checkout warm e, quando a config isola por `{id}`, o `setup_cmd`
+do serviço) — assim, quando a proposta fica pronta, só falta sobrepor os arquivos
+e testar, e a latência de preparo fica escondida atrás do tempo do worker. O
+preparo nunca deixa resíduo: se o worker não produzir nada, o workdir/serviço
+pré-preparado é derrubado.
 
 Chaves opcionais: `copy_cmd` (default `cp -al {repo} {workdir}` — hardlink
 GNU/Linux; sobrescreva para hosts BSD/macOS, ex.: `rsync -a
