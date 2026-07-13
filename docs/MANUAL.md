@@ -49,6 +49,32 @@ do revisor) e o diff proposto, e **pergunta a você no chat**: aceitar ou rejeit
 Nada toca seus arquivos até você responder. Se a CLI não estiver instalada na
 máquina, o bootstrap do plugin a instala na primeira vez.
 
+## Usar dentro do Cursor
+
+Não há plugin nativo de Cursor — shepherd-dev é agnóstico de IDE. Dois jeitos:
+
+**1. A CLI no terminal integrado do Cursor (funciona hoje, sem nada específico
+do Cursor).** Instale uma vez e use no painel de terminal como em qualquer lugar:
+
+```bash
+uv tool install git+https://github.com/andrefogelman/shepherd.git
+cd ~/projetos/meu-app && shepherd-dev init
+shepherd-dev run "adicionar validação de CPF"
+```
+
+O prompt de aceitar/rejeitar funciona no terminal. Full feature — portão remoto,
+aceleradores, hard-kill.
+
+**2. Uma rule do Cursor para o Agent do Cursor conduzir.** Copie
+[examples/cursor/shepherd-dev.mdc](../examples/cursor/shepherd-dev.mdc) para
+`.cursor/rules/` do seu repo. Aí no chat do Cursor: "desenvolve X com shepherd" —
+o Agent roda a CLI no terminal, mostra o relatório e pergunta se você aceita ou
+rejeita antes de liquidar.
+
+De qualquer jeito o worker é uma sessão `claude` headless, então precisa de um
+`claude` CLI autenticado — a IA do próprio Cursor não alimenta o worker. Nada
+toca seus arquivos até você aceitar.
+
 ## Instalar (por máquina)
 
 Uma linha por máquina:

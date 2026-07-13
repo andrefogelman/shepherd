@@ -1,0 +1,30 @@
+---
+description: Supervised feature development with shepherd-dev. Use when the user asks to develop, implement, or add a feature "with shepherd" or "under supervision" — drive the shepherd-dev CLI in the integrated terminal instead of editing files directly.
+alwaysApply: false
+---
+
+# shepherd-dev — supervised development
+
+When the user asks to develop a feature under supervision (or names shepherd-dev),
+drive the `shepherd-dev` CLI in the integrated terminal. Do NOT edit the files
+yourself — a sandboxed worker proposes the change and the user decides what gets in.
+
+## How
+
+1. Once per repo: `shepherd-dev init` — initializes the workspace and detects the
+   test gate (saved to `.shepherd-dev.json`).
+2. Develop: `shepherd-dev run "<the feature in natural language>"`.
+   - The worker runs sandboxed and only PROPOSES changes; nothing is written yet.
+   - Show the user the report (attempts, gate result, reviewer verdict) and the diff.
+3. **Wait for the user to accept or reject — never settle on your own.**
+   - Accept: `shepherd-dev settle <run-ref>` (writes the files into the worktree).
+   - Reject: `shepherd-dev settle <run-ref> --reject` (discards it).
+
+## Notes
+
+- `--repo` and `--test-cmd` are inferred from inside the repo; pass them only to override.
+- Two coordinated features at once: `shepherd-dev run2 "<A>" "<B>"`, then `shepherd-dev settle-par <id>`.
+- Confine scope with `--allowed-prefix <path>` (repeatable); tests-only with `--mode tests`.
+- The worker is a headless `claude` session, so an authenticated `claude` CLI is
+  required — this is separate from Cursor's own AI, which does not power the worker.
+- Nothing touches the working tree until the user accepts; the git commit stays theirs.
