@@ -24,8 +24,9 @@ import shepherd as sp
 
 from . import config, history, memory as repo_memory
 from .contextpack import build_pack
-from .parallel import PROPOSALS_DIR, develop_best_of, develop_parallel
+from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
+from .staging import PROPOSALS_DIR
 from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
 from .tasks import implement, review, write_tests
 
@@ -91,6 +92,7 @@ def _resolve_gate(repo_root: Path, explicit_test_cmd: str | None, provider: str)
     BEFORE any worker runs (fail loud on an unreachable host instead of burning
     attempts) and let the remote config carry its own test_cmd."""
     remote_cfg = config.remote_gate(repo_root)
+    # static is offline; grok uses the same gate infrastructure as claude (local or remote)
     if remote_cfg is not None and provider != "static":
         from .remotegate import preflight
 
@@ -440,7 +442,8 @@ def _maybe_optimize_after(args, repo_root: Path) -> None:
       controlled because optimize replays real cases (~7 Claude sessions).
     Never raises: a failed optimize must not change the run's exit code.
     """
-    if args.provider == "static":
+    if args.provider in ("static", "grok"):
+        # optimize meta-prompt is Claude-CLI based today; never run it on grok/static paths
         return
     forced = getattr(args, "optimize_after", False)
     apply_edit = getattr(args, "optimize_apply", False)
@@ -484,12 +487,20 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
         return 2
-    if args.auto_settle and args.provider == "static":
-        print("error: --auto-settle requires the claude provider (review is mandatory)", file=sys.stderr)
+    if args.auto_settle and args.provider in ("static",):
+        print("error: --auto-settle requires a reviewing provider (not static)", file=sys.stderr)
+        return 2
+    if args.auto_settle and args.provider == "grok" and args.no_review:
+        print("error: --auto-settle with grok requires review (drop --no-review)", file=sys.stderr)
         return 2
 
-    if args.best_of > 1 and args.no_review and args.provider != "static":
-        print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
+    if args.best_of > 1 and args.no_review and args.provider not in ("static",):
+        # best-of ranking needs review for non-static; grok best-of not supported yet
+        if args.provider != "grok":
+            print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
+            return 2
+    if args.provider == "grok" and args.best_of > 1:
+        print("error: --best-of is not supported with --provider grok yet (use claude)", file=sys.stderr)
         return 2
 
     args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
@@ -497,6 +508,10 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         return 2
     feature = _with_hint(args.feature, gate_hint)
     pack, pack_stats = _build_pack(args, repo_root, args.feature)
+
+    # ── Grok path (L1 host / L2 try): no Claude, no workspace.run by default ──
+    if args.provider == "grok":
+        return _cmd_run_grok(args, repo_root, feature, pack, pack_stats)
 
     error = _refresh_substrate(repo_root)
     if error:
@@ -587,6 +602,95 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             for issue in rev.issues:
                 print(f"    issue: {issue}", file=sys.stderr)
         return _interactive_settle_run(repo_root, report.final_run_ref)
+    return 0 if report.succeeded else 1
+
+
+def _cmd_run_grok(args, repo_root: Path, feature: str, pack: str | None, pack_stats: dict) -> int:
+    """Grok provider path: L1 host (default) / L2 try — no Claude subprocess."""
+    from .progress import NullProgress, ProgressReporter
+    from .providers.grok_lane import develop_grok_lane_or_host
+
+    policy = ChangesetPolicy(
+        max_changed_paths=args.max_changed_paths,
+        allowed_prefixes=tuple(args.allowed_prefix),
+    )
+    # Grok does not need _refresh_substrate (settlement is stage/settle-par).
+    prefer_lane = getattr(args, "worker_backend", "auto") in ("lane", "auto")
+    if getattr(args, "worker_backend", "auto") == "host":
+        prefer_lane = False
+
+    reporter = NullProgress() if getattr(args, "quiet", False) else ProgressReporter()
+    do_review = not args.no_review
+    report = develop_grok_lane_or_host(
+        repo_root,
+        feature,
+        test_cmd=args.test_cmd,
+        prefer_lane=prefer_lane,
+        max_attempts=args.max_attempts,
+        gate_timeout=args.gate_timeout,
+        worker_budget=args.worker_budget,
+        policy=policy,
+        context_pack=pack,
+        mode=args.mode,
+        do_review=do_review,
+        grok_bin=getattr(args, "grok_cmd", None),
+        model=getattr(args, "grok_model", None),
+        reporter=reporter,
+    )
+    reporter.close(ok=report.succeeded)
+
+    dev = report.as_dev_report()
+    learned = repo_memory.learn_from_report(repo_root, dev)
+    if learned:
+        print(f"repo memory: +{learned} fact(s) learned")
+    history.record_event(
+        "run",
+        {
+            **history.run_payload(
+                dev, repo_root,
+                mode=args.mode, test_cmd=args.test_cmd, provider="grok",
+                flags={
+                    "max_attempts": args.max_attempts,
+                    "allowed_prefix": args.allowed_prefix,
+                    "auto_settle": args.auto_settle,
+                    "pack": pack_stats or None,
+                    "backend": report.backend,
+                    "proposal_id": report.proposal_id,
+                },
+            ),
+            "proposal_id": report.proposal_id,
+        },
+    )
+    print(report.summary())
+
+    if args.auto_settle and report.proposal_id:
+        reason = _auto_settle_conditions(dev) if do_review else None
+        if not do_review:
+            reason = "no review was run"
+        if reason:
+            print(f"\nauto-settle: NOT applied ({reason}) — proposal stays staged for manual settlement")
+            return 0 if report.succeeded else 1
+        code, written = settle_proposal(repo_root, report.proposal_id, reject=False, auto=True)
+        if code != 0 or not written:
+            return 1
+        branch, err = auto_commit_branch(
+            repo_root, written, _slugify(args.feature),
+            f"feat: {args.feature}\n\nshepherd-dev auto-settle grok "
+            f"(proposal {report.proposal_id}); gate passed, review approved.",
+        )
+        if err:
+            print(f"auto-settle: files written but NOT committed — {err}")
+        else:
+            print(f"auto-settle: committed on branch {branch} (current branch untouched, no push)")
+        return 0
+
+    if _wants_interactive(args) and report.proposal_id:
+        rev = report.review
+        if rev is not None and not rev.error and not rev.approved:
+            print(f"\n⚠ reviewer REJECTED this proposal — {rev.summary}", file=sys.stderr)
+            for issue in rev.issues:
+                print(f"    issue: {issue}", file=sys.stderr)
+        return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
 
 
@@ -922,7 +1026,28 @@ def main() -> int:
     p_run.add_argument("feature", help="feature request in natural language")
     p_run.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
     p_run.add_argument("--test-cmd", default=None, help='test gate; default: saved config, else auto-detected')
-    p_run.add_argument("--provider", default="claude", choices=["claude", "static"])
+    p_run.add_argument(
+        "--provider",
+        default="claude",
+        choices=["claude", "static", "grok"],
+        help="worker backend: claude (default, jail), static (offline dry-run), grok (no Claude — L1 host / L2 try)",
+    )
+    p_run.add_argument(
+        "--worker-backend",
+        default="auto",
+        choices=["auto", "host", "lane"],
+        help="grok only: host=isolated clone+CLI (L1); lane=try workspace rebind (L2) then host; auto=lane-ready host",
+    )
+    p_run.add_argument(
+        "--grok-cmd",
+        default=None,
+        help="grok only: path to the Grok CLI (default: PATH or ~/.grok/bin/grok; env SHEPHERD_DEV_GROK_CMD)",
+    )
+    p_run.add_argument(
+        "--grok-model",
+        default=None,
+        help="grok only: model id for the Grok CLI (env SHEPHERD_DEV_GROK_MODEL)",
+    )
     p_run.add_argument(
         "--mode",
         default="feature",
@@ -1003,7 +1128,12 @@ def main() -> int:
     p_run2.add_argument("feature_b", help="second feature (reworks on conflicts)")
     p_run2.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
     p_run2.add_argument("--test-cmd", default=None, help="combined gate; default: saved config, else auto-detected")
-    p_run2.add_argument("--provider", default="claude", choices=["claude", "static"])
+    p_run2.add_argument(
+        "--provider",
+        default="claude",
+        choices=["claude", "static"],
+        help="claude (default) or static; grok parallel is not supported yet",
+    )
     p_run2.add_argument("--no-review", action="store_true")
     p_run2.add_argument(
         "--auto-settle",

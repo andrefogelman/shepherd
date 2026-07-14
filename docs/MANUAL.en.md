@@ -108,8 +108,13 @@ nothing is applied through MCP; you settle explicitly, and **accepting requires
 `confirm: true`** (the settle tools refuse to write files without it). See
 [codex/README.md](../codex/README.md).
 
-As always the worker is a headless `claude` session — an authenticated `claude`
+By default the worker is a headless `claude` session — an authenticated `claude`
 CLI is required; the host agent's own model does not power it.
+
+**Grok worker (no Claude):** pass `--provider grok`. The worker is the Grok Build
+CLI (`grok` on PATH or `~/.grok/bin/grok`); proposals are staged for
+`settle-par` (same as run2). See [2026-07-14-grok-provider-l1-l2.md](2026-07-14-grok-provider-l1-l2.md).
+Default `--provider claude` is unchanged.
 
 ## Install (per machine)
 

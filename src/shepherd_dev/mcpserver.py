@@ -47,6 +47,11 @@ TOOLS = [
                 "best_of": {"type": "integer", "description": "K parallel candidates (2-4)"},
                 "allowed_prefix": {"type": "array", "items": {"type": "string"}, "description": "confine changes to these path prefixes"},
                 "max_attempts": {"type": "integer", "description": "attempts before giving up (default 3)"},
+                "provider": {
+                    "type": "string",
+                    "enum": ["claude", "static", "grok"],
+                    "description": "worker backend; default claude. grok runs without the Claude CLI",
+                },
             },
             "required": ["feature"],
         },
@@ -128,6 +133,9 @@ def _argv_for(name: str, a: dict) -> list[str]:
             argv += ["--allowed-prefix", str(pfx)]
         if a.get("max_attempts"):
             argv += ["--max-attempts", str(int(a["max_attempts"]))]
+        prov = a.get("provider")
+        if prov in ("claude", "static", "grok"):
+            argv += ["--provider", str(prov)]
         return argv
     if name == "shepherd_run2":
         argv = ["run2", str(a["feature_a"]), str(a["feature_b"]), "--no-settle"]

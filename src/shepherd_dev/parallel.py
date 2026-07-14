@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +23,7 @@ from pathlib import Path
 import shepherd as sp
 
 from .policy import ChangesetPolicy
+from .staging import PROPOSALS_DIR, stage_proposal
 from .supervisor import (
     IGNORED_DIRS,
     DevReport,
@@ -36,7 +36,8 @@ from .supervisor import (
 )
 from .tasks import implement
 
-PROPOSALS_DIR = ".shepherd-proposals"
+# Back-compat for tests/imports that used the private name on this module.
+_stage_proposal = stage_proposal
 
 
 @dataclass
@@ -295,7 +296,7 @@ def develop_parallel(
                     context_pack=context_pack,
                 )
 
-        report.proposal_id, report.staged_paths = _stage_proposal(
+        report.proposal_id, report.staged_paths = stage_proposal(
             repo_root,
             combined,
             {
@@ -324,16 +325,6 @@ def _review_manifest(review: ReviewVerdict | None) -> dict | None:
         "issues": review.issues,
         "error": review.error,
     }
-
-
-def _stage_proposal(repo_root: Path, entries: dict[str, bytes], manifest_extra: dict) -> tuple[str, list[str]]:
-    """Stage a combined/winning proposal under .shepherd-proposals/<id>/."""
-    proposal_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"  # avoid same-second collision
-    staging = repo_root / PROPOSALS_DIR / proposal_id
-    written = materialize_into(staging / "files", entries)
-    manifest = {**manifest_extra, "paths": sorted(entries)}
-    (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    return proposal_id, written
 
 
 # ── Best-of-N (phase C): the incorporable essence of the paper's Tree-RL ────
@@ -497,7 +488,7 @@ def develop_best_of(
         winner = min(viable, key=rank_key)
         report.winner_index = winner.index
 
-        report.proposal_id, report.staged_paths = _stage_proposal(
+        report.proposal_id, report.staged_paths = stage_proposal(
             repo_root,
             entries_by_idx[winner.index],
             {

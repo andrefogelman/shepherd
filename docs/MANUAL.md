@@ -103,8 +103,13 @@ clientes. `shepherd_run`/`run2` sempre rodam com `--no-settle`, então nada é
 aplicado via MCP; você liquida explicitamente, e **aceitar exige `confirm: true`**
 (os tools de settle recusam gravar sem isso). Ver [codex/README.md](../codex/README.md).
 
-Como sempre o worker é uma sessão `claude` headless — precisa de um `claude` CLI
+Por padrão o worker é uma sessão `claude` headless — precisa de um `claude` CLI
 autenticado; a IA do próprio agent hospedeiro não o alimenta.
+
+**Worker Grok (sem Claude):** use `--provider grok`. O worker é o Grok Build CLI
+(`grok` no PATH ou `~/.grok/bin/grok`); a proposta vai para stage + `settle-par`
+(como o run2). Ver [2026-07-14-grok-provider-l1-l2.md](2026-07-14-grok-provider-l1-l2.md).
+O default `--provider claude` não muda.
 
 ## Instalar (por máquina)
 
