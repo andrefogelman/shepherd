@@ -119,7 +119,9 @@ def _argv_for(name: str, a: dict) -> list[str]:
         if a.get("mode") == "tests":
             argv += ["--mode", "tests"]
         if a.get("best_of"):
-            argv += ["--best-of", str(int(a["best_of"]))]
+            k = int(a["best_of"])
+            if 2 <= k <= 4:  # the CLI only accepts 2-4; ignore out-of-range instead of leaking a hard error
+                argv += ["--best-of", str(k)]
         for pfx in a.get("allowed_prefix") or []:
             argv += ["--allowed-prefix", str(pfx)]
         if a.get("max_attempts"):

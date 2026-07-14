@@ -252,16 +252,26 @@ def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: 
         branch = f"shepherd/{slug}-{n}"
         n += 1
 
-    steps = [
-        ("checkout -b", git("checkout", "-b", branch)),
-        ("add", git("add", "--", *written)),
-        ("commit", git("commit", "-m", message)),
-        ("checkout back", git("checkout", original)),
-    ]
-    for name, proc in steps:
-        if proc.returncode != 0:
-            return None, f"git {name} failed: {(proc.stderr or proc.stdout).strip()[:300]}"
-    return branch, None
+    # Sequential (NOT an eager list): if `checkout -b` fails, we must NOT run
+    # add/commit — they would land on the user's current branch. And whatever
+    # happens, always return to the original branch (#8).
+    co = git("checkout", "-b", branch)
+    if co.returncode != 0:
+        return None, f"git checkout -b failed: {(co.stderr or co.stdout).strip()[:300]}"
+    try:
+        add = git("add", "--", *written)
+        if add.returncode != 0:
+            return None, f"git add failed: {(add.stderr or add.stdout).strip()[:300]}"
+        commit = git("commit", "-m", message)
+        if commit.returncode != 0:
+            return None, f"git commit failed: {(commit.stderr or commit.stdout).strip()[:300]}"
+        return branch, None
+    finally:
+        # unstage + restore the original branch even on a mid-way failure; the
+        # accepted files remain in the worktree either way (they were already
+        # materialized by settle before commit).
+        git("reset", "-q")
+        git("checkout", original)
 
 
 def _auto_settle_conditions(report) -> str | None:
@@ -831,7 +841,28 @@ def settle_run(repo_root: Path, run_ref: str, *, reject: bool, auto: bool = Fals
 
     # Mirror files only after the workspace closes: while it is active, vcs-core
     # blocks unscoped mutations of workspace files (UnscopedMutationError).
-    written = materialize_into(repo_root, entries)
+    # The output is already consumed (select). If writing the worktree now fails
+    # (disk full, permission, path edge), the accepted content would be lost — so
+    # dump the in-memory snapshot to a recovery dir instead of losing it (#3).
+    try:
+        written = materialize_into(repo_root, entries)
+    except Exception as exc:
+        recovery = repo_root / ".shepherd-proposals" / f"recovered-{run_ref}"
+        try:
+            recovered = materialize_into(recovery, entries)
+        except Exception:
+            recovered = []
+        history.record_event(
+            "settle",
+            {"repo": str(repo_root), "ref": run_ref, "action": "accept_failed",
+             "auto": auto, "error": str(exc), "recovered": len(recovered)},
+        )
+        print(f"error: {run_ref} was consumed but writing to the worktree failed: {exc}", file=sys.stderr)
+        if recovered:
+            print(f"  the accepted content was saved under {recovery} — move the files "
+                  "into place manually (the proposal cannot be re-settled)", file=sys.stderr)
+        return 2, []
+
     history.record_event(
         "settle",
         {"repo": str(repo_root), "ref": run_ref, "action": "accept", "auto": auto, "written": written},

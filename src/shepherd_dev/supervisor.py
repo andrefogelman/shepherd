@@ -157,7 +157,7 @@ def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: Ga
     Templates live in prompts.py (CRO-lite surface); {TOKENS} are substituted
     with str.replace — gate tails may contain braces, so never str.format.
     """
-    from .tasks import get_prompt
+    from .prompts import get_prompt
 
     if kind == "policy":
         return get_prompt("guidance_policy").replace("{VIOLATIONS}", "\n- ".join(violations or []))
@@ -335,7 +335,11 @@ def run_review(
     )
 
 
-_TEST_FILE_RE = re.compile(r"(\.test\.(ts|tsx|js|jsx|mjs)|_test\.py|_test\.exs)$")
+_TEST_FILE_RE = re.compile(
+    r"(_test\.(py|exs|go)$"                       # foo_test.py / _test.exs / _test.go
+    r"|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$"   # foo.test.ts / foo.spec.js
+    r"|(^|/)test_[^/]+\.py$)"                      # test_foo.py (pytest/unittest idiom)
+)
 
 
 def _proposal_has_rust_test(entries: dict[str, bytes]) -> bool:
@@ -351,18 +355,33 @@ def _proposal_has_rust_test(entries: dict[str, bytes]) -> bool:
     return False
 
 
+def _proposal_has_elixir_test(entries: dict[str, bytes]) -> bool:
+    """An ExUnit test file shipped by the proposal (`*_test.exs` using ExUnit)."""
+    for rel, content in entries.items():
+        if rel.endswith("_test.exs"):
+            text = content.decode("utf-8", errors="replace")
+            if "ExUnit" in text or "use ExUnit.Case" in text or "test " in text:
+                return True
+    return False
+
+
 def _resolve_gate_cmd(test_cmd: str, entries: dict[str, bytes]) -> str | None:
     """Resolve a native-gate command against the proposal's own tests.
 
     - {NEW_TESTS}: substitute the proposal's test files (node/python), or None
       if it shipped none.
-    - {CARGO_TESTS}: presence sentinel for Rust — cargo test passes with 0 tests,
-      so require the proposal to contain a Rust test, else None.
+    - {CARGO_TESTS}/{EXUNIT_TESTS}: presence sentinels for Rust/Elixir — their
+      test runners pass with 0 tests, so require the proposal to contain a real
+      test of that language, else None.
     Returns None when the proposal has no tests — the gate then fails loudly."""
     if "{CARGO_TESTS}" in test_cmd:
         if not _proposal_has_rust_test(entries):
             return None
         return test_cmd.replace("{CARGO_TESTS}", "").strip()
+    if "{EXUNIT_TESTS}" in test_cmd:
+        if not _proposal_has_elixir_test(entries):
+            return None
+        return test_cmd.replace("{EXUNIT_TESTS}", "").strip()
     if "{NEW_TESTS}" not in test_cmd:
         return test_cmd
     import shlex
@@ -584,9 +603,14 @@ def develop(
             reporter.step(f"attempt {number} · gate")
             gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup)
             if gate.infra_error:
-                # Suite could not run: abort, do not burn attempts, keep output retained
+                # Suite could not run: abort, do not burn attempts, keep output retained.
+                # Surface the run-ref so the summary tells the user how to settle/reject
+                # the retained proposal — else the next run blocks on a pending output
+                # with no visible ref (#9).
                 reporter.fail(f"gate infra: {gate.infra_error[:80]}")
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
+                report.final_run_ref = run.run_ref
+                report.entries = entries
                 report.settlement_hint = f"gate infra error: {gate.infra_error}"
                 return report
 

@@ -193,12 +193,16 @@ def native_gate(repo_root: Path, lang: str) -> tuple[str, str] | None:
         )
         return cmd, hint
     if lang == "elixir":
-        cmd = "mix test"
+        # {EXUNIT_TESTS} is a presence sentinel (like Rust's {CARGO_TESTS}): a
+        # `mix test` with no matching tests exits 0 (vacuous pass), so the gate
+        # requires the proposal to actually ship an ExUnit test, else fails loudly.
+        cmd = "mix test {EXUNIT_TESTS}"
         hint = (
             "Also write ExUnit tests for this feature under test/, in *_test.exs "
             "files using `use ExUnit.Case` (async: true when possible), runnable "
-            "with `mix test`. Test the feature's own modules directly; do NOT touch "
-            "Ecto/the database unless the repo's test setup already provides it."
+            "with `mix test`. They must assert the feature's behavior — a proposal "
+            "with no ExUnit test is rejected. Test the feature's own modules directly; "
+            "do NOT touch Ecto/the database unless the repo's test setup already provides it."
         )
         return cmd, hint
     if lang == "rust":

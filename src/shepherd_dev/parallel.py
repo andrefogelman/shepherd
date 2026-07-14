@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -327,7 +328,7 @@ def _review_manifest(review: ReviewVerdict | None) -> dict | None:
 
 def _stage_proposal(repo_root: Path, entries: dict[str, bytes], manifest_extra: dict) -> tuple[str, list[str]]:
     """Stage a combined/winning proposal under .shepherd-proposals/<id>/."""
-    proposal_id = time.strftime("%Y%m%d-%H%M%S")
+    proposal_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"  # avoid same-second collision
     staging = repo_root / PROPOSALS_DIR / proposal_id
     written = materialize_into(staging / "files", entries)
     manifest = {**manifest_extra, "paths": sorted(entries)}
