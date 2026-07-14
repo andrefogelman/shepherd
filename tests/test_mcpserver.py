@@ -68,6 +68,12 @@ class ToolArgv(unittest.TestCase):
         argv = _argv_for("shepherd_run2", {"feature_a": "A", "feature_b": "B"})
         self.assertEqual(argv[:4], ["run2", "A", "B", "--no-settle"])
 
+    def test_best_of_clamped_to_2_4(self):  # #17
+        self.assertIn("3", _argv_for("shepherd_run", {"feature": "x", "best_of": 3}))
+        for bad in (1, 5, 7, 0):
+            argv = _argv_for("shepherd_run", {"feature": "x", "best_of": bad})
+            self.assertNotIn("--best-of", argv, f"best_of={bad} should be dropped, not leaked to the CLI")
+
     def test_settle_reject(self):
         argv = _argv_for("shepherd_settle", {"run_ref": "run-1", "repo": "/x", "reject": True})
         self.assertEqual(argv, ["settle", "run-1", "--repo", "/x", "--reject"])

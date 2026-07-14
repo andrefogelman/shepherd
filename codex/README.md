@@ -47,4 +47,7 @@ the ChatGPT desktop app — one server, every client.
 
 `shepherd_run`/`shepherd_run2` always run with `--no-settle`: nothing is applied through
 MCP. The agent reports the retained proposal and you settle it explicitly with
-`shepherd_settle` / `shepherd_settle_par`. Human-only settlement is preserved.
+`shepherd_settle` / `shepherd_settle_par`. **Accepting requires `confirm: true`** — the
+settle tools refuse to write files without it (rejecting is safe and needs none), so a
+client cannot silently apply a proposal. Human-only settlement is enforced in the protocol,
+not just by convention.

@@ -100,7 +100,8 @@ args = ["mcp"]
 (ou `codex mcp add shepherd-dev -- shepherd-dev mcp`). O mesmo server serve Cursor
 (`.cursor/mcp.json`), Claude Code e o app desktop do ChatGPT — um server, todos os
 clientes. `shepherd_run`/`run2` sempre rodam com `--no-settle`, então nada é
-aplicado via MCP; você liquida explicitamente. Ver [codex/README.md](../codex/README.md).
+aplicado via MCP; você liquida explicitamente, e **aceitar exige `confirm: true`**
+(os tools de settle recusam gravar sem isso). Ver [codex/README.md](../codex/README.md).
 
 Como sempre o worker é uma sessão `claude` headless — precisa de um `claude` CLI
 autenticado; a IA do próprio agent hospedeiro não o alimenta.

@@ -227,10 +227,20 @@ def handle_message(msg: dict) -> dict | None:
 
 
 def serve(stdin: IO[str] | None = None, stdout: IO[str] | None = None) -> int:
-    """Read newline-delimited JSON-RPC from stdin, write responses to stdout."""
+    """Read newline-delimited JSON-RPC from stdin, write responses to stdout.
+
+    Uses readline() in a loop, NOT `for line in stdin`: the file-iterator has a
+    hidden read-ahead buffer that stalls a long-lived request/response pipe (a
+    real MCP client keeps stdin open and sends one request at a time, so the
+    iterator would block waiting to fill its buffer and never answer the
+    handshake). readline() returns each message as soon as its newline arrives.
+    """
     src: IO[str] = stdin if stdin is not None else sys.stdin
     dst: IO[str] = stdout if stdout is not None else sys.stdout
-    for raw in src:
+    while True:
+        raw = src.readline()
+        if raw == "":  # EOF — the client closed the pipe
+            break
         line = raw.strip()
         if not line:
             continue
