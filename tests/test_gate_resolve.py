@@ -11,7 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from shepherd_dev.supervisor import _proposal_has_elixir_test, _resolve_gate_cmd  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+
+from shepherd_dev.supervisor import _proposal_has_elixir_test, _resolve_gate_cmd, _run_gate  # noqa: E402
 
 
 class TestFileDetection(unittest.TestCase):
@@ -50,6 +53,19 @@ class ElixirAntiVacuity(unittest.TestCase):
     def test_has_elixir_test(self):
         self.assertTrue(_proposal_has_elixir_test({"test/a_test.exs": b"use ExUnit.Case\n"}))
         self.assertFalse(_proposal_has_elixir_test({"lib/a.ex": b"defmodule A do\nend\n"}))
+
+
+class RemotePlaceholderResolve(unittest.TestCase):
+    def test_run_gate_resolves_remote_placeholder_no_ssh(self):  # #11
+        # a remote test_cmd using {EXUNIT_TESTS} + a proposal with no ExUnit test
+        # -> _run_gate returns a "no tests" GateResult WITHOUT touching ssh.
+        root = Path(tempfile.mkdtemp())
+        (root / ".shepherd-dev.json").write_text(json.dumps({
+            "test_remote": {"ssh": "root@host", "repo_dir": "/x", "test_cmd": "mix test {EXUNIT_TESTS}"}
+        }))
+        res = _run_gate(root, {"lib/a.ex": b"defmodule A do\nend\n"}, "unused", 10)
+        self.assertFalse(res.passed)
+        self.assertIn("no tests", res.output_tail.lower())
 
 
 if __name__ == "__main__":

@@ -71,26 +71,28 @@ TOOLS = [
     },
     {
         "name": "shepherd_settle",
-        "description": "Settle a retained `run` proposal: accept (writes the files into the worktree) or reject (discard).",
+        "description": "Settle a retained `run` proposal: accept (writes the files into the worktree) or reject (discard). Accepting requires confirm=true — a human decision.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "run_ref": {"type": "string", "description": "the run-ref from shepherd_run"},
                 "repo": {"type": "string"},
                 "reject": {"type": "boolean", "description": "discard instead of accepting"},
+                "confirm": {"type": "boolean", "description": "required to ACCEPT (write files); the user's explicit decision"},
             },
             "required": ["run_ref"],
         },
     },
     {
         "name": "shepherd_settle_par",
-        "description": "Settle a staged `run2` / best-of proposal: accept or reject.",
+        "description": "Settle a staged `run2` / best-of proposal: accept or reject. Accepting requires confirm=true — a human decision.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "proposal_id": {"type": "string"},
                 "repo": {"type": "string"},
                 "reject": {"type": "boolean"},
+                "confirm": {"type": "boolean", "description": "required to ACCEPT (write files); the user's explicit decision"},
             },
             "required": ["proposal_id"],
         },
@@ -164,6 +166,17 @@ def _call_tool(name: str, arguments: dict) -> dict:
     """Dispatch a tools/call. Returns the JSON-RPC result payload."""
     if name not in _TOOL_NAMES:
         return {"content": [{"type": "text", "text": f"unknown tool: {name}"}], "isError": True}
+    # Human-only settlement (#4): accepting via MCP writes files, so the protocol
+    # itself requires an explicit confirm=true — a client can't silently apply a
+    # proposal. Rejecting (discarding) is safe and needs no confirmation.
+    if name in ("shepherd_settle", "shepherd_settle_par") and not arguments.get("reject"):
+        if arguments.get("confirm") is not True:
+            ref = arguments.get("run_ref") or arguments.get("proposal_id") or "the proposal"
+            return {"content": [{"type": "text", "text": (
+                f"Accepting writes files into the worktree and needs explicit confirmation. "
+                f"To ACCEPT {ref}, call this tool again with confirm=true. To discard it, pass "
+                f"reject=true. Nothing was applied — surface this to the user and get their decision."
+            )}], "isError": False}
     try:
         argv = _argv_for(name, arguments or {})
     except KeyError as exc:

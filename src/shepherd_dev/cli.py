@@ -579,6 +579,13 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         return 0
 
     if _wants_interactive(args) and report.final_run_ref:
+        # The gate passing is NOT approval: warn loudly if the reviewer rejected,
+        # so accepting isn't a rubber-stamp of a REJECTED proposal (#12).
+        rev = report.review
+        if rev is not None and not rev.error and not rev.approved:
+            print(f"\n⚠ reviewer REJECTED this proposal — {rev.summary}", file=sys.stderr)
+            for issue in rev.issues:
+                print(f"    issue: {issue}", file=sys.stderr)
         return _interactive_settle_run(repo_root, report.final_run_ref)
     return 0 if report.succeeded else 1
 
@@ -692,10 +699,13 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
         print(f"{proposal_id}: staged proposal discarded")
         return 0, []
 
+    # Skip symlinks (#18): a symlink planted in the stage could point outside and
+    # copy an external file's content into the repo. Only real files are settled;
+    # materialize_into still guards the destination against `..` escapes.
     entries = {
         str(path.relative_to(files_dir)): path.read_bytes()
         for path in files_dir.rglob("*")
-        if path.is_file()
+        if path.is_file() and not path.is_symlink()
     }
     written = materialize_into(repo_root, entries)
     shutil.rmtree(staging)

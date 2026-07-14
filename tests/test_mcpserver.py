@@ -108,6 +108,29 @@ class ToolCall(unittest.TestCase):
                             "params": {"name": "shepherd_run", "arguments": {}}})
         self.assertTrue(r["result"]["isError"])
 
+    def _call(self, name, args):
+        return handle_message({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                               "params": {"name": name, "arguments": args}})
+
+    def test_settle_requires_confirm(self):  # #4
+        r = self._call("shepherd_settle", {"run_ref": "run-1"})
+        self.assertFalse(r["result"]["isError"])
+        self.assertIn("confirm=true", r["result"]["content"][0]["text"])
+        self.assertNotIn("argv", self.seen)  # the CLI was NOT invoked — nothing applied
+
+    def test_settle_with_confirm_applies(self):  # #4
+        self._call("shepherd_settle", {"run_ref": "run-1", "repo": "/r", "confirm": True})
+        self.assertEqual(self.seen["argv"][:2], ["settle", "run-1"])
+
+    def test_settle_reject_needs_no_confirm(self):  # #4
+        self._call("shepherd_settle", {"run_ref": "run-1", "reject": True})
+        self.assertIn("--reject", self.seen["argv"])
+
+    def test_settle_par_requires_confirm(self):  # #4
+        r = self._call("shepherd_settle_par", {"proposal_id": "p1"})
+        self.assertIn("confirm=true", r["result"]["content"][0]["text"])
+        self.assertNotIn("argv", self.seen)
+
 
 class ServeLoop(unittest.TestCase):
     def test_serve_reads_and_writes_jsonrpc(self):

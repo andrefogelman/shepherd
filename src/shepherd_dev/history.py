@@ -39,6 +39,12 @@ def record_event(kind: str, payload: dict) -> None:
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
         event = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **payload}
         with open(HISTORY_DIR / RUNS_FILE, "a", encoding="utf-8") as fh:
+            try:  # serialize concurrent appends (parallel/optimize race — #14)
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                pass  # no flock (non-POSIX): best-effort append
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
         _gbrain_capture(kind, event)
     except Exception:

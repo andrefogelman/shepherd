@@ -223,7 +223,7 @@ def _swap_perl_killtree(argv: list) -> list:
     return argv
 
 
-def set_worker_budget(seconds: int) -> None:
+def set_worker_budget(seconds: int) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
     kill of the whole worker process group (#A).
 
@@ -233,32 +233,45 @@ def set_worker_budget(seconds: int) -> None:
     (private API — revisit on framework upgrade), installing a provider whose
     launch perl reaps the process group at the budget instead of orphaning the
     worker's children. The watchdog (#B) is the belt-and-suspenders backstop.
+
+    The whole rebind is a private-API seam that a framework upgrade may move or
+    remove (#15). If any of it fails, we degrade gracefully — the worker runs on
+    the framework's default budget (the #B watchdog still enforces the wall clock)
+    — instead of crashing the run. Returns True when the rebind took effect.
     """
-    from shepherd_dialect import providers
-    from shepherd_dialect.workspace_control import runtime_provider as rp
+    try:
+        from shepherd_dialect import providers
+        from shepherd_dialect.workspace_control import runtime_provider as rp
 
-    class _KillTreeProvider(providers.ClaudeHeadlessProvider):
-        def command_argv(self, working_path, cli, prompt=None):
-            # Reuse the framework's exact argv (all flags preserved) and swap ONLY
-            # the perl script slot for the killtree one — robust to any change in
-            # the body, and a no-op if the shape is ever not `perl -e`.
-            return _swap_perl_killtree(list(super().command_argv(working_path, cli, prompt)))
+        class _KillTreeProvider(providers.ClaudeHeadlessProvider):
+            def command_argv(self, working_path, cli, prompt=None):
+                # Reuse the framework's exact argv (all flags preserved) and swap ONLY
+                # the perl script slot for the killtree one — robust to any change in
+                # the body, and a no-op if the shape is ever not `perl -e`.
+                return _swap_perl_killtree(list(super().command_argv(working_path, cli, prompt)))
 
-    def transport(invocation):
-        kwargs = dict(
-            provider_id=invocation.provider_id,
-            prompt=invocation.prompt,
-            model=invocation.model_name,
-            budget_seconds=seconds,
+        def transport(invocation):
+            kwargs = dict(
+                provider_id=invocation.provider_id,
+                prompt=invocation.prompt,
+                model=invocation.model_name,
+                budget_seconds=seconds,
+            )
+            try:
+                return _KillTreeProvider(**kwargs)
+            except Exception:
+                return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
+
+        rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
+            claude=transport
         )
-        try:
-            return _KillTreeProvider(**kwargs)
-        except Exception:
-            return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
+        return True
+    except Exception as exc:  # framework seam moved/removed on upgrade
+        import sys as _sys
 
-    rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
-        claude=transport
-    )
+        print(f"warning: worker budget rebind unavailable ({type(exc).__name__}: {exc}); "
+              "the watchdog still enforces the budget", file=_sys.stderr)
+        return False
 
 
 def build_diff_text(changeset, limit: int = DIFF_TEXT_LIMIT) -> str:
@@ -420,6 +433,22 @@ def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout
     if remote_cfg is not None:
         from .remotegate import run_remote_gate
 
+        # Resolve native placeholders in the REMOTE test_cmd too (#11): a no-op for
+        # ordinary user configs (no placeholder), but if a remote test_cmd uses
+        # {NEW_TESTS}/{CARGO_TESTS}/{EXUNIT_TESTS} it now resolves against the
+        # proposal's own tests instead of being sent raw.
+        resolved_remote = _resolve_gate_cmd(remote_cfg.test_cmd, entries)
+        if resolved_remote is None:
+            if warmup is not None:
+                warmup.teardown()
+            return GateResult(
+                False, 1,
+                "native gate: the proposal contains no tests — write tests for the feature.",
+            )
+        if resolved_remote != remote_cfg.test_cmd:
+            import dataclasses
+
+            remote_cfg = dataclasses.replace(remote_cfg, test_cmd=resolved_remote)
         return run_remote_gate(remote_cfg, entries, timeout, warmup=warmup)
     if warmup is not None:
         warmup.teardown()  # a local gate can't use a remote warmup

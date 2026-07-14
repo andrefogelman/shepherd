@@ -62,5 +62,27 @@ class RemoteOverlayGuard(unittest.TestCase):
         self.assertIn("unsafe path", err)
 
 
+class SettleProposalSymlink(unittest.TestCase):
+    def test_symlink_in_stage_is_skipped(self):  # #18
+        import os
+        import tempfile
+
+        from shepherd_dev.cli import settle_proposal
+
+        root = Path(tempfile.mkdtemp())
+        secret = Path(tempfile.mkdtemp()) / "secret.txt"
+        secret.write_text("TOPSECRET")
+        files = root / ".shepherd-proposals" / "p1" / "files"
+        files.mkdir(parents=True)
+        (files / "real.py").write_text("x = 1\n")
+        os.symlink(secret, files / "leak.txt")  # a symlink pointing OUTSIDE the repo
+
+        code, written = settle_proposal(root, "p1", reject=False)
+        self.assertEqual(code, 0)
+        self.assertIn("real.py", written)
+        self.assertNotIn("leak.txt", written)           # symlink skipped
+        self.assertFalse((root / "leak.txt").exists())   # external secret NOT copied in
+
+
 if __name__ == "__main__":
     unittest.main()

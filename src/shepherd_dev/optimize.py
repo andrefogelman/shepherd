@@ -201,7 +201,9 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
                 ],
                 capture_output=True, text=True, env=env, timeout=worker_budget + 300,
             )
-            return "succeeded: True" in (proc.stdout or "")
+            # `run` exits 0 iff the gate passed (report.succeeded); use the exit
+            # code, not a stdout substring, so replay isn't fragile to formatting (#16).
+            return proc.returncode == 0
         except Exception:
             return False
         finally:
