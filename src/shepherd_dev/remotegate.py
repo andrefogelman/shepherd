@@ -165,9 +165,24 @@ def _tar_entries(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _is_safe_rel(rel: str) -> bool:
+    """A proposal path that stays inside the workdir — relative, no `..`, no
+    absolute/home. Defense-in-depth: the tar/rm run on the remote host, so an
+    unsanitized `..` would write/delete outside the ephemeral copy (tar-slip)."""
+    from pathlib import PurePosixPath
+
+    if rel.startswith(("/", "~", "\\")):
+        return False
+    p = PurePosixPath(rel)
+    return not p.is_absolute() and ".." not in p.parts
+
+
 def _overlay(cfg: RemoteGateConfig, workdir: str, entries: dict[str, bytes], timeout: int) -> str | None:
     """Overlay the proposal's files onto the ephemeral copy with remove-then-write
     semantics (break the hardlink so the warm checkout is never mutated)."""
+    unsafe = sorted(r for r in entries if not _is_safe_rel(r))
+    if unsafe:
+        return f"overlay refused unsafe path(s) (escape the workdir): {unsafe}"
     quoted = " ".join(shlex.quote(rel) for rel in entries)
     unlink = f"cd {shlex.quote(workdir)} && for f in {quoted}; do rm -f \"$f\"; done" if entries else "true"
     script = f"{unlink} && mkdir -p {shlex.quote(workdir)} && tar -xf - -C {shlex.quote(workdir)}"

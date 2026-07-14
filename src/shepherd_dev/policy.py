@@ -11,6 +11,7 @@ wrote). Worker deletions cannot be expressed in the v0.3.0 workspace lane
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,30 @@ class PolicyVerdict:
     violations: list[str] = field(default_factory=list)
 
 
+def _escapes_repo(path: str) -> bool:
+    """A proposal path that is absolute or climbs out of the repo (`..`, `~`)."""
+    if path.startswith(("/", "~", "\\")):
+        return True
+    p = PurePosixPath(path)
+    return p.is_absolute() or ".." in p.parts
+
+
+def _is_forbidden(path: str, forbidden_paths: tuple[str, ...]) -> bool:
+    """Match forbidden entries against ANY path segment, not just the prefix.
+
+    A forbidden entry ending in `/` (e.g. `node_modules/`) matches that name as
+    any directory component (so `pkg/node_modules/x` is caught). A file entry
+    (e.g. `.env`) matches the basename exactly or as a prefix (so `.env.local`
+    and `config/.env` are caught)."""
+    parts = PurePosixPath(path).parts
+    name = parts[-1] if parts else path
+    dirs = {f.rstrip("/") for f in forbidden_paths if f.endswith("/")}
+    files = tuple(f for f in forbidden_paths if not f.endswith("/"))
+    if any(seg in dirs for seg in parts):
+        return True
+    return any(name == f or name.startswith(f) for f in files)
+
+
 def check_paths(paths: list[str], policy: ChangesetPolicy) -> PolicyVerdict:
     """Apply deterministic guards to the proposal's written paths."""
     violations: list[str] = []
@@ -45,9 +70,11 @@ def check_paths(paths: list[str], policy: ChangesetPolicy) -> PolicyVerdict:
         )
 
     for path in paths:
-        for forbidden in policy.forbidden_paths:
-            if path == forbidden.rstrip("/") or path.startswith(forbidden):
-                violations.append(f"touched forbidden path: {path}")
+        if _escapes_repo(path):
+            violations.append(f"path escapes the repo: {path}")
+            continue  # an escaping path fails hard; further checks are moot
+        if _is_forbidden(path, policy.forbidden_paths):
+            violations.append(f"touched forbidden path: {path}")
         if policy.allowed_prefixes and not any(
             path.startswith(prefix) for prefix in policy.allowed_prefixes
         ):
