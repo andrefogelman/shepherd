@@ -1,7 +1,7 @@
 {
   "name": "shepherd-dev",
   "description": "Supervised AI development via Shepherd (arXiv 2605.10913): sandboxed Claude workers, deterministic policy + test gate, skeptical reviewer, human-only settlement, and coordinated parallel workers. Ships the shepherd-dev CLI bootstrap, a usage skill, and the /shepherd-dev:run, run2, settle, settle-par, init, optimize commands.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "author": {
     "name": "Andre Fogelman"
   }
