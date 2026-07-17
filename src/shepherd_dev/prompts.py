@@ -2,7 +2,8 @@
 
 Split out of tasks.py (#10) so callers that only need a prompt string (e.g. the
 supervisor's guidance formatting) don't drag in the shepherd runtime. tasks.py
-re-exports these names for back-compat; the sp.task definitions stay there.
+carries an INLINED COPY of these names (shepherd-ai 0.3.0 single-file capture
+forbids a task source importing same-package modules) — keep both in sync.
 
 Resolution: DEFAULT_PROMPTS < overrides file (~/.shepherd-dev/prompts-overrides.json,
 override via SHEPHERD_DEV_PROMPTS_OVERRIDES).
