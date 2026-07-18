@@ -214,8 +214,8 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--provider static` | run · run2 | Ensaio offline sem LLM (custo zero). |
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
 | `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
-| `--quiet` | run | Silencia o feedback vivo de progresso. |
-| `-v` / `--verbose` | run | Feed vivo passo a passo: cada ferramenta, cada diff, cada teste falho; grava eventos para `trace`. |
+| `--quiet` | run | Silencia todo o feedback vivo (progresso e verbose). |
+| `--no-verbose` | run | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
 
 ## Aceleradores & robustez do run
@@ -246,9 +246,10 @@ budget, não numa espera indefinida. Desligue o backstop com `--no-watchdog`.
 
 ## Modo verbose & trace (passo a passo)
 
-`run -v` liga o feed vivo passo a passo: cada ferramenta que o worker usa, cada
-edição com diff (+/− linhas), cada linha do portão e cada teste que falha
-aparecem como sublinhas do progresso, em tempo real:
+O feed vivo passo a passo é o **padrão** do `run`: cada ferramenta que o worker
+usa, cada edição com diff (+/− linhas), cada linha do portão e cada teste que
+falha aparecem como sublinhas do progresso, em tempo real (desligue com
+`--no-verbose`; `--quiet` silencia tudo):
 
 ```
 ⠹ tentativa 1/3 · worker rodando · 2m14s

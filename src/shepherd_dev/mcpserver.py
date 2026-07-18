@@ -118,7 +118,9 @@ def _shepherd_bin() -> str:
 def _argv_for(name: str, a: dict) -> list[str]:
     """Build the shepherd-dev CLI argv for an MCP tool call."""
     if name == "shepherd_run":
-        argv = ["run", str(a["feature"]), "--no-settle"]
+        # --no-verbose: the CLI defaults to the verbose step-by-step feed, but
+        # over MCP the combined output IS the tool result — keep it compact.
+        argv = ["run", str(a["feature"]), "--no-settle", "--no-verbose"]
         if a.get("repo"):
             argv += ["--repo", str(a["repo"])]
         if a.get("test_cmd"):

@@ -1,6 +1,6 @@
 [project]
 name = "shepherd-dev"
-version = "0.1.16"
+version = "0.1.17"
 description = "Supervised AI development layer on Shepherd (arXiv 2605.10913): sandboxed Claude workers, deterministic policy + test gate, human-only settlement, coordinated parallel workers."
 readme = "README.md"
 requires-python = ">=3.11"

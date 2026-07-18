@@ -308,6 +308,25 @@ except Exception:
 
 
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class VerboseDefaultTests(unittest.TestCase):
+    """Verbose is the DEFAULT run mode; --no-verbose is the opt-out toggle."""
+
+    def _parse(self, argv):
+        from shepherd_dev.cli import build_parser
+
+        return build_parser().parse_args(argv)
+
+    def test_run_defaults_to_verbose(self):
+        self.assertTrue(self._parse(["run", "feat"]).verbose)
+
+    def test_no_verbose_toggle(self):
+        self.assertFalse(self._parse(["run", "feat", "--no-verbose"]).verbose)
+
+    def test_v_flag_still_accepted(self):
+        self.assertTrue(self._parse(["run", "feat", "-v"]).verbose)
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
 class CmdTraceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-trace-")

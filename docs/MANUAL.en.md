@@ -222,8 +222,8 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
 | `--no-plan` | run · run2 | Turns off the planning prefetch (no target/plan hints). |
-| `--quiet` | run | Silences the live progress reporter. |
-| `-v` / `--verbose` | run | Live step-by-step feed: every tool call, per-edit diff, each failing test; records events for `trace`. |
+| `--quiet` | run | Silences ALL live feedback (progress and verbose). |
+| `--no-verbose` | run | Turns off the step-by-step feed (phase progress only, no event log). |
 | `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
 
 ## Accelerators & robustness
@@ -253,9 +253,10 @@ in an open-ended wait. Disable the backstop with `--no-watchdog`.
 
 ## Verbose mode & trace (step by step)
 
-`run -v` turns on a live step-by-step feed: every tool the worker uses, every
-edit with its diff (+/− lines), every gate output line and every failing test
-appear as sub-lines under the live progress, in real time:
+The live step-by-step feed is `run`'s **default**: every tool the worker uses,
+every edit with its diff (+/− lines), every gate output line and every failing
+test appear as sub-lines under the live progress, in real time (turn off with
+`--no-verbose`; `--quiet` silences everything):
 
 ```
 ⠹ attempt 1/3 · worker running · 2m14s

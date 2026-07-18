@@ -1092,7 +1092,7 @@ def cmd_trace(args) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Supervised AI development via Shepherd")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1160,10 +1160,18 @@ def main() -> int:
     )
     p_run.add_argument(
         "-v", "--verbose",
+        dest="verbose",
         action="store_true",
+        default=True,
         help="live step-by-step feed: every worker tool call, per-edit diff, "
              "streamed gate line and named test failure; events persisted for "
-             "`shepherd-dev trace` replay",
+             "`shepherd-dev trace` replay (DEFAULT — kept for compatibility)",
+    )
+    p_run.add_argument(
+        "--no-verbose",
+        dest="verbose",
+        action="store_false",
+        help="turn off the step-by-step feed (phase progress only, no event log)",
     )
     p_run.add_argument(
         "--no-watchdog",
@@ -1289,7 +1297,11 @@ def main() -> int:
     p_trace.add_argument("--json", action="store_true", help="print the raw NDJSON events instead of the timeline")
     p_trace.set_defaults(func=cmd_trace)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
     return args.func(args)
 
 

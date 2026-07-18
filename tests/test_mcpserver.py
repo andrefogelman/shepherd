@@ -65,6 +65,7 @@ class ToolArgv(unittest.TestCase):
         self.assertIn("tests", argv)  # --mode tests
 
     def test_run2_forces_no_settle(self):
+        self.assertIn("--no-verbose", _argv_for("shepherd_run", {"feature": "x"}))
         argv = _argv_for("shepherd_run2", {"feature_a": "A", "feature_b": "B"})
         self.assertEqual(argv[:4], ["run2", "A", "B", "--no-settle"])
 
