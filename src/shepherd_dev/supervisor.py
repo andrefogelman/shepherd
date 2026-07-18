@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -499,13 +498,22 @@ def _start_gate_warmup(repo_root: Path, test_cmd: str | None, timeout: int):
     return GateWarmup(cfg, timeout=timeout).start()
 
 
-def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout: int, warmup=None) -> GateResult:
+def _run_gate(
+    repo_root: Path,
+    entries: dict[str, bytes],
+    test_cmd: str,
+    timeout: int,
+    warmup=None,
+    on_line=None,
+) -> GateResult:
     """Run the repo's test suite against a materialized copy of the proposal.
 
     If the repo configures a remote gate (test_remote), run it on the remote
     host instead of locally — for stacks whose build/test needs an environment
     the local sandbox lacks (a DB, a container, another architecture). A warmup,
-    when given, is consumed by the remote gate (or torn down for a local gate)."""
+    when given, is consumed by the remote gate (or torn down for a local gate).
+    ``on_line`` (verbose mode) receives each merged output line of the test
+    command as it happens — local and remote alike."""
     from . import config as _config
 
     remote_cfg = _config.remote_gate(repo_root)
@@ -528,7 +536,7 @@ def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout
             import dataclasses
 
             remote_cfg = dataclasses.replace(remote_cfg, test_cmd=resolved_remote)
-        return run_remote_gate(remote_cfg, entries, timeout, warmup=warmup)
+        return run_remote_gate(remote_cfg, entries, timeout, warmup=warmup, on_line=on_line)
     if warmup is not None:
         warmup.teardown()  # a local gate can't use a remote warmup
 
@@ -547,20 +555,17 @@ def _run_gate(repo_root: Path, entries: dict[str, bytes], test_cmd: str, timeout
         except Exception as exc:
             return GateResult(False, None, "", infra_error=f"materialize failed: {exc}")
         try:
-            proc = subprocess.run(
-                test_cmd,
-                shell=True,
-                cwd=staged,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+            from .procstream import run_streaming
+
+            res = run_streaming(
+                test_cmd, shell=True, cwd=staged, timeout=timeout, on_line=on_line
             )
-        except subprocess.TimeoutExpired:
-            return GateResult(False, None, "", infra_error=f"test suite timed out after {timeout}s")
         except OSError as exc:
             return GateResult(False, None, "", infra_error=f"could not run test suite: {exc}")
-        tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-4000:]
-        return GateResult(passed=proc.returncode == 0, exit_code=proc.returncode, output_tail=tail)
+        if res.timed_out:
+            return GateResult(False, None, "", infra_error=f"test suite timed out after {timeout}s")
+        tail = res.output[-4000:]
+        return GateResult(passed=res.returncode == 0, exit_code=res.returncode, output_tail=tail)
 
 
 def develop(

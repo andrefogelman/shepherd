@@ -295,13 +295,21 @@ class GateWarmup:
         _teardown_workdir(self.cfg, self.run_id, self.workdir, self.did_setup, self.timeout)
 
 
-def run_remote_gate(cfg: RemoteGateConfig, entries: dict[str, bytes], timeout: int, warmup: "GateWarmup | None" = None):
+def run_remote_gate(
+    cfg: RemoteGateConfig,
+    entries: dict[str, bytes],
+    timeout: int,
+    warmup: "GateWarmup | None" = None,
+    on_line=None,
+):
     """Run one gate attempt remotely. Returns a GateResult (imported lazily to
     avoid a cycle). Guarantees teardown + cleanup of the ephemeral workdir.
 
     If a warmup is passed, run_remote_gate OWNS it: it adopts the pre-staged
     workdir (skipping the copy, and setup when the warmup already did it) or, if
-    the warmup failed, tears its partial state down and proceeds fresh."""
+    the warmup failed, tears its partial state down and proceeds fresh.
+    ``on_line`` (verbose mode) receives each merged output line of the remote
+    test step as ssh delivers it; copy/setup/teardown stay unstreamed."""
     from .supervisor import GateResult
 
     if not cfg.test_cmd.strip():
@@ -352,18 +360,24 @@ def run_remote_gate(cfg: RemoteGateConfig, entries: dict[str, bytes], timeout: i
                     return GateResult(False, None, "",
                         infra_error=f"remote setup_cmd failed (exit {setup.returncode}): {tail}")
 
-            # 4. the gate itself, with a remote timeout so a hung test is killed remotely
+            # 4. the gate itself, with a remote timeout so a hung test is killed
+            # remotely. Streamed line by line so verbose mode sees each test as
+            # it runs; the local deadline still reaps a hung ssh (process group).
             test_line = f"cd {wd} && {envp}timeout {timeout} {_sub(cfg.test_cmd, run_id, workdir)}"
+            from .procstream import run_streaming
+
             try:
-                proc = _remote(cfg, test_line, timeout + 60)
-            except subprocess.TimeoutExpired:
+                res = run_streaming(_remote_argv(cfg, test_line), timeout=timeout + 60, on_line=on_line)
+            except OSError as exc:
+                return GateResult(False, None, "", infra_error=f"could not run ssh: {exc}")
+            if res.timed_out:
                 return GateResult(False, None, "",
                     infra_error=f"remote test suite timed out after {timeout}s")
-            tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-4000:]
+            tail = res.output[-4000:]
             # timeout(1) exits 124 on kill
-            if proc.returncode == 124:
+            if res.returncode == 124:
                 return GateResult(False, 124, tail, infra_error=f"remote test timed out after {timeout}s")
-            return GateResult(passed=proc.returncode == 0, exit_code=proc.returncode, output_tail=tail)
+            return GateResult(passed=res.returncode == 0, exit_code=res.returncode, output_tail=tail)
         finally:
             # 5. guaranteed teardown + cleanup — even on timeout/error
             _teardown_workdir(cfg, run_id, workdir, did_setup, timeout)

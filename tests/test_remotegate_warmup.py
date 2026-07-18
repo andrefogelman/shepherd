@@ -33,6 +33,17 @@ def _patched_run(argv, **kw):
     return _real_run(argv, **kw)
 
 
+_real_popen = subprocess.Popen
+
+
+def _patched_popen(argv, **kw):
+    # The streamed remote test step (procstream) launches via Popen; give it
+    # the same real-ssh join + re-tokenization semantics as _patched_run.
+    if isinstance(argv, list) and argv and argv[0] == "__FAKESSH__":
+        return _real_popen(["sh", "-c", " ".join(argv[1:])], **kw)
+    return _real_popen(argv, **kw)
+
+
 def _warm_checkout() -> Path:
     warm = Path(tempfile.mkdtemp())
     (warm / "src").mkdir()
@@ -42,14 +53,20 @@ def _warm_checkout() -> Path:
 
 class RemoteGateWarmup(unittest.TestCase):
     def setUp(self):
+        from shepherd_dev import procstream as PS
+
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
+        PS.subprocess.Popen = _patched_popen
         self.db = Path(tempfile.mkdtemp())          # stands in for a DB/service store
         self.warm = _warm_checkout()
         self.wbase = Path(tempfile.mkdtemp())
 
     def tearDown(self):
+        from shepherd_dev import procstream as PS
+
         RG.subprocess.run = _real_run
+        PS.subprocess.Popen = _real_popen
 
     def _cfg(self, *, isolated: bool):
         # isolated setup keys state on {id}; non-isolated writes a shared marker

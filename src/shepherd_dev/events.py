@@ -172,6 +172,25 @@ def parse_test_failure(line: str) -> dict | None:
     return None
 
 
+def gate_line_observer(
+    log: "RunEventLog",
+    attempt: int | None = None,
+    emit_lines: bool = True,
+) -> Callable[[str], None]:
+    """An ``on_line`` callback for the streaming gate: every line becomes a
+    ``gate.line`` event (unless muted) and every recognized failure line also
+    becomes a named ``gate.test.fail`` event."""
+
+    def on_line(line: str) -> None:
+        if emit_lines:
+            log.emit("gate.line", {"line": _excerpt(line, 400)}, attempt=attempt)
+        failure = parse_test_failure(line)
+        if failure is not None:
+            log.emit("gate.test.fail", failure, attempt=attempt)
+
+    return on_line
+
+
 # -- worker stream-json → normalized events ----------------------------------
 
 def _content_blocks(event: dict) -> list[dict]:

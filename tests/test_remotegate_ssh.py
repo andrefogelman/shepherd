@@ -42,13 +42,30 @@ def _patched_run(argv, **kw):
     return _real_run(argv, **kw)
 
 
+_real_popen = subprocess.Popen
+
+
+def _patched_popen(argv, **kw):
+    # The streamed remote test step (procstream) launches via Popen; same
+    # real-ssh join + re-tokenization semantics as _patched_run.
+    if isinstance(argv, list) and argv and argv[0] == "__FAKESSH__":
+        return _real_popen(["sh", "-c", " ".join(argv[1:])], **kw)
+    return _real_popen(argv, **kw)
+
+
 class RemoteGateSSHQuoting(unittest.TestCase):
     def setUp(self):
+        from shepherd_dev import procstream as PS
+
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
+        PS.subprocess.Popen = _patched_popen
 
     def tearDown(self):
+        from shepherd_dev import procstream as PS
+
         RG.subprocess.run = _real_run
+        PS.subprocess.Popen = _real_popen
 
     def test_remote_argv_is_single_quoted_arg(self):
         cfg = parse_remote_config({"ssh": "root@host", "repo_dir": "/x", "test_cmd": "true"}, None)
