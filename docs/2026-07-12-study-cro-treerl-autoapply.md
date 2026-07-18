@@ -35,7 +35,7 @@ chegar como proposta do próprio shepherd-dev (gated + settled).
   tem ~3 prompts, não um pipeline de 10 estágios como os benchmarks.
 - **1B. CRO-lite (recomendado):**
   1. **History store** (pré-requisito): persistir cada DevReport em JSONL
-     (`~/.shepherd-dev/history/`) + página GBrain — feature, repo, SHA do commit,
+     (`~/.shepherd-dev/history/`) — feature, repo, SHA do commit,
      tentativas, veredictos, tails de gate, issues do reviewer, guidance usada.
   2. `shepherd-dev optimize`: meta-otimizador (Claude, melhor modelo) clusteriza modos
      de falha do histórico e propõe edits concretos aos prompts/templates.
@@ -104,7 +104,7 @@ Flag `--auto-settle` em `run` e `run2`:
 
 | Fase | Entrega | Depende de | Complexidade |
 |---|---|---|---|
-| A | History store (JSONL + GBrain) | — | baixa |
+| A | History store (JSONL) | — | baixa |
 | B | Auto-apply (`--auto-settle` + branch + commit) | A (auditoria) | baixa |
 | C | Best-of-N (`--best-of K`) | maquinaria F3 (pronta) | média |
 | D | CRO-lite (`shepherd-dev optimize`, fix/guard sets) | A + histórico acumulado | alta |

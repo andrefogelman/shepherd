@@ -2,16 +2,15 @@
 
 Foundation for auditing (auto-settle) and for CRO-lite (`shepherd-dev
 optimize`), which mines failure modes and replays fix/guard cases. Writes are
-best-effort and NEVER block or fail the main flow.
+local-only (the JSONL is the record), best-effort, and NEVER block or fail
+the main flow.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -46,7 +45,6 @@ def record_event(kind: str, payload: dict) -> None:
             except Exception:
                 pass  # no flock (non-POSIX): best-effort append
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-        _gbrain_capture(kind, event)
     except Exception:
         pass
 
@@ -138,36 +136,6 @@ def parallel_payload(report, repo_root: Path, *, test_cmd: str, provider: str, f
             }
         ),
     }
-
-
-def _gbrain_capture(kind: str, event: dict) -> None:
-    """Mirror the event into GBrain when its CLI is present. Best-effort."""
-    gbrain = shutil.which("gbrain")
-    if not gbrain:
-        return
-    ref = event.get("final_run_ref") or event.get("proposal_id") or event.get("ref") or str(int(time.time()))
-    slug = f"shepherd_dev_{kind}_{str(ref).replace('run-', '')}"
-    body = (
-        f"---\ntitle: shepherd-dev {kind} {ref}\ntags: [tipo:reference, projeto:shepherd]\n---\n\n"
-        f"```json\n{json.dumps(event, ensure_ascii=False, indent=2)}\n```\n"
-    )
-    tmp: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
-            fh.write(body)
-            tmp = fh.name
-        subprocess.run(
-            [gbrain, "capture", "--file", tmp, "--slug", slug],
-            capture_output=True, timeout=15,
-        )
-    except Exception:
-        pass
-    finally:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except Exception:
-                pass
 
 
 def failures_since_last_optimize(events: list[dict] | None = None) -> int:

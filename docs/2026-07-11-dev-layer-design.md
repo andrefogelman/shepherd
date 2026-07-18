@@ -182,7 +182,7 @@ candidato de evolução.
 Estudo em `docs/2026-07-12-study-cro-treerl-autoapply.md`. Executado A→B→C→D.
 
 - **A — history store** (`history.py`): cada run/run2/best-of e settlement grava um evento
-  JSONL em `~/.shepherd-dev/history/` (env `SHEPHERD_DEV_HISTORY_DIR`) + espelho GBrain
+  JSONL em `~/.shepherd-dev/history/` (env `SHEPHERD_DEV_HISTORY_DIR`)
   best-effort. Nunca bloqueia/quebra um run.
 - **B — auto-apply** (`--auto-settle` em run/run2/best-of): auto-accept SÓ com gate PASS +
   review APPROVED (incompatível com `--no-review` e provider static); settle + commit em
