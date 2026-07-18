@@ -89,14 +89,11 @@ class ParallelReport:
 
 def _clone_workspace(repo_root: Path, overlay: dict[str, bytes] | None = None) -> Path:
     """Ephemeral worker clone: worktree copy (+ optional overlay) + shepherd init."""
+    from .supervisor import fast_copytree
+
     dest = Path(tempfile.mkdtemp(prefix="shepherd-par-"))
     clone = dest / "repo"
-    shutil.copytree(
-        repo_root,
-        clone,
-        ignore=shutil.ignore_patterns(*IGNORED_DIRS, ".git"),
-        symlinks=True,
-    )
+    fast_copytree(Path(repo_root), clone, ignored=set(IGNORED_DIRS) | {".git"})
     if overlay:
         materialize_into(clone, overlay)
     shepherd_bin = Path(sys.executable).parent / "shepherd"
@@ -104,6 +101,13 @@ def _clone_workspace(repo_root: Path, overlay: dict[str, bytes] | None = None) -
     if proc.returncode != 0:
         raise RuntimeError(f"shepherd init failed in clone: {proc.stderr.strip()}")
     return clone
+
+
+def _clone_many(repo_root: Path, n: int) -> list[Path]:
+    """n independent worker clones, created CONCURRENTLY — each is seconds of
+    tree copy + shepherd init, and serial creation stalls the whole launch."""
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        return list(pool.map(lambda _i: _clone_workspace(repo_root), range(n)))
 
 
 def _run_worker(
@@ -207,7 +211,7 @@ def develop_parallel(
     clones: list[Path] = []
 
     try:
-        clones = [_clone_workspace(repo_root) for _ in range(2)]
+        clones = _clone_many(repo_root, 2)
 
         notes = [
             (
@@ -495,7 +499,7 @@ def develop_best_of(
     clones: list[Path] = []
 
     try:
-        clones = [_clone_workspace(repo_root) for _ in range(k)]
+        clones = _clone_many(repo_root, k)
         with ThreadPoolExecutor(max_workers=k) as pool:
             futures = [
                 pool.submit(

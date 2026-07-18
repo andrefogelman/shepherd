@@ -223,6 +223,8 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
 | `--no-plan` | run · run2 | Turns off the planning prefetch (no target/plan hints). |
 | `--quiet` | run | Silences ALL live feedback (progress and verbose). |
+| `--fresh-adopt` | run | Forces a full worktree re-adoption (skips the unchanged-worktree cache). |
+| `--speculative-review` | run | Runs the reviewer in parallel with the gate (hides review latency; spends review tokens even when the gate fails). |
 | `--no-verbose` | run · run2 | Turns off the step-by-step feed (phase progress only, no event log). |
 | `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
 
@@ -250,6 +252,16 @@ leaving no orphan — in two layers: (A) at the source, the worker's process gro
 is reaped on expiry; (B) an independent backstop guarantees the kill even if
 layer A doesn't apply in your environment. A stuck worker dies at the budget, not
 in an open-ended wait. Disable the backstop with `--no-watchdog`.
+
+**Execution speed.** Four mechanisms cut the orchestration overhead (measured:
+20.7s → 8.7s per consecutive run on a 1500-file repo): the adoption cache
+(worktree unchanged since the last run → the re-adoption is skipped;
+`--fresh-adopt` forces it), the pre-staged local gate (the base copy is built in
+the background while the worker runs — via the filesystem's clonefile/reflink —
+and each attempt only overlays the proposal's files), concurrent clone creation
+in best-of/run2, and the opt-in speculative review (`--speculative-review`) that
+runs the reviewer in parallel with the gate. Everything degrades cleanly: any
+failure falls back to the full path.
 
 ## Verbose mode & trace (step by step)
 

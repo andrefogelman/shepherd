@@ -215,6 +215,8 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
 | `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
 | `--quiet` | run | Silencia todo o feedback vivo (progresso e verbose). |
+| `--fresh-adopt` | run | Força re-adoção completa da worktree (ignora o cache de worktree-inalterada). |
+| `--speculative-review` | run | Roda o revisor em paralelo com o portão (esconde a latência do review; gasta tokens de review mesmo se o portão falhar). |
 | `--no-verbose` | run · run2 | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
 
@@ -243,6 +245,15 @@ processos toda, sem deixar órfão — em duas camadas: (A) na origem, o grupo d
 processos do worker é reapado no estouro; (B) um backstop independente garante a
 morte mesmo se a camada A não valer no seu ambiente. Um worker travado morre no
 budget, não numa espera indefinida. Desligue o backstop com `--no-watchdog`.
+
+**Aceleração de execução.** Quatro mecanismos cortam o overhead de orquestração
+(medido: 20,7s → 8,7s por run consecutivo num repo de 1.500 arquivos): cache de
+adoção (worktree inalterada desde o último run → pula a re-adoção; `--fresh-adopt`
+força), portão local pré-staged (a base é copiada em background enquanto o worker
+roda — via clonefile/reflink do filesystem — e cada tentativa só sobrepõe os
+arquivos da proposta), clones paralelos no best-of/run2, e o review especulativo
+opt-in (`--speculative-review`) que roda o revisor em paralelo com o portão.
+Tudo degrada limpo: qualquer falha volta ao caminho completo.
 
 ## Modo verbose & trace (passo a passo)
 

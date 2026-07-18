@@ -107,19 +107,63 @@ def _resolve_gate(repo_root: Path, explicit_test_cmd: str | None, provider: str)
     return cmd, hint, cmd is not None
 
 
-def _refresh_substrate(repo_root: Path) -> str | None:
+_ADOPT_KEY_FILE = ".shepherd-adopt-key"
+
+
+def _adoption_key(repo_root: Path) -> str | None:
+    """Fingerprint of the worktree state the adoption depends on: HEAD sha +
+    `git status --porcelain` + (mtime,size) of every dirty/untracked path.
+    None = no usable git state → never cache (always re-adopt)."""
+    import hashlib
+    import subprocess
+
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, timeout=10
+        )
+        if head.returncode != 0:
+            return None
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "-z"],
+            cwd=repo_root, capture_output=True, text=True, timeout=30,
+        )
+        if status.returncode != 0:
+            return None
+        digest = hashlib.sha256()
+        digest.update(head.stdout.encode())
+        digest.update(status.stdout.encode())
+        for entry in status.stdout.split("\0"):
+            if len(entry) > 3:
+                rel = entry[3:]
+                try:
+                    st = (repo_root / rel).stat()
+                    digest.update(f"{rel}:{st.st_mtime_ns}:{st.st_size}".encode())
+                except OSError:
+                    digest.update(f"{rel}:gone".encode())
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
     """Recreate .vcscore so the run basis equals the current worktree.
 
     In shepherd-ai 0.3.0 runs fork from the workspace's ORIGINAL adoption
     basis; settlements do not feed later runs' bases (verified empirically).
     Since git is our durable source of truth, each `shepherd-dev run` re-adopts the
-    worktree from scratch. Refuses if an unconsumed proposal is still pending.
+    worktree from scratch — EXCEPT when the worktree provably hasn't changed
+    since the last adoption (same HEAD + same dirty state, keyed by
+    _adoption_key), where the multi-second re-adopt is skipped. Conservative:
+    any doubt (no git, key mismatch, missing key file, ``fresh=True``)
+    re-adopts. Refuses if an unconsumed proposal is still pending.
     Returns an error message, or None on success.
     """
     import shutil
     import subprocess
 
     vcscore = repo_root / ".vcscore"
+    key = None if fresh else _adoption_key(repo_root)
+    key_file = vcscore / _ADOPT_KEY_FILE
     if vcscore.exists():
         with sp.open(repo_root) as workspace:
             pending = []
@@ -133,6 +177,12 @@ def _refresh_substrate(repo_root: Path) -> str | None:
                 + ", ".join(sorted(set(pending)))
                 + " — settle them first (shepherd-dev settle <ref> [--reject])"
             )
+        if key is not None:
+            try:
+                if key_file.is_file() and key_file.read_text(encoding="utf-8").strip() == key:
+                    return None  # worktree unchanged since the last adoption
+            except Exception:
+                pass  # unreadable key: fall through to a fresh adoption
         shutil.rmtree(vcscore)
 
     shepherd_bin = Path(sys.executable).parent / "shepherd"
@@ -141,6 +191,11 @@ def _refresh_substrate(repo_root: Path) -> str | None:
     )
     if proc.returncode != 0:
         return f"shepherd init failed: {proc.stderr.strip() or proc.stdout.strip()}"
+    if key is not None:
+        try:
+            (repo_root / ".vcscore" / _ADOPT_KEY_FILE).write_text(key, encoding="utf-8")
+        except Exception:
+            pass  # no key persisted → next run re-adopts (safe)
     return None
 
 
@@ -530,7 +585,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.provider == "grok":
         return _cmd_run_grok(args, repo_root, feature, pack, pack_stats)
 
-    error = _refresh_substrate(repo_root)
+    error = _refresh_substrate(repo_root, fresh=getattr(args, "fresh_adopt", False))
     if error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -589,6 +644,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             worker_budget=(None if getattr(args, "no_watchdog", False) else args.worker_budget),
             event_log=event_log,
             stream_hook=stream_hook,
+            speculative_review=getattr(args, "speculative_review", False),
         )
     reporter.close(ok=report.succeeded)
     if event_log is not None:
@@ -1209,6 +1265,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-watchdog",
         action="store_true",
         help="disable the worker budget hard-kill backstop (#B)",
+    )
+    p_run.add_argument(
+        "--fresh-adopt",
+        action="store_true",
+        help="force a full re-adoption of the worktree (skip the unchanged-worktree cache)",
+    )
+    p_run.add_argument(
+        "--speculative-review",
+        action="store_true",
+        help="run the reviewer in parallel with the gate (hides review latency; "
+             "spends review tokens even when the gate fails)",
     )
     p_run.add_argument(
         "--optimize-after",
