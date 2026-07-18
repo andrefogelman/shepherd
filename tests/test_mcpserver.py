@@ -67,6 +67,7 @@ class ToolArgv(unittest.TestCase):
     def test_run2_forces_no_settle(self):
         self.assertIn("--no-verbose", _argv_for("shepherd_run", {"feature": "x"}))
         argv = _argv_for("shepherd_run2", {"feature_a": "A", "feature_b": "B"})
+        self.assertIn("--no-verbose", argv)
         self.assertEqual(argv[:4], ["run2", "A", "B", "--no-settle"])
 
     def test_best_of_clamped_to_2_4(self):  # #17

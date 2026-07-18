@@ -57,6 +57,13 @@ class FormatEventTests(unittest.TestCase):
         e = _ev("gate.line", {"line": "collected 3 items"})
         self.assertIn("collected 3 items", format_event(e, live=True))
 
+    def test_parallel_kinds(self):
+        s = format_event(_ev("parallel.conflicts", {"files": ["index.html"], "handoff": True}))
+        self.assertIn("index.html", s)
+        self.assertIn("handoff", s)
+        self.assertIn("no conflicts", format_event(_ev("parallel.conflicts", {"files": [], "handoff": False})))
+        self.assertIn("round 2", format_event(_ev("parallel.repair", {"round": 2, "exit_code": 1})))
+
     def test_unknown_kind_is_none(self):
         self.assertIsNone(format_event(_ev("something.else", {})))
 
@@ -324,6 +331,10 @@ class VerboseDefaultTests(unittest.TestCase):
 
     def test_v_flag_still_accepted(self):
         self.assertTrue(self._parse(["run", "feat", "-v"]).verbose)
+
+    def test_run2_defaults_to_verbose_with_toggle(self):
+        self.assertTrue(self._parse(["run2", "a", "b"]).verbose)
+        self.assertFalse(self._parse(["run2", "a", "b", "--no-verbose"]).verbose)
 
 
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")

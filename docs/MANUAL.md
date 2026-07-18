@@ -215,7 +215,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
 | `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
 | `--quiet` | run | Silencia todo o feedback vivo (progresso e verbose). |
-| `--no-verbose` | run | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
+| `--no-verbose` | run · run2 | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
 
 ## Aceleradores & robustez do run
@@ -279,8 +279,14 @@ shepherd-dev trace last --json   # NDJSON cru (para máquinas)
 
 Com `--best-of K`, cada candidato grava seu próprio log (`<id>-c0`, `<id>-c1`,
 …), sem renderização viva (K spinners intercalados embaralhariam o terminal);
-use `trace <id>-cK` depois. Tudo best-effort: qualquer falha do mecanismo
-desliga só o verbose — o run segue intacto.
+use `trace <id>-cK` depois.
+
+No `run2` (padrão também), cada worker grava seu log (`<id>-wa`, `<id>-wb` —
+o rework de handoff entra no do seguidor) e um log principal (`<id>`) carrega a
+narrativa: conflitos/handoff, o portão combinado streamed linha a linha, rodadas
+de reparo e a revisão. As fases sequenciais do log principal renderizam ao vivo;
+os workers (concorrentes) só via `trace`. Tudo best-effort: qualquer falha do
+mecanismo desliga só o verbose — o run segue intacto.
 
 ## Best-of-N
 

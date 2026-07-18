@@ -157,6 +157,15 @@ def _entries_diff_text(entries: dict[str, bytes], limit: int = 60_000) -> str:
     return text[:limit] + (f"\n\n[... truncated at {limit} chars ...]" if len(text) > limit else "")
 
 
+def _pemit(log, kind: str, payload: dict | None = None) -> None:
+    """Best-effort emit into an optional event log (verbose mode)."""
+    if log is not None:
+        try:
+            log.emit(kind, payload)
+        except Exception:
+            pass
+
+
 def develop_parallel(
     repo_root: Path,
     features: list[str],
@@ -172,17 +181,29 @@ def develop_parallel(
     worker_tasks: list | None = None,
     worker_extra_args: list[dict | None] | None = None,
     context_pack: str | None = None,
+    event_logs=None,
+    event_log_main=None,
+    stream_hook=None,
 ) -> ParallelReport:
     """Coordinate two parallel workers into one gated, reviewed, staged proposal.
 
     worker_tasks / worker_extra_args exist for the offline static smoke; real
     use runs the `implement` task for both workers.
-    """
+
+    Verbose mode: event_logs is one RunEventLog per worker (their streams and
+    develop-level events; no live rendering — the two run concurrently), and
+    event_log_main is the run2 narrative — conflicts/handoff, the combined
+    gate's streamed lines and named failures, repair rounds, and the review.
+    The handoff rework logs into the follower's (second) log; repairs into the
+    main log. stream_hook is the shared transport hook, bound per thread."""
     assert len(features) == 2, "exactly two parallel features"
     policy = policy or ChangesetPolicy()
     report = ParallelReport(features=list(features), succeeded=False)
     tasks_ = worker_tasks or [implement, implement]
     extras = worker_extra_args or [None, None]
+    logs = list(event_logs) if event_logs else [None, None]
+    logs += [None] * (2 - len(logs))
+    main_log = event_log_main
     clones: list[Path] = []
 
     try:
@@ -196,6 +217,7 @@ def develop_parallel(
             )
             for i in range(2)
         ]
+        _pemit(main_log, "phase.start", {"label": "parallel workers", "features": list(features)})
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
                 pool.submit(
@@ -210,6 +232,8 @@ def develop_parallel(
                     policy=policy,
                     max_attempts=max_attempts,
                     context_pack=context_pack,
+                    event_log=logs[i],
+                    stream_hook=stream_hook,
                 )
                 for i in range(2)
             ]
@@ -225,8 +249,16 @@ def develop_parallel(
         # Conflict coordination: leader = worker 1; follower reworks on top of
         # the leader's proposal (paper's handoff).
         report.conflicts = sorted(set(entries_a) & set(entries_b))
+        _pemit(main_log, "parallel.conflicts", {"files": report.conflicts, "handoff": bool(report.conflicts)})
         if report.conflicts:
             report.handoff_used = True
+            if stream_hook is not None:
+                try:
+                    # The handoff rework runs on THIS thread; route its worker
+                    # stream to the follower's log.
+                    stream_hook.bind(logs[1])
+                except Exception:
+                    pass
             handoff_clone = _clone_workspace(repo_root, overlay=entries_a)
             clones.append(handoff_clone)
             handoff_guidance = (
@@ -250,6 +282,7 @@ def develop_parallel(
                     extra_args=extras[1],
                     initial_guidance=handoff_guidance if extras[1] is None else "",
                     context_pack=context_pack,
+                    event_log=logs[1],
                 )
             report.workers[1] = follower
             if not (follower.succeeded and follower.entries):
@@ -261,9 +294,27 @@ def develop_parallel(
 
         # Combined gate with bounded repair rounds on a clone seeded with the
         # merged proposal.
-        gate = _run_gate(repo_root, combined, test_cmd, gate_timeout)
+        gate_on_line = None
+        if main_log is not None:
+            from .events import gate_line_observer
+
+            gate_on_line = gate_line_observer(main_log)
+
+        def _emit_gate(g) -> None:
+            _pemit(main_log, "gate.result",
+                   {"passed": g.passed, "exit_code": g.exit_code, "infra_error": g.infra_error})
+
+        _pemit(main_log, "phase.start", {"label": "combined gate"})
+        gate = _run_gate(repo_root, combined, test_cmd, gate_timeout, on_line=gate_on_line)
+        _emit_gate(gate)
         while not gate.passed and not gate.infra_error and report.repairs < max_repairs:
             report.repairs += 1
+            _pemit(main_log, "parallel.repair", {"round": report.repairs, "exit_code": gate.exit_code})
+            if stream_hook is not None:
+                try:
+                    stream_hook.bind(main_log)  # repair worker streams into the main narrative
+                except Exception:
+                    pass
             repair_clone = _clone_workspace(repo_root, overlay=combined)
             clones.append(repair_clone)
             repair_feature = (
@@ -284,17 +335,20 @@ def develop_parallel(
                     placement=placement,
                     max_attempts=1,
                     policy=policy,
+                    event_log=main_log,
                 )
             if not (repair.succeeded and repair.entries):
                 break
             combined.update(repair.entries)
-            gate = _run_gate(repo_root, combined, test_cmd, gate_timeout)
+            gate = _run_gate(repo_root, combined, test_cmd, gate_timeout, on_line=gate_on_line)
+            _emit_gate(gate)
         report.combined_gate = gate
         if not gate.passed:
             report.error = gate.infra_error or "combined gate failed after repairs"
             return report
 
         if review_task is not None:
+            _pemit(main_log, "phase.start", {"label": "review"})
             with sp.open(clones[0]) as workspace:
                 report.review = run_review(
                     workspace,
@@ -305,6 +359,10 @@ def develop_parallel(
                     placement=placement,
                     context_pack=context_pack,
                 )
+            if report.review is not None:
+                _pemit(main_log, "review.verdict", {"approved": report.review.approved})
+                for issue in report.review.issues or []:
+                    _pemit(main_log, "review.issue", {"text": str(issue)})
 
         report.proposal_id, report.staged_paths = stage_proposal(
             repo_root,

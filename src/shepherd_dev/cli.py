@@ -766,8 +766,26 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         return 2
     pack, pack_stats = _build_pack(args, repo_root, f"{args.feature_a} {args.feature_b}")
 
+    # Verbose (run2): one event log per worker (-wa/-wb, streams + develop
+    # events; the two run concurrently, so no live rendering for them) plus a
+    # MAIN log with the run2 narrative — conflicts/handoff, the streamed
+    # combined gate, repair rounds, review. The main log renders live (those
+    # phases are sequential); replay everything with `trace`.
+    event_logs = event_log_main = stream_hook = None
+    if getattr(args, "verbose", False):
+        from .events import RunEventLog, WorkerStreamHook, new_run_id, repo_baseline_reader
+        from .progress import VerboseReporter
+
+        base = new_run_id()
+        event_logs = [RunEventLog(run_id=f"{base}-wa"), RunEventLog(run_id=f"{base}-wb")]
+        event_log_main = RunEventLog(run_id=base)
+        stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
+        event_log_main.subscribe(VerboseReporter().handle_event)
+        print(f"verbose: events → {event_log_main.root}/{base}*/events.ndjson", file=sys.stderr)
+        print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
+
     if args.provider == "claude":
-        set_worker_budget(args.worker_budget)
+        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -788,7 +806,20 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         max_repairs=args.max_repairs,
         gate_timeout=args.gate_timeout,
         review_task=reviewer,
+        event_logs=event_logs,
+        event_log_main=event_log_main,
+        stream_hook=stream_hook,
     )
+    if event_log_main is not None:
+        event_log_main.emit(
+            "run.summary",
+            {
+                "succeeded": report.succeeded,
+                "final_run_ref": report.proposal_id,
+                "conflicts": report.conflicts,
+                "repairs": report.repairs,
+            },
+        )
     if report.succeeded:
         learned = repo_memory.learn_from_review(repo_root, report.review, report.proposal_id)
         if learned:
@@ -803,6 +834,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
                 "max_repairs": args.max_repairs,
                 "auto_settle": args.auto_settle,
                 "pack": pack_stats or None,
+                "verbose_run": event_log_main.run_id if event_log_main is not None else None,
             },
         ),
     )
@@ -1224,6 +1256,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="claude (default) or static; grok parallel is not supported yet",
     )
     p_run2.add_argument("--no-review", action="store_true")
+    p_run2.add_argument(
+        "-v", "--verbose",
+        dest="verbose",
+        action="store_true",
+        default=True,
+        help="per-worker + combined event logs, streamed combined gate, trace replay (DEFAULT)",
+    )
+    p_run2.add_argument(
+        "--no-verbose",
+        dest="verbose",
+        action="store_false",
+        help="turn off the step-by-step event logs",
+    )
     p_run2.add_argument(
         "--auto-settle",
         action="store_true",

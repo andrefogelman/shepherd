@@ -140,7 +140,8 @@ def _argv_for(name: str, a: dict) -> list[str]:
             argv += ["--provider", str(prov)]
         return argv
     if name == "shepherd_run2":
-        argv = ["run2", str(a["feature_a"]), str(a["feature_b"]), "--no-settle"]
+        # --no-verbose for the same reason as shepherd_run: compact tool result.
+        argv = ["run2", str(a["feature_a"]), str(a["feature_b"]), "--no-settle", "--no-verbose"]
         if a.get("repo"):
             argv += ["--repo", str(a["repo"])]
         if a.get("test_cmd"):
