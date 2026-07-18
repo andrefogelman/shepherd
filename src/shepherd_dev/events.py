@@ -31,6 +31,13 @@ from typing import Callable
 HUNK_LIMIT = 4000
 EXCERPT_LIMIT = 200
 
+#: Where the launch seam tees the worker's raw stream-json, relative to the
+#: jailed workspace. Lives inside the provider's scratch (the jail's only
+#: housekeeping-writable root), which is scrubbed before the delta is captured
+#: — so the tee can never leak into a retained proposal. The tailer must
+#: therefore be drained before the scrub (see supervisor._TailingExecution).
+TEE_RELPATH = Path(".claude-scratch") / "tmp" / "worker-stream.ndjson"
+
 
 def _default_runs_root() -> Path:
     env = os.environ.get("SHEPHERD_DEV_RUNS_DIR")
@@ -350,3 +357,41 @@ class StreamTailer(threading.Thread):
         if isinstance(baseline, str):
             payload.update(edit_hunk(baseline, content, path=path))
         self._log.emit("worker.write", payload, attempt=self._attempt)
+
+
+class WorkerStreamHook:
+    """Per-launch tailer factory handed to the supervisor's launch seam.
+
+    The supervisor sets ``attempt`` before each worker launch; the seam calls
+    ``start(working_path)`` just before the confined launch and ``drain(...)``
+    right after it returns — before the provider scrubs the scratch that holds
+    the tee file. Every method is failure-tolerant."""
+
+    def __init__(
+        self,
+        log: RunEventLog,
+        *,
+        read_baseline: Callable[[str], str | None] | None = None,
+    ):
+        self.log = log
+        self.read_baseline = read_baseline
+        self.attempt: int | None = None
+
+    def tee_path(self, working_path: Path | str) -> Path:
+        return Path(working_path) / TEE_RELPATH
+
+    def start(self, working_path: Path | str) -> StreamTailer:
+        tailer = StreamTailer(
+            self.tee_path(working_path),
+            self.log,
+            read_baseline=self.read_baseline,
+            attempt=self.attempt,
+        )
+        tailer.start()
+        return tailer
+
+    def drain(self, tailer: StreamTailer, timeout: float = 2.0) -> None:
+        try:
+            tailer.drain(timeout)
+        except Exception:
+            pass

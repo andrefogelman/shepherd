@@ -223,9 +223,74 @@ def _swap_perl_killtree(argv: list) -> list:
     return argv
 
 
-def set_worker_budget(seconds: int) -> bool:
+# Killtree + pump (verbose mode): same process-group hard stop as
+# _KILLTREE_PERL, but the parent also pumps the child's stdout line by line to
+# BOTH its own stdout (the substrate keeps parsing an identical stream) and a
+# tee file (the live tailer's source), autoflushed so the tail is live. Takes
+# TWO leading argv values: budget seconds, then the tee path. If the pipe
+# cannot be created it degrades to a plain exec (the watchdog still enforces
+# the budget). Keeps the literal `exec @ARGV` marker the watchdog greps for.
+_TEEPUMP_PERL = (
+    "my $b = shift @ARGV; my $tee = shift @ARGV;"
+    " my ($r, $w); pipe($r, $w) or do { exec @ARGV or die qq{exec: $!} };"
+    " my $pid = fork();"
+    ' if (!defined $pid) { exec @ARGV or die qq{exec: $!} }'
+    " if ($pid == 0) { eval { require POSIX; POSIX::setsid() };"
+    " close $r; open(STDOUT, q{>&}, $w) or die qq{dup: $!}; close $w;"
+    ' exec @ARGV or die qq{exec: $!} }'
+    " close $w; my $fh; open($fh, q{>}, $tee) or undef $fh;"
+    " if ($fh) { my $old = select($fh); $| = 1; select($old) } $| = 1;"
+    " $SIG{ALRM} = sub { kill(q{KILL}, -$pid) or kill(q{KILL}, $pid); exit 124 };"
+    " alarm $b;"
+    " while (my $line = <$r>) { print $line; print {$fh} $line if $fh }"
+    " waitpid($pid, 0); exit($? >> 8)"
+)
+
+
+def _swap_perl_teepump(argv: list, tee_path) -> list:
+    """Swap the perl script slot for the killtree+pump one and insert the tee
+    path right after the budget seconds. A no-op if argv is not `perl -e …`."""
+    if len(argv) >= 4 and str(argv[0]).endswith("perl") and argv[1] == "-e":
+        argv = list(argv)
+        argv[2] = _TEEPUMP_PERL
+        argv.insert(4, str(tee_path))
+    return argv
+
+
+class _TailingExecution:
+    """Proxy around the substrate ExecutionCapability (private seam, same
+    degrade contract as set_worker_budget): starts the stream tailer just
+    before the confined launch and drains it right after the launch returns —
+    which is BEFORE the provider's finally-scrub deletes the scratch holding
+    the tee file. A hook failure never blocks or fails the launch."""
+
+    def __init__(self, inner, hook):
+        self._inner = inner
+        self._hook = hook
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def launch_confined(self, command, confinement):
+        try:
+            tailer = self._hook.start(self._inner.working_path)
+        except Exception:
+            tailer = None
+        try:
+            return self._inner.launch_confined(command, confinement)
+        finally:
+            if tailer is not None:
+                try:
+                    self._hook.drain(tailer)
+                except Exception:
+                    pass
+
+
+def set_worker_budget(seconds: int, stream_hook=None) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
-    kill of the whole worker process group (#A).
+    kill of the whole worker process group (#A). With ``stream_hook`` (a
+    ``events.WorkerStreamHook``), the launch perl additionally tees the worker's
+    stream-json to a scratch file that the hook tails live (verbose mode).
 
     Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
     runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
@@ -246,9 +311,23 @@ def set_worker_budget(seconds: int) -> bool:
         class _KillTreeProvider(providers.ClaudeHeadlessProvider):
             def command_argv(self, working_path, cli, prompt=None):
                 # Reuse the framework's exact argv (all flags preserved) and swap ONLY
-                # the perl script slot for the killtree one — robust to any change in
-                # the body, and a no-op if the shape is ever not `perl -e`.
-                return _swap_perl_killtree(list(super().command_argv(working_path, cli, prompt)))
+                # the perl script slot — robust to any change in the body, and a
+                # no-op if the shape is ever not `perl -e`. With a stream hook the
+                # swap is the killtree+pump variant (tee for the live tailer).
+                argv = list(super().command_argv(working_path, cli, prompt))
+                if stream_hook is not None:
+                    try:
+                        return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
+                    except Exception:
+                        pass  # verbose off, run intact
+                return _swap_perl_killtree(argv)
+
+            def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
+                if stream_hook is not None and execution is not None:
+                    execution = _TailingExecution(execution, stream_hook)
+                return super().execute(
+                    task_body, stack, context, args, execution=execution, confinement=confinement
+                )
 
         def transport(invocation):
             kwargs = dict(
