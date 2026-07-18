@@ -238,6 +238,30 @@ class ThreadBoundHookTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def test_set_attempt_updates_the_slot_the_thread_reads(self):
+        import threading
+
+        from shepherd_dev.events import WorkerStreamHook
+
+        log_main = RunEventLog(run_id="m", root=self.root / "runs")
+        hook = WorkerStreamHook(log_main)
+        hook.set_attempt(3)  # unbound thread: shared slot
+        self.assertEqual(hook._current(), (log_main, 3))
+
+        seen: list[tuple] = []
+
+        def bound():
+            log_t = RunEventLog(run_id="t", root=self.root / "runs")
+            hook.bind(log_t)
+            hook.set_attempt(2)  # bound thread: MUST hit the thread-local slot
+            seen.append(hook._current())
+
+        t = threading.Thread(target=bound)
+        t.start()
+        t.join(5)
+        self.assertEqual(seen[0][1], 2)
+        self.assertEqual(hook._current(), (log_main, 3))  # main thread untouched
+
     def test_bound_thread_routes_to_its_log_unbound_gets_none(self):
         import threading
 

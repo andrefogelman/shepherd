@@ -226,11 +226,18 @@ def _swap_perl_killtree(argv: list) -> list:
 # _KILLTREE_PERL, but the parent also pumps the child's stdout line by line to
 # BOTH its own stdout (the substrate keeps parsing an identical stream) and a
 # tee file (the live tailer's source), autoflushed so the tail is live. Takes
-# TWO leading argv values: budget seconds, then the tee path. If the pipe
-# cannot be created it degrades to a plain exec (the watchdog still enforces
-# the budget). Keeps the literal `exec @ARGV` marker the watchdog greps for.
+# TWO leading argv values: budget seconds, then the tee path.
+#
+# The alarm is armed FIRST, before pipe()/fork(): the timer survives exec, so
+# the degenerate pipe/fork-failure fallbacks (plain `exec @ARGV`) still die at
+# the budget — the framework's own baseline alarm+exec semantics. In those
+# fallbacks the group kill and the watchdog's `exec @ARGV` cmdline marker are
+# lost (the exec replaces the process image); only the budget stop remains.
+# Keeps the literal `exec @ARGV` marker the watchdog greps for on the normal
+# path.
 _TEEPUMP_PERL = (
     "my $b = shift @ARGV; my $tee = shift @ARGV;"
+    " alarm $b;"
     " my ($r, $w); pipe($r, $w) or do { exec @ARGV or die qq{exec: $!} };"
     " my $pid = fork();"
     ' if (!defined $pid) { exec @ARGV or die qq{exec: $!} }'
@@ -240,7 +247,6 @@ _TEEPUMP_PERL = (
     " close $w; my $fh; open($fh, q{>}, $tee) or undef $fh;"
     " if ($fh) { my $old = select($fh); $| = 1; select($old) } $| = 1;"
     " $SIG{ALRM} = sub { kill(q{KILL}, -$pid) or kill(q{KILL}, $pid); exit 124 };"
-    " alarm $b;"
     " while (my $line = <$r>) { print $line; print {$fh} $line if $fh }"
     " waitpid($pid, 0); exit($? >> 8)"
 )
@@ -626,7 +632,12 @@ def develop(
         reporter.step(f"attempt {number}/{max_attempts} · worker running")
         _emit("phase.start", {"label": "worker", "max_attempts": max_attempts}, attempt=number)
         if stream_hook is not None:
-            stream_hook.attempt = number
+            try:
+                # set_attempt writes whichever slot the hook actually reads for
+                # this thread (thread-local when bound — parallel candidates).
+                stream_hook.set_attempt(number)
+            except Exception:
+                pass
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature

@@ -47,6 +47,13 @@ class SwapArgvTests(unittest.TestCase):
         # The watchdog finds worker processes by this marker (worker_watchdog._WORKER_MARKERS).
         self.assertIn("exec @ARGV", _TEEPUMP_PERL)
 
+    def test_alarm_armed_before_pipe_and_fork(self):
+        # The exec fallbacks (pipe/fork failure) rely on the timer surviving
+        # exec — so the alarm MUST be armed before pipe()/fork(), or a
+        # degenerate fallback runs with no budget stop at all.
+        self.assertLess(_TEEPUMP_PERL.index("alarm $b"), _TEEPUMP_PERL.index("pipe("))
+        self.assertLess(_TEEPUMP_PERL.index("alarm $b"), _TEEPUMP_PERL.index("fork()"))
+
 
 @unittest.skipUnless(os.path.exists(PERL), "perl not available")
 class PumpBehaviorTests(unittest.TestCase):

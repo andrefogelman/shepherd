@@ -76,6 +76,16 @@ class EventLogTests(unittest.TestCase):
         log = RunEventLog(run_id="t4", root=self.root)
         self.assertEqual(log.path, self.root / "t4" / "events.ndjson")
 
+    def test_log_files_are_private(self):
+        # Hunks and gate output can carry secrets — 0700 dir, 0600 file.
+        import stat
+
+        log = RunEventLog(run_id="t6", root=self.root)
+        log.emit("phase.start", {"label": "worker"})
+        self.assertEqual(log.dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(log.path.stat().st_mode & 0o777, 0o600)
+        del stat
+
     def test_load_and_latest(self):
         older = RunEventLog(run_id="20260101-000000-aaaaaa", root=self.root)
         older.emit("run.summary", {"n": 1})

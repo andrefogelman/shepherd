@@ -64,7 +64,11 @@ class RunEventLog:
         self._lock = threading.Lock()
         self._observers: list[Callable[[dict], None]] = []
         try:
+            # Private by default: hunks and gate output can carry secrets (an
+            # edited .env, a credential echoed by a failing test).
             self.dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.root, 0o700)
+            os.chmod(self.dir, 0o700)
         except Exception:
             pass
 
@@ -90,7 +94,8 @@ class RunEventLog:
                 event["payload"] = {"repr": repr(payload)[:500]}
                 line = json.dumps(event, ensure_ascii=False, default=str)
             try:
-                with open(self.path, "a", encoding="utf-8") as fh:
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
             except Exception:
                 pass
@@ -432,6 +437,15 @@ class WorkerStreamHook:
         """Route this thread's launches to ``log`` (parallel candidates)."""
         self._local.log = log
         self._local.attempt = attempt
+
+    def set_attempt(self, attempt: int | None) -> None:
+        """Update the attempt tag in whichever slot ``_current`` reads for this
+        thread — the thread-local one when bound, else the shared default. A
+        bare ``hook.attempt = n`` write would be ignored by bound threads."""
+        if hasattr(self._local, "log"):
+            self._local.attempt = attempt
+        else:
+            self.attempt = attempt
 
     def _current(self) -> tuple[RunEventLog | None, int | None]:
         if hasattr(self._local, "log"):
