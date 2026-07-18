@@ -172,6 +172,32 @@ def parse_test_failure(line: str) -> dict | None:
     return None
 
 
+def repo_baseline_reader(repo_root: Path) -> Callable[[str], str | None]:
+    """A ``read_baseline`` for StreamTailer: resolve a worker tool path (often
+    jail-absolute, pointing into the forked workspace) to the repo's CURRENT
+    file content by longest existing suffix — so a Write can be rendered as a
+    diff against the pre-change state. Traversal-safe and size-capped."""
+    root = Path(repo_root).resolve()
+
+    def read(path_str: str) -> str | None:
+        if not path_str:
+            return None
+        parts = [p for p in Path(path_str).parts if p not in ("/", "")]
+        for i in range(len(parts)):
+            candidate = root.joinpath(*parts[i:])
+            try:
+                resolved = candidate.resolve()
+                if not resolved.is_relative_to(root):
+                    continue  # `..` or symlink escape — never read outside the repo
+                if resolved.is_file() and resolved.stat().st_size <= 512 * 1024:
+                    return resolved.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+        return None
+
+    return read
+
+
 def gate_line_observer(
     log: "RunEventLog",
     attempt: int | None = None,

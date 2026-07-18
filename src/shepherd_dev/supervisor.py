@@ -587,6 +587,8 @@ def develop(
     context_pack: str | None = None,
     reporter=None,
     worker_budget: int | None = None,
+    event_log=None,
+    stream_hook=None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace.
 
@@ -597,6 +599,9 @@ def develop(
     given, is prepended to the guidance of EVERY attempt (built once per command,
     reused across retries — the lane-honest analogue of prefix reuse). reporter
     surfaces live per-phase progress (#A); defaults to a silent NullProgress.
+    event_log (verbose mode) receives normalized run events — phases, per-file
+    diffs, streamed gate lines/failures, policy and review outcomes; stream_hook
+    is the WorkerStreamHook whose attempt counter develop keeps current.
     """
     import time as _time
 
@@ -609,9 +614,19 @@ def develop(
 
     workspace.tasks.register(task)
 
+    def _emit(kind: str, payload: dict | None = None, attempt: int | None = None):
+        if event_log is not None:
+            try:
+                event_log.emit(kind, payload, attempt=attempt)
+            except Exception:
+                pass
+
     for number in range(1, max_attempts + 1):
         warmup = _start_gate_warmup(repo_root, test_cmd, gate_timeout)
         reporter.step(f"attempt {number}/{max_attempts} · worker running")
+        _emit("phase.start", {"label": "worker", "max_attempts": max_attempts}, attempt=number)
+        if stream_hook is not None:
+            stream_hook.attempt = number
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature
@@ -683,6 +698,7 @@ def develop(
         entries = read_changeset_entries(changeset)
         changed = list(entries)
         reporter.note(worker_activity_summary(run, entries))  # post-hoc #B
+        _emit("attempt.diff", {"files": changed, "run_ref": run.run_ref}, attempt=number)
 
         if not changed:
             # Worker produced nothing: either it judged the feature already
@@ -691,6 +707,7 @@ def develop(
             if warmup is not None:
                 warmup.teardown()
             reporter.fail("no file changes")
+            _emit("phase.fail", {"label": "worker", "reason": "no file changes"}, attempt=number)
             report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration))
             guidance = (
                 "PREVIOUS ATTEMPT: you produced no file changes at all. "
@@ -705,6 +722,7 @@ def develop(
             if warmup is not None:
                 warmup.teardown()
             reporter.fail(f"policy: {len(verdict_policy.violations)} violation(s)")
+            _emit("policy.reject", {"violations": verdict_policy.violations}, attempt=number)
             report.attempts.append(
                 Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
             )
@@ -714,7 +732,18 @@ def develop(
         gate: GateResult | None = None
         if test_cmd is not None:
             reporter.step(f"attempt {number} · gate")
-            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup)
+            _emit("phase.start", {"label": "gate"}, attempt=number)
+            on_line = None
+            if event_log is not None:
+                from .events import gate_line_observer
+
+                on_line = gate_line_observer(event_log, attempt=number)
+            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup, on_line=on_line)
+            _emit(
+                "gate.result",
+                {"passed": gate.passed, "exit_code": gate.exit_code, "infra_error": gate.infra_error},
+                attempt=number,
+            )
             if gate.infra_error:
                 # Suite could not run: abort, do not burn attempts, keep output retained.
                 # Surface the run-ref so the summary tells the user how to settle/reject
@@ -740,6 +769,7 @@ def develop(
         report.entries = entries
         if review_task is not None:
             reporter.step(f"attempt {number} · review")
+            _emit("phase.start", {"label": "review"}, attempt=number)
             report.review = run_review(
                 workspace,
                 review_task,
@@ -749,6 +779,10 @@ def develop(
                 placement=placement,
                 context_pack=context_pack,
             )
+            if report.review is not None:
+                _emit("review.verdict", {"approved": report.review.approved}, attempt=number)
+                for issue in report.review.issues or []:
+                    _emit("review.issue", {"text": str(issue)}, attempt=number)
         return report
 
     return report

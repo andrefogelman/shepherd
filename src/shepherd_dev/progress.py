@@ -133,6 +133,103 @@ class NullProgress:
     def __exit__(self, *exc) -> None: ...
 
 
+def _short_path(path: str, keep: int = 3) -> str:
+    """Shorten a jail-absolute tool path to its last ``keep`` parts."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if not path.startswith("/") and len(parts) <= keep:
+        return path
+    tail = parts[-keep:] if len(parts) > keep else parts
+    prefix = "…/" if (path.startswith("/") or len(parts) > keep) else ""
+    return prefix + "/".join(tail)
+
+
+def format_event(event: dict, live: bool = True) -> str | None:
+    """One rendered line for a run event — the shared vocabulary of the live
+    verbose reporter and the post-hoc trace. None = not rendered in this mode
+    (live hides phase.* / run.summary: the phase spinner already shows them)."""
+    kind = event.get("kind", "")
+    p = event.get("payload") or {}
+    if kind == "worker.tool":
+        target = p.get("target") or ""
+        return f"⚒ {p.get('tool', 'tool')} {_short_path(target)}".rstrip()
+    if kind == "worker.edit":
+        return f"✎ {_short_path(p.get('path', ''))} (+{p.get('add', 0)} −{p.get('del', 0)})"
+    if kind == "worker.write":
+        extra = f" (+{p['add']} −{p['del']})" if "add" in p else ""
+        return f"✚ {_short_path(p.get('path', ''))} ({p.get('lines', 0)} lines){extra}"
+    if kind == "worker.tool.fail":
+        return f"⚠ tool error: {p.get('error', '')}"
+    if kind == "worker.note":
+        return f"· {p.get('text', '')}"
+    if kind == "worker.raw":
+        return f"⚠ oversized stream line dropped ({p.get('bytes', 0)} bytes)"
+    if kind == "gate.line":
+        return f"┆ {p.get('line', '')}"
+    if kind == "gate.test.fail":
+        return f"✗ {p.get('test', '?')} ({p.get('framework', '?')})"
+    if kind == "gate.result":
+        if p.get("infra_error"):
+            return f"gate infra error: {p['infra_error']}"
+        state = "passed" if p.get("passed") else "failed"
+        return f"gate {state} (exit {p.get('exit_code')})"
+    if kind == "policy.reject":
+        return f"✗ policy: {len(p.get('violations') or [])} violation(s)"
+    if kind == "review.verdict":
+        return f"review: {'APPROVED' if p.get('approved') else 'REJECTED'}"
+    if kind == "review.issue":
+        return f"• {p.get('text', '')}"
+    if kind == "attempt.diff":
+        files = p.get("files") or []
+        shown = ", ".join(files[:6]) + ("…" if len(files) > 6 else "")
+        return f"changed: {shown}" if files else None
+    if live:
+        return None  # phase.* / run.summary duplicate the live phase spinner
+    if kind == "phase.start":
+        return f"▶ {p.get('label', '')}"
+    if kind == "phase.fail":
+        return f"✗ {p.get('reason', p.get('label', ''))}"
+    if kind == "run.summary":
+        mark = "✓" if p.get("succeeded") else "✗"
+        ref = p.get("final_run_ref")
+        return f"{mark} run {'succeeded' if p.get('succeeded') else 'failed'}" + (
+            f" · ref {ref}" if ref else ""
+        )
+    return None
+
+
+class VerboseReporter(ProgressReporter):
+    """A ProgressReporter that also renders run events as sub-lines under the
+    live phase — subscribe its handle_event to the RunEventLog."""
+
+    def handle_event(self, event: dict) -> None:
+        try:
+            line = format_event(event, live=True)
+        except Exception:
+            return
+        if line:
+            self.note(line)
+
+
+def render_trace(events: list[dict], full: bool = False) -> list[str]:
+    """Post-hoc timeline of a run's event log. gate.line noise is included
+    only with full=True; failures and phases always show."""
+    if not events:
+        return []
+    t0 = events[0].get("ts", 0.0)
+    lines: list[str] = []
+    for event in events:
+        if event.get("kind") == "gate.line" and not full:
+            continue
+        rendered = format_event(event, live=False)
+        if rendered is None:
+            continue
+        offset = float(event.get("ts", t0)) - float(t0)
+        attempt = event.get("attempt")
+        tag = f" a{attempt}" if attempt is not None else ""
+        lines.append(f"[+{offset:.1f}s{tag}] {rendered}")
+    return lines
+
+
 _TOOL_KINDS = {"tool.call", "tool.call.started"}
 
 

@@ -17,6 +17,7 @@ into your working tree, keeping both in sync; committing to git stays with you.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -518,8 +519,19 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    # Verbose mode: a per-run event log + the worker stream hook (tee/tailer).
+    # The hook rides set_worker_budget's transport rebind, so it exists only on
+    # the claude provider; the gate/review events work on every provider.
+    event_log = stream_hook = None
+    if getattr(args, "verbose", False) and not getattr(args, "quiet", False):
+        from .events import RunEventLog, WorkerStreamHook, repo_baseline_reader
+
+        event_log = RunEventLog()
+        stream_hook = WorkerStreamHook(event_log, read_baseline=repo_baseline_reader(repo_root))
+        print(f"verbose: events → {event_log.path}", file=sys.stderr)
+
     if args.provider == "claude":
-        set_worker_budget(args.worker_budget)
+        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -533,9 +545,15 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.best_of > 1:
         return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature, pack, pack_stats)
 
-    from .progress import NullProgress, ProgressReporter
+    from .progress import NullProgress, ProgressReporter, VerboseReporter
 
-    reporter = NullProgress() if getattr(args, "quiet", False) else ProgressReporter()
+    if getattr(args, "quiet", False):
+        reporter = NullProgress()
+    elif event_log is not None:
+        reporter = VerboseReporter()
+        event_log.subscribe(reporter.handle_event)
+    else:
+        reporter = ProgressReporter()
     with sp.open(repo_root) as workspace:
         report = develop(
             workspace,
@@ -553,8 +571,21 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             context_pack=pack,
             reporter=reporter,
             worker_budget=(None if getattr(args, "no_watchdog", False) else args.worker_budget),
+            event_log=event_log,
+            stream_hook=stream_hook,
         )
     reporter.close(ok=report.succeeded)
+    if event_log is not None:
+        event_log.emit(
+            "run.summary",
+            {
+                "succeeded": report.succeeded,
+                "attempts": len(report.attempts),
+                "final_run_ref": report.final_run_ref,
+                "feature": args.feature,
+            },
+        )
+        print(f"trace: shepherd-dev trace {event_log.run_id}", file=sys.stderr)
 
     learned = repo_memory.learn_from_report(repo_root, report)
     if learned:
@@ -569,6 +600,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
                 "allowed_prefix": args.allowed_prefix,
                 "auto_settle": args.auto_settle,
                 "pack": pack_stats or None,
+                "verbose_run": event_log.run_id if event_log is not None else None,
             },
         ),
     )
@@ -1018,6 +1050,32 @@ def cmd_mcp(args) -> int:
     return serve()
 
 
+def cmd_trace(args) -> int:
+    """Replay the step-by-step timeline of a run recorded by --verbose."""
+    from .events import latest_run_id, load_run_events
+
+    run_id = args.run_id
+    if run_id in (None, "last"):
+        run_id = latest_run_id()
+        if run_id is None:
+            print("no recorded runs (run with --verbose to record one)", file=sys.stderr)
+            return 2
+    events = load_run_events(run_id)
+    if not events:
+        print(f"no events for run {run_id}", file=sys.stderr)
+        return 2
+    if args.json:
+        for event in events:
+            print(json.dumps(event, ensure_ascii=False))
+        return 0
+    from .progress import render_trace
+
+    print(f"run {run_id} · {len(events)} event(s)")
+    for line in render_trace(events, full=args.full):
+        print(line)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Supervised AI development via Shepherd")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1083,6 +1141,13 @@ def main() -> int:
         "--quiet",
         action="store_true",
         help="silence the live per-phase progress reporter",
+    )
+    p_run.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="live step-by-step feed: every worker tool call, per-edit diff, "
+             "streamed gate line and named test failure; events persisted for "
+             "`shepherd-dev trace` replay",
     )
     p_run.add_argument(
         "--no-watchdog",
@@ -1201,6 +1266,12 @@ def main() -> int:
 
     p_mcp = sub.add_parser("mcp", help="run as an MCP stdio server (Codex / Cursor / Claude Code / ChatGPT desktop)")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_trace = sub.add_parser("trace", help="replay a run's event timeline (verbose runs record one)")
+    p_trace.add_argument("run_id", nargs="?", default="last", help="run id (default: the most recent)")
+    p_trace.add_argument("--full", action="store_true", help="include every gate output line, not just failures")
+    p_trace.add_argument("--json", action="store_true", help="print the raw NDJSON events instead of the timeline")
+    p_trace.set_defaults(func=cmd_trace)
 
     args = parser.parse_args()
     return args.func(args)
