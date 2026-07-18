@@ -410,32 +410,53 @@ class WorkerStreamHook:
     The supervisor sets ``attempt`` before each worker launch; the seam calls
     ``start(working_path)`` just before the confined launch and ``drain(...)``
     right after it returns — before the provider scrubs the scratch that holds
-    the tee file. Every method is failure-tolerant."""
+    the tee file. Every method is failure-tolerant.
+
+    Parallel lanes (best-of) share ONE hook through the global transport seam
+    but run each worker in its own thread: ``bind(log)`` routes that thread's
+    launches to its candidate's log (thread-local override of the default).
+    A thread with neither a bound nor a default log gets no tailer."""
 
     def __init__(
         self,
-        log: RunEventLog,
+        log: RunEventLog | None = None,
         *,
         read_baseline: Callable[[str], str | None] | None = None,
     ):
         self.log = log
         self.read_baseline = read_baseline
         self.attempt: int | None = None
+        self._local = threading.local()
+
+    def bind(self, log: RunEventLog | None, attempt: int | None = None) -> None:
+        """Route this thread's launches to ``log`` (parallel candidates)."""
+        self._local.log = log
+        self._local.attempt = attempt
+
+    def _current(self) -> tuple[RunEventLog | None, int | None]:
+        if hasattr(self._local, "log"):
+            return self._local.log, getattr(self._local, "attempt", None)
+        return self.log, self.attempt
 
     def tee_path(self, working_path: Path | str) -> Path:
         return Path(working_path) / TEE_RELPATH
 
-    def start(self, working_path: Path | str) -> StreamTailer:
+    def start(self, working_path: Path | str) -> StreamTailer | None:
+        log, attempt = self._current()
+        if log is None:
+            return None
         tailer = StreamTailer(
             self.tee_path(working_path),
-            self.log,
+            log,
             read_baseline=self.read_baseline,
-            attempt=self.attempt,
+            attempt=attempt,
         )
         tailer.start()
         return tailer
 
-    def drain(self, tailer: StreamTailer, timeout: float = 2.0) -> None:
+    def drain(self, tailer: StreamTailer | None, timeout: float = 2.0) -> None:
+        if tailer is None:
+            return
         try:
             tailer.drain(timeout)
         except Exception:

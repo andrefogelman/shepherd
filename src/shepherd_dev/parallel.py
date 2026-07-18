@@ -118,7 +118,16 @@ def _run_worker(
     policy: ChangesetPolicy,
     max_attempts: int,
     context_pack: str | None = None,
+    event_log=None,
+    stream_hook=None,
 ) -> DevReport:
+    if stream_hook is not None:
+        # Route this worker thread's jailed launches to its candidate's log
+        # (the transport seam is global; the thread is the candidate identity).
+        try:
+            stream_hook.bind(event_log)
+        except Exception:
+            pass
     with sp.open(clone) as workspace:
         report = develop(
             workspace,
@@ -134,6 +143,7 @@ def _run_worker(
             extra_args=extra_args,
             initial_guidance=teammate_note if extra_args is None else "",
             context_pack=context_pack,
+            event_log=event_log,
         )
     return report
 
@@ -409,13 +419,21 @@ def develop_best_of(
     worker_task=None,
     worker_extra_args: list[dict | None] | None = None,
     context_pack: str | None = None,
+    event_logs=None,
+    stream_hook=None,
 ) -> BestOfReport:
-    """K parallel candidates from the same state; winner staged for settlement."""
+    """K parallel candidates from the same state; winner staged for settlement.
+
+    event_logs (verbose mode): one RunEventLog per candidate — each worker's
+    stream and its own gate lines/failures land in its candidate's log (no live
+    rendering: K interleaved spinners would garble; replay via `trace`)."""
     assert 2 <= k <= len(EMPHASES), f"k must be 2..{len(EMPHASES)}"
     policy = policy or ChangesetPolicy()
     report = BestOfReport(feature=feature, k=k, succeeded=False)
     task = worker_task or implement
     extras = worker_extra_args or [None] * k
+    logs = list(event_logs) if event_logs else [None] * k
+    logs += [None] * (k - len(logs))
     clones: list[Path] = []
 
     try:
@@ -434,6 +452,8 @@ def develop_best_of(
                     policy=policy,
                     max_attempts=max_attempts,
                     context_pack=context_pack,
+                    event_log=logs[i],
+                    stream_hook=stream_hook,
                 )
                 for i in range(k)
             ]
@@ -448,7 +468,21 @@ def develop_best_of(
                 )
                 continue
             entries_by_idx[i] = w.entries
-            gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout)
+            on_line = None
+            if logs[i] is not None:
+                from .events import gate_line_observer
+
+                on_line = gate_line_observer(logs[i])
+            gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout, on_line=on_line)
+            if logs[i] is not None:
+                try:
+                    logs[i].emit(
+                        "gate.result",
+                        {"passed": gate.passed, "exit_code": gate.exit_code,
+                         "infra_error": gate.infra_error},
+                    )
+                except Exception:
+                    pass
             review = None
             if gate.passed and review_task is not None:
                 with sp.open(clones[i]) as workspace:

@@ -291,6 +291,20 @@ def _auto_settle_conditions(report) -> str | None:
 
 
 def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, feature: str, pack: str | None = None, pack_stats: dict | None = None) -> int:
+    # Verbose (best-of): one event log per candidate, replayed via `trace` —
+    # no live rendering (K interleaved candidates would garble one spinner).
+    event_logs = stream_hook = None
+    if getattr(args, "verbose", False) and not getattr(args, "quiet", False):
+        from .events import RunEventLog, WorkerStreamHook, new_run_id, repo_baseline_reader
+
+        base = new_run_id()
+        event_logs = [RunEventLog(run_id=f"{base}-c{i}") for i in range(args.best_of)]
+        stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
+        if args.provider == "claude":
+            set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+        print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
+        print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
+
     report = develop_best_of(
         repo_root,
         feature,
@@ -304,6 +318,8 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         review_task=reviewer,
         worker_task=worker,
         context_pack=pack,
+        event_logs=event_logs,
+        stream_hook=stream_hook,
     )
     if report.succeeded:
         learned = repo_memory.learn_from_review(repo_root, report.review, report.proposal_id)
@@ -523,7 +539,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     # The hook rides set_worker_budget's transport rebind, so it exists only on
     # the claude provider; the gate/review events work on every provider.
     event_log = stream_hook = None
-    if getattr(args, "verbose", False) and not getattr(args, "quiet", False):
+    if getattr(args, "verbose", False) and not getattr(args, "quiet", False) and args.best_of == 1:
         from .events import RunEventLog, WorkerStreamHook, repo_baseline_reader
 
         event_log = RunEventLog()

@@ -230,6 +230,51 @@ class DevelopEmitsEvents(unittest.TestCase):
         self.assertIn("policy.reject", self.kinds())
 
 
+class ThreadBoundHookTests(unittest.TestCase):
+    """Parallel best-of: one global hook, per-thread candidate logs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-tbh-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_bound_thread_routes_to_its_log_unbound_gets_none(self):
+        import threading
+
+        from shepherd_dev.events import WorkerStreamHook
+
+        hook = WorkerStreamHook()  # no default log
+        self.assertIsNone(hook.start(self.root / "wsX"))  # unbound + no default
+
+        logs = {name: RunEventLog(run_id=name, root=self.root / "runs") for name in ("a", "b")}
+        results: dict[str, list[str]] = {}
+
+        def worker(name: str):
+            hook.bind(logs[name])
+            ws = self.root / f"ws-{name}"
+            tee = hook.tee_path(ws)
+            tee.parent.mkdir(parents=True, exist_ok=True)
+            tailer = hook.start(ws)
+            tee.write_text(
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"from %s"}]}}\n' % name
+            )
+            hook.drain(tailer)
+            results[name] = [
+                e["payload"]["text"]
+                for e in map(__import__("json").loads, logs[name].path.read_text().splitlines())
+                if e["kind"] == "worker.note"
+            ]
+
+        threads = [__import__("threading").Thread(target=worker, args=(n,)) for n in ("a", "b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        self.assertEqual(results["a"], ["from a"])
+        self.assertEqual(results["b"], ["from b"])
+        del threading
+
+
 try:  # the CLI imports the substrate; skip its tests where it is absent
     import shepherd as _sp  # noqa: F401
 
