@@ -194,6 +194,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `settle-par <proposal-id> --repo P [--reject]` | Liquida uma proposta staged de `run2` / `--best-of`. |
 | `init --repo P` | Inicializa o repo (uma vez). |
 | `optimize [--apply]` | Melhora os prompts a partir do histórico, validando por replay. |
+| `trace [run-id\|last] [--full] [--json]` | Reproduz a timeline passo a passo de um run gravado com `-v`. |
 
 ## Flags úteis
 
@@ -214,6 +215,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
 | `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
 | `--quiet` | run | Silencia o feedback vivo de progresso. |
+| `-v` / `--verbose` | run | Feed vivo passo a passo: cada ferramenta, cada diff, cada teste falho; grava eventos para `trace`. |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
 
 ## Aceleradores & robustez do run
@@ -241,6 +243,43 @@ processos toda, sem deixar órfão — em duas camadas: (A) na origem, o grupo d
 processos do worker é reapado no estouro; (B) um backstop independente garante a
 morte mesmo se a camada A não valer no seu ambiente. Um worker travado morre no
 budget, não numa espera indefinida. Desligue o backstop com `--no-watchdog`.
+
+## Modo verbose & trace (passo a passo)
+
+`run -v` liga o feed vivo passo a passo: cada ferramenta que o worker usa, cada
+edição com diff (+/− linhas), cada linha do portão e cada teste que falha
+aparecem como sublinhas do progresso, em tempo real:
+
+```
+⠹ tentativa 1/3 · worker rodando · 2m14s
+   ⚒ Read …/src/auth/signup.py
+   ✎ …/src/auth/signup.py (+12 −3)
+   ┆ collected 24 items
+   ✗ tests/test_signup.py::test_cpf (pytest)
+```
+
+Como funciona: o worker jailed já emite um stream estruturado de eventos; o
+shepherd o duplica (tee) para dentro do scratch do workspace — área limpa antes
+da captura do delta, então nunca contamina a proposta — e uma thread acompanha o
+arquivo ao vivo. O diff por edição sai do próprio input da ferramenta Edit
+(old/new); um Write vira diff contra o estado atual do repo. O portão (local E
+remoto) roda streamed linha a linha, com parsers que nomeiam o teste falho
+(pytest, unittest, jest/vitest, ExUnit, cargo, go).
+
+Tudo é persistido como NDJSON em `~/.shepherd-dev/runs/<run-id>/events.ndjson`
+e pode ser reproduzido depois:
+
+```bash
+shepherd-dev trace last          # timeline do último run
+shepherd-dev trace <run-id>      # de um run específico
+shepherd-dev trace last --full   # inclui TODAS as linhas do portão
+shepherd-dev trace last --json   # NDJSON cru (para máquinas)
+```
+
+Com `--best-of K`, cada candidato grava seu próprio log (`<id>-c0`, `<id>-c1`,
+…), sem renderização viva (K spinners intercalados embaralhariam o terminal);
+use `trace <id>-cK` depois. Tudo best-effort: qualquer falha do mecanismo
+desliga só o verbose — o run segue intacto.
 
 ## Best-of-N
 

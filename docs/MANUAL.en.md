@@ -202,6 +202,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `settle-par <proposal-id> --repo P [--reject]` | Settles a staged `run2` / `--best-of` proposal. |
 | `init --repo P` | Initializes the repo (once). |
 | `optimize [--apply]` | Improves the worker prompts from run history, validated by replay. |
+| `trace [run-id\|last] [--full] [--json]` | Replays the step-by-step timeline of a run recorded with `-v`. |
 
 ## Useful flags
 
@@ -222,6 +223,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
 | `--no-plan` | run · run2 | Turns off the planning prefetch (no target/plan hints). |
 | `--quiet` | run | Silences the live progress reporter. |
+| `-v` / `--verbose` | run | Live step-by-step feed: every tool call, per-edit diff, each failing test; records events for `trace`. |
 | `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
 
 ## Accelerators & robustness
@@ -248,6 +250,43 @@ leaving no orphan — in two layers: (A) at the source, the worker's process gro
 is reaped on expiry; (B) an independent backstop guarantees the kill even if
 layer A doesn't apply in your environment. A stuck worker dies at the budget, not
 in an open-ended wait. Disable the backstop with `--no-watchdog`.
+
+## Verbose mode & trace (step by step)
+
+`run -v` turns on a live step-by-step feed: every tool the worker uses, every
+edit with its diff (+/− lines), every gate output line and every failing test
+appear as sub-lines under the live progress, in real time:
+
+```
+⠹ attempt 1/3 · worker running · 2m14s
+   ⚒ Read …/src/auth/signup.py
+   ✎ …/src/auth/signup.py (+12 −3)
+   ┆ collected 24 items
+   ✗ tests/test_signup.py::test_cpf (pytest)
+```
+
+How it works: the jailed worker already emits a structured event stream; shepherd
+tees it into the workspace scratch — an area scrubbed before the delta is
+captured, so it can never leak into a proposal — and a thread tails the file
+live. The per-edit diff comes for free from the Edit tool's own input (old/new);
+a Write renders as a diff against the repo's current state. The gate (local AND
+remote) runs streamed line by line, with parsers that name the failing test
+(pytest, unittest, jest/vitest, ExUnit, cargo, go).
+
+Everything is persisted as NDJSON in `~/.shepherd-dev/runs/<run-id>/events.ndjson`
+and can be replayed later:
+
+```bash
+shepherd-dev trace last          # timeline of the most recent run
+shepherd-dev trace <run-id>      # of a specific run
+shepherd-dev trace last --full   # include EVERY gate output line
+shepherd-dev trace last --json   # raw NDJSON (for machines)
+```
+
+With `--best-of K`, each candidate records its own log (`<id>-c0`, `<id>-c1`, …)
+with no live rendering (K interleaved spinners would garble the terminal); use
+`trace <id>-cK` afterwards. Everything is best-effort: any failure of the
+mechanism turns off only the verbose feed — the run proceeds intact.
 
 ## Best-of-N
 
