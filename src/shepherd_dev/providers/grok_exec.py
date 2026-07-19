@@ -10,21 +10,12 @@ import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
+from .hosted import ExecResult, HostedExecutor
 
-@dataclass
-class ExecResult:
-    ok: bool
-    error: str | None = None
-    duration_s: float | None = None
-    output_tail: str = ""
-
-
-class GrokExecutor(Protocol):
-    def run(self, clone: Path, prompt: str, *, budget_seconds: int) -> ExecResult: ...
+# Back-compat: the executor protocol now lives in hosted (shared with codex).
+GrokExecutor = HostedExecutor
 
 
 def find_grok_bin(explicit: str | None = None) -> str | None:
