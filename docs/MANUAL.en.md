@@ -101,20 +101,38 @@ command = "shepherd-dev"
 args = ["mcp"]
 ```
 
-(or `codex mcp add shepherd-dev -- shepherd-dev mcp`). The same server works in
-Cursor (`.cursor/mcp.json`), Claude Code, and the ChatGPT desktop app — one
-server, every client. `shepherd_run`/`run2` always run with `--no-settle`, so
-nothing is applied through MCP; you settle explicitly, and **accepting requires
-`confirm: true`** (the settle tools refuse to write files without it). See
-[codex/README.md](../codex/README.md).
+(or `codex mcp add shepherd-dev -- shepherd-dev mcp`; verify with `codex mcp
+list`). The same server works in Cursor (`.cursor/mcp.json`), Claude Code, and
+the ChatGPT desktop app — one server, every client. `shepherd_run`/`run2` always
+run with `--no-settle`, so nothing is applied through MCP; you settle
+explicitly, and **accepting requires `confirm: true`** (the settle tools refuse
+to write files without it). See [codex/README.md](../codex/README.md).
+
+Verified Codex CLI gotcha: MCP tools are **deferred** behind tool search
+(`tool_search_always_defer_mcp_tools`) — they do not appear in the model's
+initial tool list. They surface as `mcp__shepherd_dev__shepherd_run` etc. once
+the agent searches; if Codex claims it has no shepherd tools, ask it to search
+its deferred tools for "shepherd".
 
 By default the worker is a headless `claude` session — an authenticated `claude`
-CLI is required; the host agent's own model does not power it.
+CLI is required; the host agent's own model does not power it. With
+`--provider codex` or `--provider grok` no `claude` CLI is needed.
 
 **Grok worker (no Claude):** pass `--provider grok`. The worker is the Grok Build
 CLI (`grok` on PATH or `~/.grok/bin/grok`); proposals are staged for
 `settle-par` (same as run2). See [2026-07-14-grok-provider-l1-l2.md](2026-07-14-grok-provider-l1-l2.md).
 Default `--provider claude` is unchanged.
+
+**Codex worker (no Claude, real LLM review):** pass `--provider codex`. The
+worker is headless `codex exec` (`codex` on PATH; override `--codex-cmd` /
+`SHEPHERD_DEV_CODEX_CMD`, model via `--codex-model`). Isolation is double: a
+temp clone (L1) plus the Codex CLI's own OS sandbox (`--sandbox
+workspace-write`, Seatbelt/Landlock). Unlike Grok's heuristic, Codex runs a
+**real LLM review**: a second `codex exec` re-reads the modified clone in a
+read-only sandbox and returns a structured JSON verdict — so `--auto-settle`
+works on this provider. Running shepherd-dev INSIDE Codex closes a fully-Codex
+loop: the host agent calls `shepherd_run` with `provider: "codex"` and the
+worker is Codex too. See [2026-07-19-codex-provider.md](2026-07-19-codex-provider.md).
 
 ## Install (per machine)
 

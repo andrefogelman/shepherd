@@ -9,8 +9,10 @@ First install the CLI once per machine:
 uv tool install git+https://github.com/andrefogelman/shepherd.git
 ```
 
-Requires Python 3.11+, git, and an authenticated `claude` CLI — the worker is a headless
-Claude Code session; the host agent's own model does not power the worker.
+Requires Python 3.11+ and git. The default worker is a headless Claude Code session
+(needs an authenticated `claude` CLI); the host agent's own model does not power the
+worker. With `--provider codex` the worker (and a real LLM reviewer) is the Codex CLI
+itself — no `claude` needed; `--provider grok` likewise uses only the Grok CLI.
 
 ## Option A — the skill (portable, recommended)
 
@@ -41,9 +43,18 @@ command = "shepherd-dev"
 args = ["mcp"]
 ```
 
-Or: `codex mcp add shepherd-dev -- shepherd-dev mcp`. Verify with `/mcp` in a Codex session.
-The same server works in Cursor and Claude Code (`.cursor/mcp.json`, Claude MCP config) and
-the ChatGPT desktop app — one server, every client.
+Or: `codex mcp add shepherd-dev -- shepherd-dev mcp`. Verify with `codex mcp list` (or
+`/mcp` in a session). The same server works in Cursor and Claude Code (`.cursor/mcp.json`,
+Claude MCP config) and the ChatGPT desktop app — one server, every client.
+
+Verified gotcha: in the Codex CLI, MCP tools are **deferred** behind tool search
+(`tool_search_always_defer_mcp_tools`) — they don't show in the model's initial tool list
+and surface as `mcp__shepherd_dev__shepherd_run` etc. only when the agent searches. If
+Codex claims it has no shepherd tools, tell it to search its deferred tools for "shepherd".
+
+Fully-Codex loop: from inside Codex, call `shepherd_run` with `provider: "codex"` — the
+worker (and the LLM reviewer) is the Codex CLI itself, sandboxed in an isolated clone,
+and the proposal still waits for your explicit settle.
 
 `shepherd_run`/`shepherd_run2` always run with `--no-settle`: nothing is applied through
 MCP. The agent reports the retained proposal and you settle it explicitly with
