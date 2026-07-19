@@ -178,7 +178,8 @@ def format_event(event: dict, live: bool = True) -> str | None:
         files = p.get("files") or []
         if not files:
             return "no conflicts between workers"
-        return f"⚔ conflicts on {', '.join(files[:6])} — handoff rework"
+        tail = "handoff rework" if p.get("handoff") else "settle one, re-run the other"
+        return f"⚔ conflicts on {', '.join(files[:6])} — {tail}"
     if kind == "parallel.repair":
         return f"🔧 repair round {p.get('round')} (combined gate exit {p.get('exit_code')})"
     if kind == "review.verdict":

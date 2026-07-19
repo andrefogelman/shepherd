@@ -208,7 +208,8 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | Comando | O que faz |
 |---|---|
 | `run "feat" --repo P --test-cmd "…"` | Uma feature, um worker supervisionado. Fica retido para `settle`. |
-| `run2 "A" "B" --repo P --test-cmd "…"` | Duas features, dois workers paralelos; handoff em conflito; portão combinado; vencedor staged para `settle-par`. |
+| `run2 "A" "B" --repo P --test-cmd "…"` | Duas features ACOPLADAS, dois workers coordenados; handoff em conflito; portão combinado; vencedor staged para `settle-par`. |
+| `runN "A" "B" ["C"…] --repo P` | 2–5 features INDEPENDENTES em lanes paralelas; portão + review + proposta PRÓPRIOS por lane; settle individual com re-gate. |
 | `run … --best-of K` | K candidatos (2–4) do mesmo estado; ranking determinístico; melhor fica staged. |
 | `settle <run-ref> --repo P [--reject]` | Liquida uma proposta de `run`. |
 | `settle-par <proposal-id> --repo P [--reject]` | Liquida uma proposta staged de `run2` / `--best-of`. |
@@ -318,6 +319,43 @@ narrativa: conflitos/handoff, o portão combinado streamed linha a linha, rodada
 de reparo e a revisão. As fases sequenciais do log principal renderizam ao vivo;
 os workers (concorrentes) só via `trace`. Tudo best-effort: qualquer falha do
 mecanismo desliga só o verbose — o run segue intacto.
+
+## runN — features independentes em paralelo
+
+Para até **5 features INDEPENDENTES** de uma vez (teto fixo), cada uma numa lane
+isolada com o ciclo completo próprio — worker no jail → política → **portão
+próprio** (com o loop de retry orientado) → **review próprio** → **proposta
+staged própria**. Uma lane que falha não derruba as outras. Workers rodam
+concorrentes (`--max-workers`, padrão 3, máx 5 — o teto prático é a quota da
+sua assinatura, não CPU); os portões se revezam num lock (a parte pesada de
+CPU nunca roda em dobro).
+
+```bash
+shepherd-dev runN "feature A" "feature B" "feature C" --repo ~/projetos/meu-app
+# → 3 propostas staged; liquide cada uma:
+shepherd-dev settle-par <proposal-id> --repo ~/projetos/meu-app
+```
+
+**Quando usar runN vs run2.** O paper do Shepherd provou que em tarefas
+ACOPLADAS a coordenação vale muito (CooperBench: 28,8% sem vs 54,7% com
+supervisor) — esse é o território do `run2` (notas de coordenação, handoff,
+portão combinado). O `runN` assume independência real e por isso tem dois
+guarda-corpos de metodologia, ambos automáticos:
+
+1. **Aviso de acoplamento no preflight**: o planejamento prévio prevê os
+   arquivos-alvo de cada feature; se as previsões se intersectam, o runN avisa
+   ANTES de gastar qualquer worker ("essas features parecem acopladas — use
+   run2"). Interseção real entre as propostas prontas também é reportada alto.
+2. **Re-gate no settle**: cada proposta do runN passou no portão contra a base
+   em que foi CONSTRUÍDA — ao liquidar, o `settle-par` roda a suíte de novo
+   contra a worktree REAL do momento (base atual + proposta) antes de gravar
+   qualquer arquivo. Se a base derivou (outro settle no meio) e os testes
+   quebram, a liquidação é recusada e a proposta fica staged: re-rode a feature
+   na base nova. O portão sempre julga o que vai existir de verdade.
+
+Paralelismo ganha **wall-clock**, não tokens: 3 features de ~5min viram ~6–7min
+no total em vez de ~15min sequenciais. Verbose padrão: um log por lane
+(`<id>-w0…`) + log principal com a narrativa; replay com `trace`.
 
 ## Best-of-N
 

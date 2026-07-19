@@ -75,6 +75,30 @@ TOOLS = [
         },
     },
     {
+        "name": "shepherd_runN",
+        "description": (
+            "Develop 2-5 INDEPENDENT features in parallel lanes — each with its own "
+            "gate, reviewer and STAGED proposal (never auto-applied). Use shepherd_run2 "
+            "instead when the features are coupled (shared interfaces): run2 coordinates; "
+            "runN only detects interference. Settle each proposal with shepherd_settle_par "
+            "(settling re-runs the suite against the real worktree first)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "features": {
+                    "type": "array", "items": {"type": "string"},
+                    "minItems": 2, "maxItems": 5,
+                    "description": "2 to 5 independent feature requests",
+                },
+                "repo": {"type": "string"},
+                "test_cmd": {"type": "string"},
+                "max_workers": {"type": "integer", "description": "concurrent lanes (1-5, default 3)"},
+            },
+            "required": ["features"],
+        },
+    },
+    {
         "name": "shepherd_settle",
         "description": "Settle a retained `run` proposal: accept (writes the files into the worktree) or reject (discard). Accepting requires confirm=true — a human decision.",
         "inputSchema": {
@@ -146,6 +170,19 @@ def _argv_for(name: str, a: dict) -> list[str]:
             argv += ["--repo", str(a["repo"])]
         if a.get("test_cmd"):
             argv += ["--test-cmd", str(a["test_cmd"])]
+        return argv
+    if name == "shepherd_runN":
+        features = a.get("features")
+        if not isinstance(features, list) or not 2 <= len(features) <= 5:
+            raise ValueError("shepherd_runN needs 2..5 features")
+        # --no-verbose for the same reason as shepherd_run: compact tool result.
+        argv = ["runN", *[str(f) for f in features], "--no-verbose"]
+        if a.get("repo"):
+            argv += ["--repo", str(a["repo"])]
+        if a.get("test_cmd"):
+            argv += ["--test-cmd", str(a["test_cmd"])]
+        if a.get("max_workers"):
+            argv += ["--max-workers", str(int(a["max_workers"]))]
         return argv
     if name == "shepherd_settle":
         argv = ["settle", str(a["run_ref"])]

@@ -475,6 +475,7 @@ def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, d
         + (f", {stats['planned']} planned" if stats.get('planned') else "")
         + ")"
     )
+    stats = {**stats, "planned_files": list(planned or [])}
     return pack, stats
 
 
@@ -970,6 +971,43 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
         for path in files_dir.rglob("*")
         if path.is_file() and not path.is_symlink()
     }
+
+    # Settle-time re-gate (runN methodology guardrail): the proposal passed its
+    # gate against the base it was BUILT on; the worktree may have drifted since
+    # (typically another settle). Re-run the suite against the REAL current
+    # worktree + this proposal before writing anything — the gate must judge
+    # what will actually exist. On failure the proposal stays staged: re-run
+    # the feature on the new base instead of applying a stale-tested change.
+    regate_cmd = None
+    try:
+        manifest_file = staging / "manifest.json"
+        if manifest_file.is_file():
+            regate_cmd = json.loads(manifest_file.read_text(encoding="utf-8")).get("regate_cmd")
+    except Exception:
+        regate_cmd = None
+    if regate_cmd:
+        from .supervisor import _run_gate
+
+        print(f"re-gate against the current worktree: {regate_cmd}")
+        gate = _run_gate(repo_root, entries, str(regate_cmd), 600)
+        if not gate.passed:
+            detail = gate.infra_error or f"exit {gate.exit_code}"
+            tail = (gate.output_tail or "")[-800:]
+            print(
+                f"error: re-gate FAILED ({detail}) — the worktree changed since this "
+                f"proposal was built. Proposal stays staged; re-run the feature on the "
+                f"current base (or reject with --reject).",
+                file=sys.stderr,
+            )
+            if tail.strip():
+                print(tail, file=sys.stderr)
+            history.record_event(
+                "settle_par",
+                {"repo": str(repo_root), "ref": proposal_id, "action": "regate_failed", "auto": auto},
+            )
+            return 1, []
+        print("re-gate passed")
+
     written = materialize_into(repo_root, entries)
     shutil.rmtree(staging)
     history.record_event(
@@ -980,6 +1018,109 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
     for rel in written:
         print(f"  {rel}")
     return 0, written
+
+
+def cmd_runN(args) -> int:
+    """Up to 5 INDEPENDENT features in parallel lanes (see parallel.develop_many)."""
+    from .parallel import MAX_LANES, develop_many
+
+    repo_root = _resolve_repo(args.repo)
+    if repo_root is None:
+        return 2
+    features = list(args.features)
+    if not 2 <= len(features) <= MAX_LANES:
+        print(f"error: runN takes 2..{MAX_LANES} features (got {len(features)})", file=sys.stderr)
+        return 2
+
+    args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
+    if not ok:
+        return 2
+
+    # Per-feature context packs + planning; the planned target files feed the
+    # PREFLIGHT overlap guardrail — predicted interference across supposedly
+    # independent features is warned about BEFORE any worker spends tokens
+    # (coupled features belong in run2, which coordinates them).
+    packs: list[str | None] = []
+    planned_by_feature: list[set[str]] = []
+    for feature in features:
+        pack, stats = _build_pack(args, repo_root, feature)
+        packs.append(pack)
+        planned_by_feature.append(set((stats or {}).get("planned_files") or []))
+    overlap: dict[str, list[int]] = {}
+    for i, planned in enumerate(planned_by_feature):
+        for path in planned:
+            overlap.setdefault(path, []).append(i)
+    predicted = {p: idxs for p, idxs in overlap.items() if len(idxs) > 1}
+    if predicted:
+        print("⚠ planning predicts OVERLAPPING target files across features:", file=sys.stderr)
+        for path, idxs in sorted(predicted.items()):
+            print(f"  {path}: features {idxs}", file=sys.stderr)
+        print("  these features look COUPLED — run2 coordinates coupled work; "
+              "proceeding, but expect conflicts at settle.", file=sys.stderr)
+
+    error = _refresh_substrate(repo_root, fresh=getattr(args, "fresh_adopt", False))
+    if error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    # Verbose (default): one log per lane (-w0..-wN) + a main narrative log.
+    event_logs = event_log_main = stream_hook = None
+    if getattr(args, "verbose", False):
+        from .events import RunEventLog, WorkerStreamHook, new_run_id, repo_baseline_reader
+        from .progress import VerboseReporter
+
+        base = new_run_id()
+        event_logs = [RunEventLog(run_id=f"{base}-w{i}") for i in range(len(features))]
+        event_log_main = RunEventLog(run_id=base)
+        stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
+        event_log_main.subscribe(VerboseReporter().handle_event)
+        print(f"verbose: events → {event_log_main.root}/{base}*/events.ndjson", file=sys.stderr)
+        print(f"trace: shepherd-dev trace {base}  (lanes: {base}-w0..{base}-w{len(features) - 1})",
+              file=sys.stderr)
+
+    if args.provider == "claude":
+        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+
+    policy = ChangesetPolicy(
+        max_changed_paths=args.max_changed_paths,
+        allowed_prefixes=tuple(args.allowed_prefix),
+    )
+    placement = "jail" if args.provider == "claude" else "advisory"
+    reviewer = None if (args.no_review or args.provider == "static") else review
+
+    report = develop_many(
+        repo_root,
+        [_with_hint(f, gate_hint) for f in features],
+        test_cmd=args.test_cmd,
+        provider=args.provider,
+        placement=placement,
+        policy=policy,
+        max_attempts=args.max_attempts,
+        gate_timeout=args.gate_timeout,
+        review_task=reviewer,
+        max_workers=args.max_workers,
+        context_packs=packs,
+        event_logs=event_logs,
+        event_log_main=event_log_main,
+        stream_hook=stream_hook,
+    )
+    history.record_event(
+        "runN",
+        {
+            "features": features,
+            "repo": str(repo_root),
+            "succeeded": report.succeeded,
+            "staged": [lane.proposal_id for lane in report.lanes if lane.proposal_id],
+            "conflicts": sorted(report.conflicts),
+            "flags": {
+                "max_workers": args.max_workers,
+                "max_attempts": args.max_attempts,
+                "verbose_run": event_log_main.run_id if event_log_main is not None else None,
+            },
+        },
+    )
+    print(report.summary())
+    return 0 if report.succeeded else 1
 
 
 def cmd_settle_par(args) -> int:
@@ -1407,6 +1548,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_run2.add_argument("--max-changed-paths", type=int, default=40)
     p_run2.add_argument("--allowed-prefix", action="append", default=[])
     p_run2.set_defaults(func=cmd_run2)
+
+    p_runN = sub.add_parser(
+        "runN",
+        help="develop 2-5 INDEPENDENT features in parallel lanes (own gate/review/proposal each)",
+    )
+    p_runN.add_argument("features", nargs="+", help="2 to 5 independent feature requests")
+    p_runN.add_argument("--repo", default=None, help="target repo (default: enclosing Shepherd workspace)")
+    p_runN.add_argument("--test-cmd", default=None, help="per-lane gate; default: saved config, else auto-detected")
+    p_runN.add_argument(
+        "--provider", default="claude", choices=["claude", "static"],
+        help="claude (default) or static (offline dry-run)",
+    )
+    p_runN.add_argument(
+        "--max-workers", type=int, default=3,
+        help="concurrent lanes (1-5, default 3); remaining features queue",
+    )
+    p_runN.add_argument("--no-review", action="store_true", help="skip the per-lane reviewer")
+    p_runN.add_argument("--max-attempts", type=int, default=2, help="attempts per lane (default 2)")
+    p_runN.add_argument("--gate-timeout", type=int, default=600)
+    p_runN.add_argument("--worker-budget", type=int, default=900)
+    p_runN.add_argument("--max-changed-paths", type=int, default=40)
+    p_runN.add_argument("--allowed-prefix", action="append", default=[])
+    p_runN.add_argument("--no-context-pack", action="store_true")
+    p_runN.add_argument("--no-plan", action="store_true")
+    p_runN.add_argument("--fresh-adopt", action="store_true")
+    p_runN.add_argument(
+        "-v", "--verbose", dest="verbose", action="store_true", default=True,
+        help="per-lane + main event logs, trace replay (DEFAULT)",
+    )
+    p_runN.add_argument("--no-verbose", dest="verbose", action="store_false")
+    p_runN.set_defaults(func=cmd_runN)
 
     p_spar = sub.add_parser("settle-par", help="accept or reject a staged parallel proposal")
     p_spar.add_argument("proposal_id", help="staged proposal id (see run2 output)")

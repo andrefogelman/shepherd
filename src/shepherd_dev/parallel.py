@@ -399,6 +399,241 @@ def _review_manifest(review: ReviewVerdict | None) -> dict | None:
     }
 
 
+# ── runN: up to 5 INDEPENDENT features in parallel lanes ─────────────────────
+# Unlike run2 (coupled features: coordination notes, conflict handoff, one
+# combined gate, one proposal), runN assumes the features are independent:
+# each lane runs its own full cycle — worker → policy → OWN gate (with the
+# retry-guidance loop) → OWN review — and stages its OWN proposal. Lanes run
+# concurrently (workers are mostly network wait); gates serialize on one lock
+# (the CPU-heavy part — never two heavy jobs at once). Two methodology
+# guardrails keep this faithful to the paper: overlapping changed paths across
+# proposals are reported loudly (interference means run2 was the right lane),
+# and every staged proposal carries regate_cmd so settle-par re-runs the suite
+# against the REAL post-settle worktree before writing (a proposal built on a
+# stale base must re-prove itself — the gate judges what will actually exist).
+
+MAX_LANES = 5
+
+
+@dataclass
+class LaneResult:
+    index: int
+    feature: str
+    succeeded: bool
+    run_ref: str | None = None
+    proposal_id: str | None = None
+    files: list[str] = field(default_factory=list)
+    review_approved: bool | None = None
+    error: str | None = None
+
+
+@dataclass
+class ManyReport:
+    features: list[str]
+    succeeded: bool = False  # at least one lane staged
+    lanes: list[LaneResult] = field(default_factory=list)
+    conflicts: dict[str, list[int]] = field(default_factory=dict)  # path -> lane indexes
+
+    def summary(self) -> str:
+        lines = [f"runN features: {len(self.features)}", f"succeeded: {self.succeeded}"]
+        for lane in self.lanes:
+            state = "staged" if lane.proposal_id else (lane.error or "failed")
+            review = (
+                "" if lane.review_approved is None
+                else f" review={'APPROVED' if lane.review_approved else 'REJECTED'}"
+            )
+            lines.append(
+                f"  [{lane.index}] {lane.feature[:60]!r}: {state}"
+                f" ({len(lane.files)} file(s)){review}"
+            )
+        if self.conflicts:
+            lines.append("")
+            lines.append("⚠ OVERLAPPING proposals (these features were NOT independent —")
+            lines.append("  settle one, then RE-RUN the other; run2 coordinates coupled work):")
+            for path, idxs in sorted(self.conflicts.items()):
+                lines.append(f"  {path}: lanes {idxs}")
+        staged = [lane for lane in self.lanes if lane.proposal_id]
+        if staged:
+            lines.append("")
+            lines.append("settle each proposal independently (re-gated against the real tree):")
+            for lane in staged:
+                lines.append(f"  shepherd-dev settle-par {lane.proposal_id} --repo <repo>")
+        return "\n".join(lines)
+
+
+def _run_lane(
+    clone: Path,
+    feature: str,
+    *,
+    repo_root: Path,
+    test_cmd: str,
+    gate_lock,
+    provider: str,
+    placement: str,
+    policy: ChangesetPolicy,
+    max_attempts: int,
+    gate_timeout: int,
+    review_task=None,
+    context_pack: str | None = None,
+    worker_task=None,
+    worker_extra_args: dict | None = None,
+    event_log=None,
+    stream_hook=None,
+) -> DevReport:
+    """One independent lane: full develop() in the clone, gating against the
+    REAL repo base + this lane's entries (repo_root drives the gate)."""
+    if stream_hook is not None:
+        try:
+            stream_hook.bind(event_log)
+        except Exception:
+            pass
+    with sp.open(clone) as workspace:
+        return develop(
+            workspace,
+            worker_task or implement,
+            repo=workspace.git_repo(),
+            repo_root=repo_root,
+            feature=feature,
+            test_cmd=test_cmd,
+            provider=provider,
+            placement=placement,
+            max_attempts=max_attempts,
+            gate_timeout=gate_timeout,
+            policy=policy,
+            extra_args=worker_extra_args,
+            context_pack=context_pack,
+            review_task=review_task,
+            event_log=event_log,
+            gate_lock=gate_lock,
+        )
+
+
+def develop_many(
+    repo_root: Path,
+    features: list[str],
+    *,
+    test_cmd: str,
+    provider: str = "claude",
+    placement: str = "jail",
+    policy: ChangesetPolicy | None = None,
+    max_attempts: int = 2,
+    gate_timeout: int = 600,
+    review_task=None,
+    max_workers: int = 3,
+    context_packs: list[str | None] | None = None,
+    worker_tasks: list | None = None,
+    worker_extra_args: list[dict | None] | None = None,
+    event_logs=None,
+    event_log_main=None,
+    stream_hook=None,
+) -> ManyReport:
+    """Up to MAX_LANES independent features, each staged as its own proposal."""
+    import threading
+
+    n = len(features)
+    assert 2 <= n <= MAX_LANES, f"runN takes 2..{MAX_LANES} features"
+    policy = policy or ChangesetPolicy()
+    max_workers = max(1, min(max_workers, n, MAX_LANES))
+    packs = list(context_packs) if context_packs else [None] * n
+    tasks_ = list(worker_tasks) if worker_tasks else [None] * n
+    extras = list(worker_extra_args) if worker_extra_args else [None] * n
+    logs = list(event_logs) if event_logs else [None] * n
+    logs += [None] * (n - len(logs))
+    report = ManyReport(features=list(features))
+    gate_lock = threading.Lock()
+    clones: list[Path] = []
+
+    try:
+        _pemit(event_log_main, "phase.start",
+               {"label": f"runN · {n} lanes · {max_workers} concurrent"})
+        clones = list(
+            ThreadPoolExecutor(max_workers=max_workers).map(
+                lambda _i: _clone_workspace(repo_root), range(n)
+            )
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(
+                    _run_lane,
+                    clones[i],
+                    features[i],
+                    repo_root=repo_root,
+                    test_cmd=test_cmd,
+                    gate_lock=gate_lock,
+                    provider=provider,
+                    placement=placement,
+                    policy=policy,
+                    max_attempts=max_attempts,
+                    gate_timeout=gate_timeout,
+                    review_task=review_task,
+                    context_pack=packs[i],
+                    worker_task=tasks_[i],
+                    worker_extra_args=extras[i],
+                    event_log=logs[i],
+                    stream_hook=stream_hook,
+                )
+                for i in range(n)
+            ]
+            results: list[DevReport | Exception] = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # a lane crash must not sink the others
+                    results.append(exc)
+
+        seen_paths: dict[str, list[int]] = {}
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                report.lanes.append(LaneResult(
+                    i, features[i], False, error=f"{type(res).__name__}: {res}"))
+                continue
+            entries = res.entries or {}
+            if not (res.succeeded and entries):
+                verdict = res.attempts[-1].verdict if res.attempts else "did not run"
+                report.lanes.append(LaneResult(
+                    i, features[i], False, run_ref=res.final_run_ref, error=verdict))
+                continue
+            approved = (
+                None if res.review is None or res.review.error else res.review.approved
+            )
+            proposal_id, written = stage_proposal(
+                repo_root,
+                entries,
+                {
+                    "feature": features[i],
+                    "lane": i,
+                    "run_ref": res.final_run_ref,
+                    "review_approved": approved,
+                    # settle-time re-gate guardrail: the suite must re-pass
+                    # against the REAL worktree at settlement time.
+                    "regate_cmd": test_cmd,
+                },
+            )
+            report.lanes.append(LaneResult(
+                i, features[i], True,
+                run_ref=res.final_run_ref, proposal_id=proposal_id,
+                files=written, review_approved=approved,
+            ))
+            for rel in entries:
+                seen_paths.setdefault(rel, []).append(i)
+
+        report.conflicts = {p: idxs for p, idxs in seen_paths.items() if len(idxs) > 1}
+        if report.conflicts:
+            _pemit(event_log_main, "parallel.conflicts",
+                   {"files": sorted(report.conflicts), "handoff": False})
+        report.succeeded = any(lane.proposal_id for lane in report.lanes)
+        _pemit(event_log_main, "run.summary", {
+            "succeeded": report.succeeded,
+            "staged": [lane.proposal_id for lane in report.lanes if lane.proposal_id],
+            "conflicts": sorted(report.conflicts),
+        })
+        return report
+    finally:
+        for clone in clones:
+            if clone != repo_root:  # tests stub the clone with the repo itself
+                shutil.rmtree(clone.parent, ignore_errors=True)
+
+
 # ── Best-of-N (phase C): the incorporable essence of the paper's Tree-RL ────
 # Branch K candidates from the SAME repo state (one ephemeral clone each, with
 # varied emphasis seeds), gate every candidate on the real suite, review the

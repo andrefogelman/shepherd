@@ -214,7 +214,8 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | Command | What it does |
 |---|---|
 | `run "feat" --repo P --test-cmd "…"` | One feature, one supervised worker. Retained for `settle`. |
-| `run2 "A" "B" --repo P --test-cmd "…"` | Two features, two parallel workers; conflict handoff; combined gate; winner staged for `settle-par`. |
+| `run2 "A" "B" --repo P --test-cmd "…"` | Two COUPLED features, two coordinated workers; conflict handoff; combined gate; winner staged for `settle-par`. |
+| `runN "A" "B" ["C"…] --repo P` | 2–5 INDEPENDENT features in parallel lanes; OWN gate + review + proposal per lane; individual settle with a re-gate. |
 | `run … --best-of K` | K candidates (2–4) from the same state; deterministic ranking; the best is staged. |
 | `settle <run-ref> --repo P [--reject]` | Settles a `run` proposal. |
 | `settle-par <proposal-id> --repo P [--reject]` | Settles a staged `run2` / `--best-of` proposal. |
@@ -325,6 +326,42 @@ line, repair rounds, and the review. The main log's sequential phases render
 live; the (concurrent) workers replay via `trace`. Everything is best-effort:
 any failure of the mechanism turns off only the verbose feed — the run proceeds
 intact.
+
+## runN — independent features in parallel
+
+For up to **5 INDEPENDENT features** at once (hard cap), each in an isolated
+lane with its own full cycle — jailed worker → policy → **own gate** (with the
+guided retry loop) → **own review** → **own staged proposal**. One failed lane
+does not sink the others. Workers run concurrently (`--max-workers`, default 3,
+max 5 — the practical ceiling is your subscription quota, not CPU); gates take
+turns on a lock (the CPU-heavy part never runs doubled).
+
+```bash
+shepherd-dev runN "feature A" "feature B" "feature C" --repo ~/projects/my-app
+# → 3 staged proposals; settle each one:
+shepherd-dev settle-par <proposal-id> --repo ~/projects/my-app
+```
+
+**When runN vs run2.** The Shepherd paper proved that on COUPLED tasks
+coordination matters enormously (CooperBench: 28.8% without vs 54.7% with the
+supervisor) — that is `run2` territory (coordination notes, handoff, combined
+gate). `runN` assumes genuine independence, and carries two automatic
+methodology guardrails to stay faithful:
+
+1. **Coupling warning at preflight**: the planning prefetch predicts each
+   feature's target files; if the predictions intersect, runN warns BEFORE any
+   worker spends tokens ("these features look coupled — use run2"). Real
+   intersection across the finished proposals is also reported loudly.
+2. **Re-gate at settle**: each runN proposal passed its gate against the base it
+   was BUILT on — at settlement, `settle-par` re-runs the suite against the
+   REAL current worktree (current base + proposal) before writing any file. If
+   the base drifted (another settle in between) and tests break, the settlement
+   is refused and the proposal stays staged: re-run the feature on the new
+   base. The gate always judges what will actually exist.
+
+Parallelism buys **wall-clock**, not tokens: three ~5-minute features finish in
+~6–7 minutes total instead of ~15 sequential. Verbose by default: one log per
+lane (`<id>-w0…`) plus a main narrative log; replay with `trace`.
 
 ## Best-of-N
 

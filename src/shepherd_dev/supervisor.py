@@ -698,6 +698,7 @@ def develop(
     event_log=None,
     stream_hook=None,
     speculative_review: bool = False,
+    gate_lock=None,
 ) -> DevReport:
     """Supervised development loop. Returns a report; never mutates the workspace.
 
@@ -877,7 +878,15 @@ def develop(
                 from .events import gate_line_observer
 
                 on_line = gate_line_observer(event_log, attempt=number)
-            gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup, on_line=on_line)
+            # gate_lock (runN): parallel lanes overlap their workers but take
+            # turns on the CPU-heavy gate — never two suites at once.
+            if gate_lock is not None:
+                with gate_lock:
+                    gate = _run_gate(
+                        repo_root, entries, test_cmd, gate_timeout, warmup=warmup, on_line=on_line
+                    )
+            else:
+                gate = _run_gate(repo_root, entries, test_cmd, gate_timeout, warmup=warmup, on_line=on_line)
             _emit(
                 "gate.result",
                 {"passed": gate.passed, "exit_code": gate.exit_code, "infra_error": gate.infra_error},

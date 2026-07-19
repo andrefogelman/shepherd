@@ -39,7 +39,10 @@ class JsonRpcDispatch(unittest.TestCase):
     def test_tools_list(self):
         r = handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = {t["name"] for t in r["result"]["tools"]}
-        self.assertEqual(names, {"shepherd_run", "shepherd_run2", "shepherd_settle", "shepherd_settle_par"})
+        self.assertEqual(
+            names,
+            {"shepherd_run", "shepherd_run2", "shepherd_runN", "shepherd_settle", "shepherd_settle_par"},
+        )
         for t in r["result"]["tools"]:
             self.assertIn("inputSchema", t)
             self.assertEqual(t["inputSchema"]["type"], "object")
