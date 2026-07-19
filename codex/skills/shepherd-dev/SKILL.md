@@ -39,7 +39,9 @@ shepherd-dev run "<feature>" --repo <path> --test-cmd "<suite cmd>"
 
 Options: `--mode tests` (only write/update tests), `--no-review`, `--max-attempts N`
 (default 3), `--worker-budget SECONDS` (default 900), `--allowed-prefix src/` (repeatable
-scope confinement), `--best-of K` (2-4 candidates), `--provider static` (offline dry-run).
+scope confinement), `--best-of K` (2-4 candidates), `--provider static` (offline dry-run),
+`--provider codex` (worker via this very Codex CLI — no Claude subprocess; adds a real
+LLM review of the proposal, so `--auto-settle` works), `--provider grok` (Grok CLI worker).
 
 ## Two coordinated parallel workers
 

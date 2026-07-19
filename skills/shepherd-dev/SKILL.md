@@ -34,7 +34,9 @@ shepherd-dev run "<feature>" --repo <path> --test-cmd "<suite cmd>"
 
 Options: `--mode tests` (only write/update tests), `--no-review`, `--max-attempts N`
 (default 3), `--worker-budget SECONDS` (default 900), `--allowed-prefix src/`
-(repeatable scope confinement), `--provider static` (offline dry-run of the machinery).
+(repeatable scope confinement), `--provider static` (offline dry-run of the machinery),
+`--provider grok` / `--provider codex` (worker via the Grok or OpenAI Codex CLI — no
+Claude subprocess; codex adds a real LLM review of the proposal).
 
 ## Two coordinated parallel workers
 
