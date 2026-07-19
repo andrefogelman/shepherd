@@ -1,4 +1,4 @@
-"""Claude defaults must stay bit-compatible; grok is opt-in only."""
+"""Claude defaults must stay bit-compatible; grok and codex are opt-in only."""
 
 from __future__ import annotations
 
@@ -28,11 +28,23 @@ class ProviderDefaults(unittest.TestCase):
     def test_argparse_choices_include_grok_default_claude(self):
         # Mirror the CLI definition without importing shepherd-heavy modules.
         p = argparse.ArgumentParser()
-        p.add_argument("--provider", default="claude", choices=["claude", "static", "grok"])
+        p.add_argument("--provider", default="claude", choices=["claude", "static", "grok", "codex"])
         ns = p.parse_args([])
         self.assertEqual(ns.provider, "claude")
         ns2 = p.parse_args(["--provider", "grok"])
         self.assertEqual(ns2.provider, "grok")
+        ns3 = p.parse_args(["--provider", "codex"])
+        self.assertEqual(ns3.provider, "codex")
+
+    def test_cli_source_offers_codex_choice(self):
+        # Assert against the real CLI source (not the mirror above) without
+        # importing shepherd-heavy modules: the choices list must include codex.
+        cli_src = (
+            Path(__file__).resolve().parent.parent / "src" / "shepherd_dev" / "cli.py"
+        ).read_text()
+        self.assertIn('"codex"', cli_src)
+        self.assertIn("--codex-cmd", cli_src)
+        self.assertIn("--codex-model", cli_src)
 
     def test_mcp_argv_default_no_provider_flag(self):
         from shepherd_dev.mcpserver import _argv_for
@@ -47,6 +59,13 @@ class ProviderDefaults(unittest.TestCase):
         argv = _argv_for("shepherd_run", {"feature": "x", "provider": "grok"})
         self.assertIn("--provider", argv)
         self.assertIn("grok", argv)
+
+    def test_mcp_argv_codex_provider(self):
+        from shepherd_dev.mcpserver import _argv_for
+
+        argv = _argv_for("shepherd_run", {"feature": "x", "provider": "codex"})
+        self.assertIn("--provider", argv)
+        self.assertIn("codex", argv)
 
 
 if __name__ == "__main__":

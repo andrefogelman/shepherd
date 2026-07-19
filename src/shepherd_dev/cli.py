@@ -514,8 +514,8 @@ def _maybe_optimize_after(args, repo_root: Path) -> None:
       controlled because optimize replays real cases (~7 Claude sessions).
     Never raises: a failed optimize must not change the run's exit code.
     """
-    if args.provider in ("static", "grok"):
-        # optimize meta-prompt is Claude-CLI based today; never run it on grok/static paths
+    if args.provider in ("static", "grok", "codex"):
+        # optimize meta-prompt is Claude-CLI based today; never run it on grok/codex/static paths
         return
     forced = getattr(args, "optimize_after", False)
     apply_edit = getattr(args, "optimize_apply", False)
@@ -562,17 +562,17 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.auto_settle and args.provider in ("static",):
         print("error: --auto-settle requires a reviewing provider (not static)", file=sys.stderr)
         return 2
-    if args.auto_settle and args.provider == "grok" and args.no_review:
-        print("error: --auto-settle with grok requires review (drop --no-review)", file=sys.stderr)
+    if args.auto_settle and args.provider in ("grok", "codex") and args.no_review:
+        print(f"error: --auto-settle with {args.provider} requires review (drop --no-review)", file=sys.stderr)
         return 2
 
     if args.best_of > 1 and args.no_review and args.provider not in ("static",):
-        # best-of ranking needs review for non-static; grok best-of not supported yet
-        if args.provider != "grok":
+        # best-of ranking needs review for non-static; grok/codex best-of not supported yet
+        if args.provider not in ("grok", "codex"):
             print("error: --best-of needs the reviewer for ranking (drop --no-review)", file=sys.stderr)
             return 2
-    if args.provider == "grok" and args.best_of > 1:
-        print("error: --best-of is not supported with --provider grok yet (use claude)", file=sys.stderr)
+    if args.provider in ("grok", "codex") and args.best_of > 1:
+        print(f"error: --best-of is not supported with --provider {args.provider} yet (use claude)", file=sys.stderr)
         return 2
 
     args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
@@ -581,9 +581,9 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     feature = _with_hint(args.feature, gate_hint)
     pack, pack_stats = _build_pack(args, repo_root, args.feature)
 
-    # ── Grok path (L1 host / L2 try): no Claude, no workspace.run by default ──
-    if args.provider == "grok":
-        return _cmd_run_grok(args, repo_root, feature, pack, pack_stats)
+    # ── Hosted paths (L1 host / L2 try): no Claude, no workspace.run by default ──
+    if args.provider in ("grok", "codex"):
+        return _cmd_run_hosted(args, repo_root, feature, pack, pack_stats, provider=args.provider)
 
     error = _refresh_substrate(repo_root, fresh=getattr(args, "fresh_adopt", False))
     if error:
@@ -709,38 +709,61 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     return 0 if report.succeeded else 1
 
 
-def _cmd_run_grok(args, repo_root: Path, feature: str, pack: str | None, pack_stats: dict) -> int:
-    """Grok provider path: L1 host (default) / L2 try — no Claude subprocess."""
+def _cmd_run_hosted(
+    args, repo_root: Path, feature: str, pack: str | None, pack_stats: dict, *, provider: str
+) -> int:
+    """Hosted provider path (grok/codex): L1 host (default) / L2 try — no Claude subprocess."""
     from .progress import NullProgress, ProgressReporter
-    from .providers.grok_lane import develop_grok_lane_or_host
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
         allowed_prefixes=tuple(args.allowed_prefix),
     )
-    # Grok does not need _refresh_substrate (settlement is stage/settle-par).
+    # Hosted providers do not need _refresh_substrate (settlement is stage/settle-par).
     prefer_lane = getattr(args, "worker_backend", "auto") in ("lane", "auto")
     if getattr(args, "worker_backend", "auto") == "host":
         prefer_lane = False
 
     reporter = NullProgress() if getattr(args, "quiet", False) else ProgressReporter()
     do_review = not args.no_review
-    report = develop_grok_lane_or_host(
-        repo_root,
-        feature,
-        test_cmd=args.test_cmd,
-        prefer_lane=prefer_lane,
-        max_attempts=args.max_attempts,
-        gate_timeout=args.gate_timeout,
-        worker_budget=args.worker_budget,
-        policy=policy,
-        context_pack=pack,
-        mode=args.mode,
-        do_review=do_review,
-        grok_bin=getattr(args, "grok_cmd", None),
-        model=getattr(args, "grok_model", None),
-        reporter=reporter,
-    )
+    if provider == "codex":
+        from .providers.codex_lane import develop_codex_lane_or_host
+
+        report = develop_codex_lane_or_host(
+            repo_root,
+            feature,
+            test_cmd=args.test_cmd,
+            prefer_lane=prefer_lane,
+            max_attempts=args.max_attempts,
+            gate_timeout=args.gate_timeout,
+            worker_budget=args.worker_budget,
+            policy=policy,
+            context_pack=pack,
+            mode=args.mode,
+            do_review=do_review,
+            codex_bin=getattr(args, "codex_cmd", None),
+            model=getattr(args, "codex_model", None),
+            reporter=reporter,
+        )
+    else:
+        from .providers.grok_lane import develop_grok_lane_or_host
+
+        report = develop_grok_lane_or_host(
+            repo_root,
+            feature,
+            test_cmd=args.test_cmd,
+            prefer_lane=prefer_lane,
+            max_attempts=args.max_attempts,
+            gate_timeout=args.gate_timeout,
+            worker_budget=args.worker_budget,
+            policy=policy,
+            context_pack=pack,
+            mode=args.mode,
+            do_review=do_review,
+            grok_bin=getattr(args, "grok_cmd", None),
+            model=getattr(args, "grok_model", None),
+            reporter=reporter,
+        )
     reporter.close(ok=report.succeeded)
 
     dev = report.as_dev_report()
@@ -752,7 +775,7 @@ def _cmd_run_grok(args, repo_root: Path, feature: str, pack: str | None, pack_st
         {
             **history.run_payload(
                 dev, repo_root,
-                mode=args.mode, test_cmd=args.test_cmd, provider="grok",
+                mode=args.mode, test_cmd=args.test_cmd, provider=provider,
                 flags={
                     "max_attempts": args.max_attempts,
                     "allowed_prefix": args.allowed_prefix,
@@ -779,7 +802,7 @@ def _cmd_run_grok(args, repo_root: Path, feature: str, pack: str | None, pack_st
             return 1
         branch, err = auto_commit_branch(
             repo_root, written, _slugify(args.feature),
-            f"feat: {args.feature}\n\nshepherd-dev auto-settle grok "
+            f"feat: {args.feature}\n\nshepherd-dev auto-settle {provider} "
             f"(proposal {report.proposal_id}); gate passed, review approved.",
         )
         if err:
@@ -1191,14 +1214,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--provider",
         default="claude",
-        choices=["claude", "static", "grok"],
-        help="worker backend: claude (default, jail), static (offline dry-run), grok (no Claude — L1 host / L2 try)",
+        choices=["claude", "static", "grok", "codex"],
+        help="worker backend: claude (default, jail), static (offline dry-run), "
+             "grok / codex (no Claude — L1 host / L2 try; codex adds a real LLM review)",
     )
     p_run.add_argument(
         "--worker-backend",
         default="auto",
         choices=["auto", "host", "lane"],
-        help="grok only: host=isolated clone+CLI (L1); lane=try workspace rebind (L2) then host; auto=lane-ready host",
+        help="grok/codex only: host=isolated clone+CLI (L1); lane=try workspace rebind (L2) then host; auto=lane-ready host",
     )
     p_run.add_argument(
         "--grok-cmd",
@@ -1209,6 +1233,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--grok-model",
         default=None,
         help="grok only: model id for the Grok CLI (env SHEPHERD_DEV_GROK_MODEL)",
+    )
+    p_run.add_argument(
+        "--codex-cmd",
+        default=None,
+        help="codex only: path to the Codex CLI (default: PATH; env SHEPHERD_DEV_CODEX_CMD)",
+    )
+    p_run.add_argument(
+        "--codex-model",
+        default=None,
+        help="codex only: model id for `codex exec -m` (env SHEPHERD_DEV_CODEX_MODEL)",
     )
     p_run.add_argument(
         "--mode",
