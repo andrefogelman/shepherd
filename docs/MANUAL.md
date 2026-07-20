@@ -145,6 +145,11 @@ uv tool install git+https://github.com/andrefogelman/shepherd.git
 Requisitos: Python 3.11+, git, `claude` CLI autenticado, macOS (Seatbelt) ou
 Linux com Landlock (kernel ≥ 5.13). Windows: WSL.
 
+**Aviso de atualização.** Quando uma versão nova é publicada, o fim do próximo
+comando mostra `update available: shepherd-dev X.Y.Z … upgrade with: …` (em
+stderr). Zero custo no comando: o aviso lê um cache local; o cache se renova em
+background no máximo 1×/dia. Desligue com `SHEPHERD_DEV_NO_UPDATE_CHECK=1`.
+
 ## Preparar um repo (uma vez)
 
 ```bash

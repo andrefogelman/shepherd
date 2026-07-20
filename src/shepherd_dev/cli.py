@@ -1620,7 +1620,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    return args.func(args)
+    # Update notice: cache-only at the end (zero added latency); a stale cache
+    # refreshes in a background thread for the NEXT invocation. Skipped for the
+    # MCP server (a long-lived subprocess whose stderr is the client's log).
+    check_updates = args.command != "mcp"
+    if check_updates:
+        try:
+            from . import updatecheck
+
+            updatecheck.maybe_refresh_in_background()
+        except Exception:
+            check_updates = False
+    code = args.func(args)
+    if check_updates:
+        try:
+            from . import __version__, updatecheck
+
+            notice = updatecheck.update_notice(__version__)
+            if notice:
+                print(f"\n{notice}", file=sys.stderr)
+        except Exception:
+            pass
+    return code
 
 
 def entry() -> None:
