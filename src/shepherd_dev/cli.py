@@ -479,6 +479,21 @@ def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, d
     return pack, stats
 
 
+def _notify_done(feature: str, succeeded: bool, ref: str | None) -> None:
+    """Desktop notification at the end of a supervised run — the human's
+    settlement decision usually awaits in a terminal they left. Best-effort."""
+    try:
+        from .notify import notify
+
+        head = "proposal ready to settle" if (succeeded and ref) else (
+            "run succeeded" if succeeded else "run failed"
+        )
+        detail = f"{feature[:80]}" + (f" — {ref}" if ref else "")
+        notify(f"shepherd-dev: {head}", detail)
+    except Exception:
+        pass
+
+
 def _wants_interactive(args) -> bool:
     """Prompt inline only when asked (or by default on a TTY) and auto-settle
     is off. Never prompt when stdin is not a terminal (CI, subprocess replay)."""
@@ -678,6 +693,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         ),
     )
     print(report.summary())
+    _notify_done(args.feature, report.succeeded, report.final_run_ref)
 
     if args.auto_settle and report.final_run_ref:
         reason = _auto_settle_conditions(report)
@@ -919,6 +935,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         ),
     )
     print(report.summary())
+    _notify_done(f"{args.feature_a} + {args.feature_b}", report.succeeded, report.proposal_id)
 
     if args.auto_settle and report.proposal_id:
         reason = _auto_settle_conditions(report)
@@ -1120,6 +1137,10 @@ def cmd_runN(args) -> int:
         },
     )
     print(report.summary())
+    staged_n = sum(1 for lane in report.lanes if lane.proposal_id)
+    _notify_done(
+        f"runN: {staged_n}/{len(features)} proposal(s) staged", report.succeeded, None
+    )
     return 0 if report.succeeded else 1
 
 
@@ -1316,6 +1337,27 @@ def cmd_mcp(args) -> int:
     from .mcpserver import serve
 
     return serve()
+
+
+def cmd_status(args) -> int:
+    """Ground-truth run status (from the event logs) — human or JSON."""
+    from .status import render_status, runs_status
+
+    rows = runs_status(limit=getattr(args, "limit", 10))
+    if getattr(args, "json", False):
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    for line in render_status(rows):
+        print(line)
+    # Pending staged proposals of the enclosing repo, when there is one.
+    repo_root = config.find_repo_root() if args.repo in (None, ".") else Path(args.repo).expanduser()
+    if repo_root and (repo_root / PROPOSALS_DIR).is_dir():
+        pending = sorted(p.name for p in (repo_root / PROPOSALS_DIR).iterdir() if p.is_dir())
+        if pending:
+            print(f"\nstaged proposals in {repo_root}:")
+            for pid in pending:
+                print(f"  shepherd-dev settle-par {pid} --repo {repo_root}")
+    return 0
 
 
 def cmd_trace(args) -> int:
@@ -1608,6 +1650,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="run as an MCP stdio server (Codex / Cursor / Claude Code / ChatGPT desktop)")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_status = sub.add_parser("status", help="ground-truth status of recent runs (running/succeeded/failed/stale)")
+    p_status.add_argument("--repo", default=None, help="repo whose staged proposals to list (default: enclosing)")
+    p_status.add_argument("--limit", type=int, default=10, help="how many recent runs (default 10)")
+    p_status.add_argument("--json", action="store_true", help="machine-readable output for external UIs")
+    p_status.set_defaults(func=cmd_status)
 
     p_trace = sub.add_parser("trace", help="replay a run's event timeline (verbose runs record one)")
     p_trace.add_argument("run_id", nargs="?", default="last", help="run id (default: the most recent)")

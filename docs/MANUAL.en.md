@@ -146,6 +146,12 @@ uv tool install git+https://github.com/andrefogelman/shepherd.git
 Requirements: Python 3.11+, git, an authenticated `claude` CLI, macOS
 (Seatbelt) or Linux with Landlock (kernel ≥ 5.13). Windows: WSL.
 
+**Desktop notification.** When a `run`/`run2`/`runN` finishes, a native OS
+notification tells you the proposal is ready to settle (or that the run
+failed) — runs take minutes and the decision waits in a terminal you already
+left. macOS and Linux (`notify-send`); best-effort, never affects the run.
+Disable with `SHEPHERD_DEV_NO_NOTIFY=1`.
+
 **Update notice.** When a new version is published, the end of your next
 command shows `update available: shepherd-dev X.Y.Z … upgrade with: …` (on
 stderr). Zero cost on the command: the notice reads a local cache; the cache
@@ -228,6 +234,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `init --repo P` | Initializes the repo (once). |
 | `optimize [--apply]` | Improves the worker prompts from run history, validated by replay. |
 | `trace [run-id\|last] [--full] [--json]` | Replays the step-by-step timeline of a run recorded with `-v`. |
+| `status [--json] [--limit N]` | Ground-truth state of recent runs (running/succeeded/failed/stale, live phase and attempt) + pending staged proposals. `--json` for external UIs. |
 
 ## Useful flags
 

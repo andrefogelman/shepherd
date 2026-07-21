@@ -145,6 +145,12 @@ uv tool install git+https://github.com/andrefogelman/shepherd.git
 Requisitos: Python 3.11+, git, `claude` CLI autenticado, macOS (Seatbelt) ou
 Linux com Landlock (kernel ≥ 5.13). Windows: WSL.
 
+**Notificação de mesa.** Ao fim de um `run`/`run2`/`runN`, uma notificação
+nativa do sistema avisa que a proposta está pronta para settle (ou que o run
+falhou) — runs demoram minutos e a decisão fica esperando num terminal que você
+já deixou. macOS e Linux (`notify-send`); best-effort, nunca afeta o run.
+Desligue com `SHEPHERD_DEV_NO_NOTIFY=1`.
+
 **Aviso de atualização.** Quando uma versão nova é publicada, o fim do próximo
 comando mostra `update available: shepherd-dev X.Y.Z … upgrade with: …` (em
 stderr). Zero custo no comando: o aviso lê um cache local; o cache se renova em
@@ -221,6 +227,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `init --repo P` | Inicializa o repo (uma vez). |
 | `optimize [--apply]` | Melhora os prompts a partir do histórico, validando por replay. |
 | `trace [run-id\|last] [--full] [--json]` | Reproduz a timeline passo a passo de um run gravado com `-v`. |
+| `status [--json] [--limit N]` | Estado real dos runs recentes (rodando/sucesso/falha/stale, fase e tentativa ao vivo) + propostas staged pendentes. `--json` para UIs externas. |
 
 ## Flags úteis
 

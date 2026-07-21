@@ -169,9 +169,29 @@ def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> Non
                 shutil.copy2(entry, target, follow_symlinks=False)
 
 
+#: Dependency dirs the gate's staged copy NEEDS but must not duplicate: they
+#: are excluded from every tree copy (state hygiene + size) and symlinked back
+#: from the real repo instead — `npm test` without node_modules, or a
+#: `.venv/bin/pytest` gate, would otherwise fail for the wrong reason.
+DEP_DIRS = (".venv", "node_modules")
+
+
+def _link_dep_dirs(repo_root: Path, dest: Path) -> None:
+    """Symlink the repo's dependency dirs into a staged copy. Best-effort."""
+    for name in DEP_DIRS:
+        src = Path(repo_root) / name
+        target = dest / name
+        try:
+            if src.is_dir() and not target.exists() and not target.is_symlink():
+                target.symlink_to(src.resolve())
+        except Exception:
+            pass  # a missing dep link degrades to the pre-fix behavior
+
+
 def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None:
     """Copy the repo and overlay the proposal's content entries on top."""
     fast_copytree(Path(repo_root), dest, ignored=set(IGNORED_DIRS))
+    _link_dep_dirs(repo_root, dest)
     materialize_into(dest, entries)
 
 
@@ -214,6 +234,7 @@ class LocalGateStage:
             self._n += 1
             work = self._root / f"work-{self._n}"
             fast_copytree(self.base, work)
+            _link_dep_dirs(self.repo_root, work)
             materialize_into(work, entries)
             return work
         except Exception:
