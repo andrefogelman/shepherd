@@ -1339,6 +1339,14 @@ def cmd_mcp(args) -> int:
     return serve()
 
 
+def cmd_update(args) -> int:
+    """Explicit self-update via uv (shepherd never updates silently)."""
+    from . import __version__
+    from .updatecheck import run_update
+
+    return run_update(__version__, force=getattr(args, "force", False))
+
+
 def cmd_status(args) -> int:
     """Ground-truth run status (from the event logs) — human or JSON."""
     from .status import render_status, runs_status
@@ -1650,6 +1658,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="run as an MCP stdio server (Codex / Cursor / Claude Code / ChatGPT desktop)")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_update = sub.add_parser("update", help="update shepherd-dev to the published version (explicit, via uv)")
+    p_update.add_argument("--force", action="store_true", help="reinstall even when already at the published version")
+    p_update.set_defaults(func=cmd_update)
 
     p_status = sub.add_parser("status", help="ground-truth status of recent runs (running/succeeded/failed/stale)")
     p_status.add_argument("--repo", default=None, help="repo whose staged proposals to list (default: enclosing)")

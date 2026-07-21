@@ -152,9 +152,12 @@ já deixou. macOS e Linux (`notify-send`); best-effort, nunca afeta o run.
 Desligue com `SHEPHERD_DEV_NO_NOTIFY=1`.
 
 **Aviso de atualização.** Quando uma versão nova é publicada, o fim do próximo
-comando mostra `update available: shepherd-dev X.Y.Z … upgrade with: …` (em
-stderr). Zero custo no comando: o aviso lê um cache local; o cache se renova em
-background no máximo 1×/dia. Desligue com `SHEPHERD_DEV_NO_UPDATE_CHECK=1`.
+comando mostra `update available: shepherd-dev X.Y.Z … upgrade with:
+shepherd-dev update` (em stderr). Zero custo no comando: o aviso lê um cache
+local; o cache se renova em background no máximo 1×/dia. Aí é só rodar
+`shepherd-dev update` — checagem síncrona + reinstalação via uv, sempre por
+decisão sua (a ferramenta nunca se atualiza sozinha). Desligue o aviso com
+`SHEPHERD_DEV_NO_UPDATE_CHECK=1`.
 
 ## Preparar um repo (uma vez)
 
@@ -228,6 +231,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `optimize [--apply]` | Melhora os prompts a partir do histórico, validando por replay. |
 | `trace [run-id\|last] [--full] [--json]` | Reproduz a timeline passo a passo de um run gravado com `-v`. |
 | `status [--json] [--limit N]` | Estado real dos runs recentes (rodando/sucesso/falha/stale, fase e tentativa ao vivo) + propostas staged pendentes. `--json` para UIs externas. |
+| `update [--force]` | Atualiza para a versão publicada (explícito, via uv — nunca atualiza sozinho). |
 
 ## Flags úteis
 

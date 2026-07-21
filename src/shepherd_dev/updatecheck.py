@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -29,7 +31,8 @@ CACHE_FILE = Path.home() / ".shepherd-dev" / "update-check.json"
 TTL_SECONDS = 24 * 3600
 FETCH_TIMEOUT = 4
 
-UPDATE_CMD = "uv tool install --force git+https://github.com/andrefogelman/shepherd.git"
+REPO_URL = "https://github.com/andrefogelman/shepherd.git"
+UPDATE_CMD = "shepherd-dev update"
 
 _VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 
@@ -96,6 +99,51 @@ def maybe_refresh_in_background(fetch=_http_fetch) -> threading.Thread | None:
     )
     thread.start()
     return thread
+
+
+def fetch_latest(fetch=_http_fetch) -> str | None:
+    """The published version, fetched NOW (synchronous — for the explicit
+    `update` command, where waiting on the network is the point). None on any
+    failure."""
+    try:
+        match = _VERSION_RE.search(fetch(REMOTE_PYPROJECT, FETCH_TIMEOUT))
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def run_update(current: str, *, force: bool = False, fetch=_http_fetch) -> int:
+    """Explicit upgrade: check the published version, then reinstall via uv.
+
+    Human-invoked and synchronous by design — shepherd never updates itself
+    silently. Returns an exit code."""
+    latest = fetch_latest(fetch=fetch)
+    if latest is None:
+        print("error: could not reach the repository to check the published version "
+              "(offline?). Try again, or run manually:\n"
+              f"  uv tool install --force git+{REPO_URL}")
+        return 1
+    try:  # the freshly fetched truth also serves the passive notice
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_FILE.write_text(json.dumps({"latest": latest, "ts": time.time()}), encoding="utf-8")
+    except Exception:
+        pass
+    if not force and not _is_newer(latest, than=current):
+        print(f"already up to date (installed {current}, published {latest}); "
+              "use --force to reinstall anyway")
+        return 0
+    uv = shutil.which("uv")
+    if not uv:
+        print("error: uv not found on PATH — install manually:\n"
+              f"  uv tool install --force git+{REPO_URL}")
+        return 1
+    print(f"updating shepherd-dev {current} → {latest} …")
+    proc = subprocess.run([uv, "tool", "install", "--force", f"git+{REPO_URL}"])
+    if proc.returncode != 0:
+        print(f"error: uv install failed (exit {proc.returncode})")
+        return 1
+    print(f"updated to {latest}. New version applies to the NEXT shepherd-dev invocation.")
+    return 0
 
 
 def update_notice(current: str) -> str | None:

@@ -153,9 +153,11 @@ left. macOS and Linux (`notify-send`); best-effort, never affects the run.
 Disable with `SHEPHERD_DEV_NO_NOTIFY=1`.
 
 **Update notice.** When a new version is published, the end of your next
-command shows `update available: shepherd-dev X.Y.Z … upgrade with: …` (on
-stderr). Zero cost on the command: the notice reads a local cache; the cache
-refreshes in the background at most once a day. Disable with
+command shows `update available: shepherd-dev X.Y.Z … upgrade with:
+shepherd-dev update` (on stderr). Zero cost on the command: the notice reads a
+local cache; the cache refreshes in the background at most once a day. Then run
+`shepherd-dev update` — a synchronous check + reinstall via uv, always your
+decision (the tool never self-updates silently). Disable the notice with
 `SHEPHERD_DEV_NO_UPDATE_CHECK=1`.
 
 ## Prepare a repo (once)
@@ -235,6 +237,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `optimize [--apply]` | Improves the worker prompts from run history, validated by replay. |
 | `trace [run-id\|last] [--full] [--json]` | Replays the step-by-step timeline of a run recorded with `-v`. |
 | `status [--json] [--limit N]` | Ground-truth state of recent runs (running/succeeded/failed/stale, live phase and attempt) + pending staged proposals. `--json` for external UIs. |
+| `update [--force]` | Updates to the published version (explicit, via uv — never self-updates silently). |
 
 ## Useful flags
 
