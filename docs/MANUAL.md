@@ -254,6 +254,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--quiet` | run | Silencia todo o feedback vivo (progresso e verbose). |
 | `--fresh-adopt` | run | Força re-adoção completa da worktree (ignora o cache de worktree-inalterada). |
 | `--speculative-review` | run | Roda o revisor em paralelo com o portão (esconde a latência do review; gasta tokens de review mesmo se o portão falhar). |
+| `--json` | run | Relatório final em JSON como ÚLTIMA linha do stdout (sem prompt interativo) — para orquestradores compondo o shepherd como um passo. |
 | `--no-verbose` | run · run2 | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
 
@@ -261,6 +262,11 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 
 Três mecanismos ligam sozinhos (sem setup) e tornam cada run mais rápido e mais
 seguro. Todos degradam de forma limpa: se algo falha, o run segue normal.
+
+**Instruções do workspace no pack.** Se o repo tem `AGENTS.md`, `CLAUDE.md` ou
+`.github/copilot-instructions.md` — as regras da casa escritas para agentes —
+elas entram no context pack como seção estável, com cap de tamanho. O worker
+honra as convenções na PRIMEIRA tentativa em vez de aprender pelo revisor.
 
 **Planejamento prévio (prefetch).** Antes de o worker começar, um passo rápido
 com um modelo barato decompõe a feature num plano e nos arquivos-alvo exatos, que

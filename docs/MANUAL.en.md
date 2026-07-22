@@ -260,6 +260,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--quiet` | run | Silences ALL live feedback (progress and verbose). |
 | `--fresh-adopt` | run | Forces a full worktree re-adoption (skips the unchanged-worktree cache). |
 | `--speculative-review` | run | Runs the reviewer in parallel with the gate (hides review latency; spends review tokens even when the gate fails). |
+| `--json` | run | Machine-readable final report as the LAST stdout line (no interactive prompt) — for orchestrators composing shepherd as a step. |
 | `--no-verbose` | run · run2 | Turns off the step-by-step feed (phase progress only, no event log). |
 | `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
 
@@ -267,6 +268,12 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 
 Three mechanisms turn on by themselves (no setup) and make each run faster and
 safer. All degrade cleanly: if something fails, the run proceeds as usual.
+
+**Workspace instructions in the pack.** If the repo has `AGENTS.md`,
+`CLAUDE.md` or `.github/copilot-instructions.md` — the house rules written for
+agents — they enter the context pack as a stable, size-capped section. The
+worker honors the conventions on the FIRST attempt instead of learning them
+from the reviewer.
 
 **Planning prefetch.** Before the worker starts, a quick pass with a cheap model
 decomposes the feature into a plan and the exact target files, which feed the

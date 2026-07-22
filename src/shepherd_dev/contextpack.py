@@ -291,6 +291,35 @@ def repo_file_view(repo_root: Path, allowed_prefixes: tuple[str, ...] = ()) -> t
     return tree_text, repo_rels
 
 
+#: Agent-facing convention files, in precedence order — the repo's own written
+#: rules for coding agents. Injected into the pack so the worker honors house
+#: conventions on the FIRST attempt instead of learning them from review.
+INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md")
+INSTRUCTIONS_BUDGET = 4_000
+
+
+def workspace_instructions(repo_root: Path, budget: int = INSTRUCTIONS_BUDGET) -> str:
+    """The repo's agent-instruction files, concatenated and capped. Empty when
+    none exist. Best-effort: unreadable entries are skipped."""
+    parts: list[str] = []
+    remaining = budget
+    for rel in INSTRUCTION_FILES:
+        path = repo_root / rel
+        try:
+            if not path.is_file() or remaining <= 0:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        if not text:
+            continue
+        if len(text) > remaining:
+            text = text[: max(0, remaining - 20)] + "\n[... truncated ...]"
+        parts.append(f"--- {rel} ---\n{text}")
+        remaining -= len(text)
+    return "\n\n".join(parts)
+
+
 def build_pack(
     repo_root: Path,
     feature: str,
@@ -331,6 +360,12 @@ def build_pack(
         sections.append(f"== FEATURE PLAN (pre-computed; follow it) ==\n{plan_text}\n")
     if memory_text:
         sections.append(f"== REPO MEMORY (learned from previous runs) ==\n{memory_text}\n")
+    instructions = workspace_instructions(repo_root)
+    if instructions:
+        sections.append(
+            "== WORKSPACE INSTRUCTIONS (the repo's own rules for agents; FOLLOW them) ==\n"
+            f"{instructions}\n"
+        )
     sections.append(f"== REPO FILE TREE ==\n{_tree(repo_root, files)}\n")
 
     repo_rels = {_norm(str(f.relative_to(repo_root))) for f in files}
@@ -456,5 +491,6 @@ def build_pack(
         "neighbors": neighbors_n,
         "test_contracts": contracts_n,
         "planned": planned_n,
+        "instructions": bool(instructions),
     }
     return pack, stats

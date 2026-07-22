@@ -479,6 +479,36 @@ def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, d
     return pack, stats
 
 
+def _report_envelope(
+    report,
+    *,
+    repo_root: Path,
+    mode: str,
+    test_cmd: str | None,
+    provider: str,
+    verbose_run: str | None = None,
+) -> dict:
+    """Machine-readable final report for `run --json` — the composability
+    surface for orchestrators (route on this instead of parsing prose). The
+    LAST line of stdout is this envelope."""
+    payload = history.run_payload(
+        report, repo_root, mode=mode, test_cmd=test_cmd, provider=provider, flags={}
+    )
+    payload.pop("flags", None)
+    payload["files"] = sorted(report.entries or {})
+    payload["verbose_run"] = verbose_run
+    ref = report.final_run_ref
+    payload["settle"] = (
+        {
+            "accept": f"shepherd-dev settle {ref} --repo {repo_root}",
+            "reject": f"shepherd-dev settle {ref} --repo {repo_root} --reject",
+        }
+        if ref
+        else None
+    )
+    return payload
+
+
 def _notify_done(feature: str, succeeded: bool, ref: str | None) -> None:
     """Desktop notification at the end of a supervised run — the human's
     settlement decision usually awaits in a terminal they left. Best-effort."""
@@ -692,6 +722,15 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             },
         ),
     )
+    if getattr(args, "json", False):
+        # Machine contract: the LAST stdout line is the JSON envelope. Implies
+        # no interactive settle (an orchestrator decides via settle explicitly).
+        print(json.dumps(_report_envelope(
+            report, repo_root=repo_root, mode=args.mode, test_cmd=args.test_cmd,
+            provider=args.provider,
+            verbose_run=event_log.run_id if event_log is not None else None,
+        ), ensure_ascii=False))
+        return 0 if report.succeeded else 1
     print(report.summary())
     _notify_done(args.feature, report.succeeded, report.final_run_ref)
 
@@ -1495,6 +1534,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--fresh-adopt",
         action="store_true",
         help="force a full re-adoption of the worktree (skip the unchanged-worktree cache)",
+    )
+    p_run.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable final report as the LAST stdout line (implies no "
+             "interactive settle) — for orchestrators composing shepherd as a step",
     )
     p_run.add_argument(
         "--speculative-review",
