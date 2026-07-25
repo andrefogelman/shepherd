@@ -1,0 +1,31 @@
+# A tag that carries no release is a version nobody can see: the bump lands on
+# main, the installer keeps working, and the Releases page stays empty. So the
+# tag push is what publishes. Nothing here is checked out — `gh` talks to the
+# API, and the notes are generated server-side from the history behind the tag.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG is already published — leaving it alone"
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release view "$TAG" --json tagName,isDraft,publishedAt
