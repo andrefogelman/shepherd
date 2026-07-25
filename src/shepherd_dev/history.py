@@ -72,6 +72,7 @@ def run_payload(report, repo_root: Path, *, mode: str, test_cmd: str | None, pro
         "repo": str(repo_root),
         "sha": _git_sha(repo_root),
         "succeeded": report.succeeded,
+        "outcome": report.outcome,
         "final_run_ref": report.final_run_ref,
         "mode": mode,
         "test_cmd": test_cmd,

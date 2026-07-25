@@ -334,6 +334,12 @@ def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: 
 
 def _auto_settle_conditions(report) -> str | None:
     """None = all hard conditions met; otherwise the human-readable reason."""
+    # A blocked cycle can hold a passing gate and an approving verdict and still
+    # be unfinished — settling it would be the machine calling its own stopping
+    # point "done". getattr: ParallelReport shares this gate and has no field.
+    blocked = getattr(report, "blocked_reason", None)
+    if blocked:
+        return f"run is blocked: {blocked}"
     if not report.succeeded:
         return "run did not succeed"
     if report.review is None:
@@ -495,6 +501,7 @@ def _report_envelope(
         report, repo_root, mode=mode, test_cmd=test_cmd, provider=provider, flags={}
     )
     payload.pop("flags", None)
+    payload["blocked_reason"] = report.blocked_reason
     payload["files"] = sorted(report.entries or {})
     payload["verbose_run"] = verbose_run
     ref = report.final_run_ref

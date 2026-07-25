@@ -70,9 +70,36 @@ class DevReport:
     # content entries of the passing proposal (set on success) — consumed by
     # the parallel coordinator; per-file bytes, small by policy cap
     entries: dict[str, bytes] | None = None
+    # set when the cycle stopped for a reason no further iteration can fix
+    # (no progress, nothing actionable left) — outranks every other state
+    blocked_reason: str | None = None
+
+    @property
+    def outcome(self) -> str:
+        """What actually happened, in one word an orchestrator can route on.
+
+        `succeeded` only ever meant "the gate passed". Saying `passed_approved`
+        for a --no-review run, or letting `succeeded: true` stand alone next to
+        a REJECTED verdict, is the false claim this whole surface exists to
+        kill — so absence of a verdict reads as `passed_unreviewed`, never as
+        approval. Mirrors `_auto_settle_conditions`; the two must not drift.
+        """
+        if self.blocked_reason:
+            return "blocked"
+        if not self.succeeded:
+            return "failed"
+        if self.review is None or self.review.error:
+            return "passed_unreviewed"
+        return "passed_approved" if self.review.approved else "passed_rejected"
 
     def summary(self) -> str:
-        lines = [f"feature: {self.feature}", f"succeeded: {self.succeeded}"]
+        lines = [
+            f"feature: {self.feature}",
+            f"succeeded: {self.succeeded}",
+            f"outcome: {self.outcome}",
+        ]
+        if self.blocked_reason:
+            lines.append(f"blocked: {self.blocked_reason}")
         for a in self.attempts:
             lines.append(
                 f"  attempt {a.number}: run={a.run_ref} verdict={a.verdict} "
