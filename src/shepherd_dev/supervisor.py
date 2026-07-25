@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -222,6 +224,37 @@ def _link_dep_dirs(repo_root: Path, dest: Path) -> None:
             pass  # a missing dep link degrades to the pre-fix behavior
 
 
+def _remove_tree(path: Path) -> None:
+    """Delete a staged tree from OUTSIDE this process.
+
+    A staged copy holds symlinks back to the repo's dependency dirs
+    (_link_dep_dirs). shutil.rmtree deletes entries by bare name against a
+    directory fd, and the substrate's os.unlink patch resolves that candidate
+    with Path.resolve() — which follows the symlink onto the real .venv inside
+    the OPEN workspace and refuses it as an unscoped mutation. That refusal is
+    not an OSError, so ignore_errors=True does not swallow it: teardown then
+    takes the whole run down with it, mid-gate.
+
+    A child interpreter carries none of the patches, so the same rmtree there
+    is just a delete. Verified: with the workspace open, an in-process rmtree
+    over a stage holding a link into the workspace raises; over a stage holding
+    only real files, or a link pointing outside, it does not.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-c",
+             "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)",
+             str(path)],
+            check=False, timeout=120,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # a leaked temp dir is the OS's problem; killing the run is not
+
+
 def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None:
     """Copy the repo and overlay the proposal's content entries on top."""
     fast_copytree(Path(repo_root), dest, ignored=set(IGNORED_DIRS))
@@ -275,7 +308,7 @@ class LocalGateStage:
             return None
 
     def close(self) -> None:
-        shutil.rmtree(self._root, ignore_errors=True)
+        _remove_tree(self._root)
 
     # duck-typed alias so develop()'s failure paths can tear it down like the
     # remote GateWarmup they already handle
@@ -731,13 +764,18 @@ def _run_gate(
         finally:
             stage.close()
 
-    with tempfile.TemporaryDirectory(prefix="shepherd-gate-") as tmp:
-        staged = Path(tmp) / "staged"
+    # Not TemporaryDirectory: its cleanup is the same in-process rmtree that
+    # _remove_tree exists to avoid, and this tree carries the same dep links.
+    tmp = Path(tempfile.mkdtemp(prefix="shepherd-gate-"))
+    try:
+        staged = tmp / "staged"
         try:
             _materialize(repo_root, entries, staged)
         except Exception as exc:
             return GateResult(False, None, "", infra_error=f"materialize failed: {exc}")
         return _judge(staged)
+    finally:
+        _remove_tree(tmp)
 
 
 def develop(
