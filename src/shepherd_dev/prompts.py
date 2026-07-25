@@ -15,7 +15,9 @@ import json
 import os
 from pathlib import Path
 
-PROMPT_KEYS = ("implement", "write_tests", "review", "guidance_policy", "guidance_gate")
+PROMPT_KEYS = (
+    "implement", "write_tests", "review", "guidance_policy", "guidance_gate", "guidance_review",
+)
 
 OVERRIDES_FILE = Path(
     os.environ.get("SHEPHERD_DEV_PROMPTS_OVERRIDES")
@@ -83,6 +85,15 @@ DEFAULT_PROMPTS: dict[str, str] = {
         "PREVIOUS ATTEMPT: failed the test suite (exit {EXIT}).\n"
         "Test output (tail):\n{TAIL}\n"
         "Diagnose the root cause shown above and fix it; do not just retry the same change."
+    ),
+    "guidance_review": (
+        "PREVIOUS ATTEMPT: passed the test suite but the reviewer REJECTED it.\n"
+        "These findings are still open and each one is tracked by id:\n{FINDINGS}\n"
+        "Fix every one of them. Restating a finding in milder words or lowering its "
+        "severity does not close it — only a change that removes the problem does. "
+        "If one genuinely cannot be fixed within the scope you were given, leave it "
+        "alone and say so plainly in your response; do not weaken or delete existing "
+        "tests to get past it."
     ),
 }
 

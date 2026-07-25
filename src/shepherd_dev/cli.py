@@ -32,6 +32,31 @@ from .supervisor import develop, materialize_into, read_changeset_entries, set_w
 from .tasks import implement, review, write_tests
 
 
+#: Hard ceiling on rework rounds. Same number as MAX_LANES, same reasoning:
+#: a bounded, pre-approved allowance is delegated authority; an open-ended
+#: loop against a fixed pass criterion is just more chances to game it.
+MAX_REVIEW_ROUNDS = 5
+
+
+def _validate_review_rounds(
+    rounds: int, *, no_review: bool, provider: str, best_of: int = 1
+) -> str | None:
+    """None = usable; otherwise the reason to refuse, ready to print."""
+    if rounds < 1:
+        return "--review-rounds must be at least 1"
+    if rounds > 1 and best_of > 1:
+        # best-of samples candidates from one state and ranks them; rework
+        # iterates one candidate. Accepting both would silently honour neither.
+        return "--review-rounds > 1 does not combine with --best-of"
+    if rounds > MAX_REVIEW_ROUNDS:
+        return f"--review-rounds is capped at {MAX_REVIEW_ROUNDS} (got {rounds})"
+    if rounds > 1 and no_review:
+        return "--review-rounds > 1 needs the reviewer (drop --no-review)"
+    if rounds > 1 and provider == "static":
+        return "--review-rounds > 1 needs a reviewing provider (not static)"
+    return None
+
+
 def _resolve_repo(raw: str | None) -> Path | None:
     """Resolve the target repo. raw=None (or '.') means: find the enclosing
     Shepherd workspace by walking up from the cwd, like git finds .git."""
@@ -618,6 +643,13 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.auto_settle and args.provider in ("grok", "codex") and args.no_review:
         print(f"error: --auto-settle with {args.provider} requires review (drop --no-review)", file=sys.stderr)
         return 2
+    bad_rounds = _validate_review_rounds(
+        args.review_rounds, no_review=args.no_review, provider=args.provider,
+        best_of=args.best_of,
+    )
+    if bad_rounds:
+        print(f"error: {bad_rounds}", file=sys.stderr)
+        return 2
 
     if args.best_of > 1 and args.no_review and args.provider not in ("static",):
         # best-of ranking needs review for non-static; grok/codex best-of not supported yet
@@ -689,6 +721,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             provider=args.provider,
             placement=placement,
             max_attempts=args.max_attempts,
+            review_rounds=args.review_rounds,
             gate_timeout=args.gate_timeout,
             policy=policy,
             review_task=reviewer,
@@ -1572,6 +1605,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="branch K candidates from the same state, gate+review all, stage the winner (Tree-RL essence at inference)",
     )
     p_run.add_argument("--max-attempts", type=int, default=3)
+    p_run.add_argument(
+        "--review-rounds", type=int, default=1,
+        help=f"extra passes to spend on a REJECTED-but-passing proposal "
+             f"(1 = hand it to the human as today; max {MAX_REVIEW_ROUNDS})",
+    )
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
     p_run.add_argument(
         "--worker-budget",

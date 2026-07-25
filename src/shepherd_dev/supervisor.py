@@ -283,7 +283,13 @@ class LocalGateStage:
         self.close()
 
 
-def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: GateResult | None = None) -> str:
+def _format_guidance(
+    kind: str,
+    *,
+    violations: list[str] | None = None,
+    gate: GateResult | None = None,
+    ledger: Ledger | None = None,
+) -> str:
     """Structured feedback injected into the worker's next attempt.
 
     Templates live in prompts.py (CRO-lite surface); {TOKENS} are substituted
@@ -300,6 +306,9 @@ def _format_guidance(kind: str, *, violations: list[str] | None = None, gate: Ga
             .replace("{EXIT}", str(gate.exit_code))
             .replace("{TAIL}", gate.output_tail[-2000:])
         )
+    if kind == "review":
+        assert ledger is not None
+        return get_prompt("guidance_review").replace("{FINDINGS}", ledger.guidance())
     raise ValueError(f"unknown guidance kind: {kind}")
 
 
@@ -742,6 +751,7 @@ def develop(
     provider: str = "claude",
     placement: str = "jail",
     max_attempts: int = 3,
+    review_rounds: int = 1,
     gate_timeout: int = 600,
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
@@ -767,6 +777,10 @@ def develop(
     event_log (verbose mode) receives normalized run events — phases, per-file
     diffs, streamed gate lines/failures, policy and review outcomes; stream_hook
     is the WorkerStreamHook whose attempt counter develop keeps current.
+    review_rounds > 1 lets a REJECTED-but-passing proposal be reworked: the
+    ledger's open findings become the next pass's guidance. Rework runs on its
+    own budget — a gate failure never eats the rework allowance, and a rework
+    never eats the attempts reserved for failures.
     """
     import time as _time
 
@@ -786,7 +800,20 @@ def develop(
             except Exception:
                 pass
 
-    for number in range(1, max_attempts + 1):
+    ledger = Ledger() if review_task is not None else None
+    report.ledger = ledger
+    # Two budgets, deliberately not shared: attempts absorb failures (a broken
+    # run, a policy violation, a red suite), rounds absorb objections. Letting
+    # them draw on each other would mean a run that failed the gate twice can
+    # no longer act on the reviewer, which is the case that most needs it.
+    rounds_left = max(0, review_rounds - 1)
+    round_no = 1
+    attempts_left = max_attempts
+    number = 0
+
+    while attempts_left > 0:
+        number += 1
+        attempts_left -= 1
         warmup = _start_gate_warmup(repo_root, test_cmd, gate_timeout)
         reporter.step(f"attempt {number}/{max_attempts} · worker running")
         _emit("phase.start", {"label": "worker", "max_attempts": max_attempts}, attempt=number)
@@ -970,26 +997,65 @@ def develop(
         report.succeeded = True
         report.final_run_ref = run.run_ref
         report.entries = entries
-        if review_task is not None:
-            reporter.step(f"attempt {number} · review")
-            _emit("phase.start", {"label": "review"}, attempt=number)
-            if spec_thread is not None:
-                spec_thread.join()  # already ran overlapped with the gate
-                report.review = spec_result.get("verdict")
-            if report.review is None:
-                report.review = run_review(
-                    workspace,
-                    review_task,
-                    feature=feature,
-                    changeset=changeset,
-                    provider=provider,
-                    placement=placement,
-                    context_pack=context_pack,
-                )
-            if report.review is not None:
-                _emit("review.verdict", {"approved": report.review.approved}, attempt=number)
-                for issue in report.review.issues or []:
-                    _emit("review.issue", {"text": str(issue)}, attempt=number)
-        return report
+        if review_task is None:
+            return report
+
+        reporter.step(f"attempt {number} · review")
+        _emit("phase.start", {"label": "review"}, attempt=number)
+        # A local, not report.review: on a rework round the previous verdict is
+        # still on the report, and reusing it would skip this round's review.
+        verdict = None
+        if spec_thread is not None:
+            spec_thread.join()  # already ran overlapped with the gate
+            verdict = spec_result.get("verdict")
+        if verdict is None:
+            verdict = run_review(
+                workspace,
+                review_task,
+                feature=feature,
+                changeset=changeset,
+                provider=provider,
+                placement=placement,
+                context_pack=context_pack,
+            )
+        report.review = verdict
+        if verdict is not None:
+            _emit("review.verdict", {"approved": verdict.approved}, attempt=number)
+            for issue in verdict.issues or []:
+                _emit("review.issue", {"text": str(issue)}, attempt=number)
+            if not verdict.error and ledger is not None:
+                # Folded in even on approval: an approving verdict raises
+                # nothing, which is exactly what closes the earlier findings.
+                ledger.record_round(round_no, verdict.issues)
+        if verdict is None or verdict.error or verdict.approved:
+            return report
+
+        # Gate PASSED, reviewer REJECTED — the case that used to end here with
+        # the objections going nowhere.
+        if ledger is None or not ledger.has_open():
+            report.blocked_reason = "reviewer rejected but left no actionable finding"
+            _emit("review.rework.stop", {"reason": report.blocked_reason}, attempt=number)
+            return report
+        if rounds_left <= 0:
+            return report  # out of rounds: the proposal stays retained, findings shown
+
+        rounds_left -= 1
+        round_no += 1
+        open_n = len(ledger.open_findings())
+        _emit(
+            "review.rework",
+            {"round": round_no, "of": review_rounds, "open": open_n},
+            attempt=number,
+        )
+        reporter.note(f"rework round {round_no}/{review_rounds} — {open_n} open finding(s)")
+        # Same clean-basis discipline as a gate failure: the rejected proposal
+        # goes away and the next pass is judged on its own merits. Clearing the
+        # ref matters — it points at an output that no longer exists.
+        output.discard()
+        report.succeeded = False
+        report.final_run_ref = None
+        report.entries = None
+        guidance = _prior_attempt_guidance(entries) + _format_guidance("review", ledger=ledger)
+        attempts_left = max_attempts  # a round carries its own allowance
 
     return report

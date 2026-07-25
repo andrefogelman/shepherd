@@ -23,7 +23,9 @@ from pathlib import Path
 from . import history
 from .tasks import DEFAULT_PROMPTS, load_overrides, save_overrides
 
-EDITABLE_KEYS = ("implement", "write_tests", "review", "guidance_policy", "guidance_gate")
+EDITABLE_KEYS = (
+    "implement", "write_tests", "review", "guidance_policy", "guidance_gate", "guidance_review",
+)
 
 
 @dataclass
