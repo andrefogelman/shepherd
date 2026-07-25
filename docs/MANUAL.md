@@ -277,7 +277,9 @@ continua. Desligue com `--no-plan`; troque o modelo em `planning.model` no
 `.shepherd-dev.json`.
 
 **Feedback vivo.** Enquanto o run acontece, o terminal mostra o progresso por
-fase — `tentativa k/N · worker → portão → revisão` — com spinner e tempo
+fase — `tentativa k/N · worker → portão → revisão`, onde `k` conta dentro da
+rodada que está gastando a cota, e a rodada também aparece (`· round 2/2`)
+quando houve mais de uma — com spinner e tempo
 decorrido, fixando uma linha `✓/✗` a cada fase. Depois de cada tentativa, um
 resumo do que o worker fez (arquivos tocados + contagem de ferramentas, lido do
 trace). Em terminal não-interativo (CI) vira linhas simples. Silencie com
@@ -396,13 +398,21 @@ declara um `outcome`, no resumo em texto e no envelope `--json`:
 | `blocked` | O ciclo parou por algo que iterar não conserta (proposta idêntica de novo, rejeição sem achado acionável). `blocked_reason` diz qual. |
 
 **Ledger de achados.** Cada issue que o revisor levanta ganha um id estável e
-fica no ledger até sair por um estado terminal: `fixed` (o revisor parou de
-levantar), `blocked` ou `refused` (ambos exigem razão). O ledger é impresso no
-fim de todo run, **sem ninguém precisar perguntar**, e vai no `--json` como
-`findings`. A severidade é removida antes de calcular o id de propósito:
-rebaixar um achado de ALTO para MÉDIO não é conserto, e um ledger com chave no
-texto cru leria o texto rebaixado como problema novo enquanto fechava o
-original em silêncio.
+fica no ledger até sair por um estado terminal: `fixed`, `blocked` ou `refused`
+(os dois últimos exigem razão). O ledger é impresso no fim de todo run, **sem
+ninguém precisar perguntar**, e vai no `--json` como `findings`. A severidade é
+removida antes de calcular o id de propósito: rebaixar um achado de ALTO para
+MÉDIO não é conserto, e um ledger com chave no texto cru leria o texto
+rebaixado como problema novo enquanto fechava o original em silêncio.
+
+**Um achado fecha por evidência, nunca por silêncio.** A cada rodada o revisor
+recebe os achados ainda abertos com seus ids e responde sobre eles: o que ele
+ainda vê é relevantado sob o mesmo id, e o que ele checou e não existe mais vai
+na lista `resolved` do veredito. Só isso fecha um achado, tirando a aprovação —
+que fecha o que sobrou, por ser um julgamento sobre a mudança inteira. Um
+revisor que rejeita e apenas para de mencionar algo não disse nada sobre aquilo,
+e na maioria das vezes só reescreveu com outras palavras; tratar isso como
+conserto é como um run termina com problemas abertos parecendo sucesso.
 
 **`--review-rounds N`.** Portão verde + revisor REJEITOU costumava encerrar o
 ciclo ali: a proposta ficava retida e as objeções não iam a lugar nenhum. Com

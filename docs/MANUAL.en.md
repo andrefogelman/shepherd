@@ -285,6 +285,8 @@ continues. Disable with `--no-plan`; change the model via `planning.model` in
 
 **Live feedback.** While the run happens, the terminal shows per-phase progress —
 `attempt k/N · worker → gate → review` — with a spinner and elapsed time,
+where `k` counts within the round that is spending the allowance, and the round
+is named too (`· round 2/2`) once there has been more than one,
 committing a `✓/✗` line as each phase settles. After each attempt, a summary of
 what the worker did (files touched + a tool tally read from the run trace). On a
 non-interactive terminal (CI) it degrades to plain lines. Silence with `--quiet`.
@@ -403,13 +405,21 @@ the prose summary and in the `--json` envelope:
 | `blocked` | The cycle stopped for something iterating cannot fix (an identical proposal again, a rejection with no actionable finding). `blocked_reason` says which. |
 
 **Findings ledger.** Every issue the reviewer raises gets a stable id and stays
-in the ledger until it leaves through a terminal state: `fixed` (the reviewer
-stopped raising it), `blocked` or `refused` (both demand a reason). The ledger
-prints at the end of every run **without anyone having to ask**, and ships in
-`--json` as `findings`. Severity is stripped before hashing the id on purpose:
-re-labelling a finding from HIGH to MEDIUM is not a fix, and a ledger keyed on
-the raw text would read the re-labelled text as a new problem while quietly
-closing the original.
+in the ledger until it leaves through a terminal state: `fixed`, `blocked` or
+`refused` (the last two demand a reason). The ledger prints at the end of every
+run **without anyone having to ask**, and ships in `--json` as `findings`.
+Severity is stripped before hashing the id on purpose: re-labelling a finding
+from HIGH to MEDIUM is not a fix, and a ledger keyed on the raw text would read
+the re-labelled text as a new problem while quietly closing the original.
+
+**A finding closes on evidence, never on silence.** Each round the reviewer is
+handed the still-open findings with their ids and answers about them: an item
+it still sees is re-raised under its id, an item it checked and found gone goes
+in the verdict's `resolved` list. Only that closes one, short of an approval —
+which closes what is left, being a judgement over the whole change. A rejecting
+reviewer that simply stops mentioning something has said nothing about it, and
+most often has just described it in new words; treating that as a fix is how a
+run ends with open problems while reading like success.
 
 **`--review-rounds N`.** Gate green plus reviewer REJECTED used to end the cycle
 right there: the proposal stayed retained and the objections went nowhere. With
