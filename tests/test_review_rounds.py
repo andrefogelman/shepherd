@@ -384,5 +384,55 @@ class TheReviewerSeesTheOpenFindings(unittest.TestCase):
         self.assertEqual(verdict.resolved, [])
 
 
+class TheAttemptLabelNamesItsOwnBudget(unittest.TestCase):
+    def test_a_single_round_run_prints_what_it_always_printed(self):
+        from shepherd_dev.supervisor import _attempt_label
+
+        self.assertEqual(_attempt_label(2, 3, round_no=1, review_rounds=1), "attempt 1/3")
+        self.assertEqual(_attempt_label(0, 3, round_no=1, review_rounds=1), "attempt 3/3")
+
+    def test_a_rework_round_counts_from_one_again(self):
+        # The defect: the run-wide counter printed against a per-round budget,
+        # so a fresh round's first attempt read as `attempt 2/2` — apparently
+        # spent — and a third attempt would have read `attempt 3/2`.
+        from shepherd_dev.supervisor import _attempt_label
+
+        label = _attempt_label(1, 2, round_no=2, review_rounds=2)
+        self.assertTrue(label.startswith("attempt 1/2"), label)
+        self.assertIn("round 2/2", label)
+
+    def test_the_printed_run_labels_the_rework_round_correctly(self):
+        """The helper is only worth anything if the loop actually calls it —
+        pinning the pure function alone would let the call sites be reverted
+        to the run-wide counter without a single test noticing."""
+        import io
+
+        from shepherd_dev.progress import ProgressReporter
+
+        buf = io.StringIO()
+        DevelopReworkLoopTests()._run(
+            verdicts=[(False, ["issue A"]), (False, ["issue A"])],
+            review_rounds=2,
+            max_attempts=2,
+            reporter=ProgressReporter(stream=buf, enabled=False),
+        )
+        out = buf.getvalue()
+        self.assertIn("attempt 1/2 · worker running", out)      # round 1
+        self.assertIn("attempt 1/2 · round 2/2 · worker running", out)
+        self.assertNotIn("attempt 2/2 · worker running", out)   # the old lie
+
+    def test_the_numerator_never_exceeds_the_budget(self):
+        from shepherd_dev.supervisor import _attempt_label
+
+        for max_attempts in (1, 2, 3):
+            for round_no in (1, 2, 3):
+                for spent in range(1, max_attempts + 1):
+                    label = _attempt_label(max_attempts - spent, max_attempts, round_no, 3)
+                    with self.subTest(label=label):
+                        position = int(label.split()[1].split("/")[0])
+                        self.assertLessEqual(position, max_attempts)
+                        self.assertGreaterEqual(position, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,7 +128,10 @@ class ProgressWiring(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("attempt 1/2 · worker running", out)
         self.assertIn("worker: 1 file(s): impl.py", out)   # post-hoc #B note
-        self.assertIn("attempt 1 · gate", out)
+        # Every phase of one attempt carries the same label: adjacent lines
+        # naming the same attempt with different numbers is how the counter
+        # became unreadable in the first place.
+        self.assertIn("attempt 1/2 · gate", out)
         self.assertIn("✗", out)                             # gate 'false' fails
 
 

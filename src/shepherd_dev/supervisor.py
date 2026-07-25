@@ -348,6 +348,28 @@ def _format_guidance(
     raise ValueError(f"unknown guidance kind: {kind}")
 
 
+def _attempt_label(
+    attempts_left: int, max_attempts: int, round_no: int, review_rounds: int
+) -> str:
+    """Where this attempt sits in the budget it is actually spending.
+
+    Two counters run at once: attempts are numbered across the whole run and
+    never reset, while the allowance they draw on resets with every rework
+    round. Printing the run-wide number against `max_attempts` therefore
+    describes the wrong quantity — a second round's first attempt reads as
+    `attempt 2/2`, apparently out of budget while in fact holding a full fresh
+    one, and a third would read `attempt 3/2`.
+
+    So the numerator is the position within the round, and the round is named
+    whenever there has been more than one. A single-round run — every run that
+    is not reworked — prints exactly what it printed before.
+    """
+    position = max_attempts - attempts_left
+    if round_no <= 1:
+        return f"attempt {position}/{max_attempts}"
+    return f"attempt {position}/{max_attempts} · round {round_no}/{review_rounds}"
+
+
 _TIMEOUT_GUIDANCE = (
     "PREVIOUS ATTEMPT: you exceeded the wall-clock budget and were stopped "
     "mid-run. Be far more direct — make the minimal change and write it now; "
@@ -904,7 +926,7 @@ def develop(
         number += 1
         attempts_left -= 1
         warmup = _start_gate_warmup(repo_root, test_cmd, gate_timeout)
-        reporter.step(f"attempt {number}/{max_attempts} · worker running")
+        reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · worker running")
         _emit("phase.start", {"label": "worker", "max_attempts": max_attempts}, attempt=number)
         if stream_hook is not None:
             try:
@@ -1061,7 +1083,7 @@ def develop(
             )
             spec_thread.start()
         if test_cmd is not None:
-            reporter.step(f"attempt {number} · gate")
+            reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · gate")
             _emit("phase.start", {"label": "gate"}, attempt=number)
             on_line = None
             if event_log is not None:
@@ -1108,7 +1130,7 @@ def develop(
         if review_task is None:
             return report
 
-        reporter.step(f"attempt {number} · review")
+        reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · review")
         _emit("phase.start", {"label": "review"}, attempt=number)
         # A local, not report.review: on a rework round the previous verdict is
         # still on the report, and reusing it would skip this round's review.
