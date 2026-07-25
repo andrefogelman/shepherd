@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from shepherd_dev.supervisor import LocalGateStage, _remove_tree  # noqa: E402
+from shepherd_dev.supervisor import DEP_DIRS, LocalGateStage, _remove_tree  # noqa: E402
 
 
 class UnscopedMutation(Exception):
@@ -84,13 +84,19 @@ class _GuardedUnlink:
         return self._real(path, dir_fd=dir_fd)
 
 
-def _stage_with_link_into(guarded: Path) -> Path:
-    """A stage shaped like the gate's: real files plus a dep-dir symlink."""
+def _link_deps(guarded: Path, dest: Path, names=DEP_DIRS) -> None:
+    """The link shape _link_dep_dirs produces, for the named dep dirs."""
+    for name in names:
+        (guarded / name).mkdir(parents=True, exist_ok=True)
+        (dest / name).symlink_to((guarded / name).resolve())
+
+
+def _stage_with_link_into(guarded: Path, names=DEP_DIRS) -> Path:
+    """A stage shaped like the gate's: real files plus dep-dir symlinks."""
     root = Path(tempfile.mkdtemp(prefix="shepherd-teardown-test-"))
     (root / "base" / "src").mkdir(parents=True)
     (root / "base" / "src" / "mod.py").write_bytes(b"x = 1\n")
-    (guarded / ".venv").mkdir(parents=True, exist_ok=True)
-    (root / "base" / ".venv").symlink_to((guarded / ".venv").resolve())
+    _link_deps(guarded, root / "base", names)
     return root
 
 
@@ -98,17 +104,33 @@ class GuardSimulationTests(unittest.TestCase):
     """The simulated guard must actually reproduce the failure, or the tests
     below prove nothing."""
 
-    def test_an_in_process_rmtree_dies_on_a_link_into_the_guarded_tree(self):
-        guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
-        self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
-        stage = _stage_with_link_into(guarded)
-        self.addCleanup(shutil.rmtree, stage, ignore_errors=True)
+    def test_the_fd_directory_probe_resolves_on_this_platform(self):
+        """Pinned separately so a platform where the probe cannot resolve a
+        dir_fd fails here by name, instead of quietly turning every test below
+        into one that raises nothing and proves nothing."""
+        directory = Path(tempfile.mkdtemp(prefix="shepherd-fdprobe-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        fd = os.open(directory, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
 
-        with _GuardedUnlink(guarded):
-            # ignore_errors=True and it still escapes: that is the whole defect.
-            with self.assertRaises(UnscopedMutation):
-                shutil.rmtree(stage, ignore_errors=True)
-        self.assertTrue(stage.exists())
+        resolved = _fd_directory(fd)
+        self.assertIsNotNone(resolved, "no fd-to-path mechanism works here")
+        assert resolved is not None  # narrowing, for type checkers
+        self.assertEqual(resolved.resolve(), directory.resolve())
+
+    def test_an_in_process_rmtree_dies_on_a_link_into_the_guarded_tree(self):
+        for name in DEP_DIRS:
+            with self.subTest(dep_dir=name):
+                guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
+                self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
+                stage = _stage_with_link_into(guarded, [name])
+                self.addCleanup(shutil.rmtree, stage, ignore_errors=True)
+
+                with _GuardedUnlink(guarded):
+                    # ignore_errors=True and it still escapes: the whole defect.
+                    with self.assertRaises(UnscopedMutation):
+                        shutil.rmtree(stage, ignore_errors=True)
+                self.assertTrue(stage.exists())
 
     def test_the_guard_leaves_an_ordinary_stage_alone(self):
         guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
@@ -132,8 +154,9 @@ class RemoveTreeTests(unittest.TestCase):
         with _GuardedUnlink(guarded):
             _remove_tree(stage)  # in-process rmtree would raise here
         self.assertFalse(stage.exists())
-        # The link was followed by nobody: the real dep dir is untouched.
-        self.assertTrue((guarded / ".venv").is_dir())
+        # The links were followed by nobody: the real dep dirs are untouched.
+        for name in DEP_DIRS:
+            self.assertTrue((guarded / name).is_dir(), name)
 
     def test_local_gate_stage_close_survives_the_same_stage(self):
         guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
@@ -142,8 +165,7 @@ class RemoveTreeTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, stage._root, ignore_errors=True)
         (stage._root / "base").mkdir()
         (stage._root / "base" / "mod.py").write_bytes(b"x = 1\n")
-        (guarded / ".venv").mkdir(parents=True, exist_ok=True)
-        (stage._root / "base" / ".venv").symlink_to((guarded / ".venv").resolve())
+        _link_deps(guarded, stage._root / "base")
 
         with _GuardedUnlink(guarded):
             stage.close()
@@ -201,12 +223,11 @@ class RealSubstrateTeardownTests(unittest.TestCase):
         import shepherd as sp
 
         repo = self._workspace()
-        (repo / ".venv").mkdir()
         stage = LocalGateStage(repo)
         self.addCleanup(shutil.rmtree, stage._root, ignore_errors=True)
         (stage._root / "base").mkdir()
         (stage._root / "base" / "mod.py").write_bytes(b"x = 1\n")
-        (stage._root / "base" / ".venv").symlink_to((repo / ".venv").resolve())
+        _link_deps(repo, stage._root / "base")  # every dep dir, as the gate links them
 
         cwd = Path.cwd()
         os.chdir(repo)  # the gate tears down with cwd inside the repo
@@ -216,7 +237,8 @@ class RealSubstrateTeardownTests(unittest.TestCase):
         finally:
             os.chdir(cwd)
         self.assertFalse(stage._root.exists())
-        self.assertTrue((repo / ".venv").is_dir())
+        for name in DEP_DIRS:
+            self.assertTrue((repo / name).is_dir(), name)
 
 
 if __name__ == "__main__":
