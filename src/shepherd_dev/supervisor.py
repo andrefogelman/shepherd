@@ -810,6 +810,7 @@ def develop(
     round_no = 1
     attempts_left = max_attempts
     number = 0
+    last_entries: dict[str, bytes] | None = None
 
     while attempts_left > 0:
         number += 1
@@ -912,6 +913,25 @@ def develop(
                 "minimal change that proves it (e.g. a test); otherwise implement it now."
             )
             continue
+
+        if entries == last_entries:
+            # The worker handed back byte-for-byte what was just rejected, so
+            # the feedback did not land. Re-judging it would spend the rest of
+            # the budget to reach the same verdict, and "attempts exhausted"
+            # would read like a hard task instead of a stuck loop.
+            output.discard()
+            if warmup is not None:
+                warmup.teardown()
+            report.blocked_reason = (
+                f"no progress: attempt {number} proposed the same files as attempt {number - 1}"
+            )
+            reporter.fail("no progress (identical changeset)")
+            _emit("attempt.no_progress", {"attempt": number, "files": changed}, attempt=number)
+            report.attempts.append(
+                Attempt(number, run.run_ref, changed, [], None, "no_progress", duration_s=duration)
+            )
+            return report
+        last_entries = entries
 
         verdict_policy = check_paths(changed, policy)
         if not verdict_policy.ok:

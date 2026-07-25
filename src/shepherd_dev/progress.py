@@ -182,6 +182,8 @@ def format_event(event: dict, live: bool = True) -> str | None:
         return f"⚔ conflicts on {', '.join(files[:6])} — {tail}"
     if kind == "parallel.repair":
         return f"🔧 repair round {p.get('round')} (combined gate exit {p.get('exit_code')})"
+    if kind == "attempt.no_progress":
+        return f"⏹ attempt {p.get('attempt')} proposed an identical changeset — stopping"
     if kind == "review.rework":
         # Above the `live` cut on purpose: this restarts the whole cycle, so
         # hiding it would leave the spinner on "review" while a worker runs.
