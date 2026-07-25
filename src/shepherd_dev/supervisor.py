@@ -16,6 +16,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
 
 IGNORED_DIRS = {
@@ -73,6 +74,8 @@ class DevReport:
     # set when the cycle stopped for a reason no further iteration can fix
     # (no progress, nothing actionable left) — outranks every other state
     blocked_reason: str | None = None
+    # every issue the reviewer raised, and how each one ended (see ledger.py)
+    ledger: Ledger | None = None
 
     @property
     def outcome(self) -> str:
@@ -118,6 +121,10 @@ class DevReport:
             else:
                 lines.append(f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}")
                 lines += [f"  issue: {i}" for i in self.review.issues]
+        if self.ledger is not None:
+            rendered = self.ledger.render()  # unprompted: nobody has to ask
+            if rendered:
+                lines.append(rendered)
         if self.final_run_ref:
             repo_arg = f" --repo {self.repo}" if self.repo else ""
             lines += [

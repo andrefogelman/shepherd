@@ -73,6 +73,7 @@ def run_payload(report, repo_root: Path, *, mode: str, test_cmd: str | None, pro
         "sha": _git_sha(repo_root),
         "succeeded": report.succeeded,
         "outcome": report.outcome,
+        "findings": (report.ledger.to_payload() if report.ledger is not None else []),
         "final_run_ref": report.final_run_ref,
         "mode": mode,
         "test_cmd": test_cmd,
