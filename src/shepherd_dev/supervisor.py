@@ -397,6 +397,41 @@ def _swap_perl_killtree(argv: list) -> list:
     return argv
 
 
+_SANDBOX_TMPDIR_VAR = "CLAUDE_CODE_TMPDIR"
+
+
+def _with_sandbox_tmpdir(argv: list) -> list:
+    """Keep the jailed worker's own Bash sandbox scratch inside the jail.
+
+    The worker runs under a syscall jail whose writable roots are the run's
+    clone. The Claude CLI puts its Bash-sandbox scratch under a tmp root that
+    on darwin is a hardcoded `/tmp` — it does NOT read TMPDIR there — so the
+    first Bash call tries to mkdir `/tmp/claude-<uid>/<flattened-cwd>`, outside
+    the writable roots. The jail denies it and every Bash call fails with
+    `EPERM: operation not permitted, mkdir …`, which silently degrades both
+    agents to file tools: the worker cannot run the suite it just changed, and
+    the reviewer reviews by inspection with nothing executed.
+
+    CLAUDE_CODE_TMPDIR overrides that root. It is pointed at the value the
+    provider already chose for TMPDIR — the per-run scratch it creates before
+    launch and scrubs after — so the sandbox lands inside the jail and the
+    credential-free scratch stays the only thing that leaks out (nothing).
+
+    Reads the value off the argv rather than recomputing it, so a framework
+    that moves its scratch moves this with it. A no-op if the env prefix ever
+    stops carrying TMPDIR, or if the variable is already set.
+    """
+    out = list(argv)
+    if any(str(item).startswith(f"{_SANDBOX_TMPDIR_VAR}=") for item in out):
+        return out
+    for index, item in enumerate(out):
+        text = str(item)
+        if text.startswith("TMPDIR="):
+            out.insert(index + 1, f"{_SANDBOX_TMPDIR_VAR}={text[len('TMPDIR='):]}")
+            return out
+    return out  # env prefix shape changed: leave the launch alone
+
+
 # Killtree + pump (verbose mode): same process-group hard stop as
 # _KILLTREE_PERL, but the parent also pumps the child's stdout line by line to
 # BOTH its own stdout (the substrate keeps parsing an identical stream) and a
@@ -494,7 +529,7 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
                 # the perl script slot — robust to any change in the body, and a
                 # no-op if the shape is ever not `perl -e`. With a stream hook the
                 # swap is the killtree+pump variant (tee for the live tailer).
-                argv = list(super().command_argv(working_path, cli, prompt))
+                argv = _with_sandbox_tmpdir(super().command_argv(working_path, cli, prompt))
                 if stream_hook is not None:
                     try:
                         return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))

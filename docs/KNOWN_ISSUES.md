@@ -10,6 +10,43 @@ None.
 
 ## Fixed
 
+### The jailed worker and reviewer could not run a single command
+
+**Was:** on macOS, every `Bash` call inside a run failed and neither agent said
+so as a failure — they degraded. The worker wrote code it never executed; the
+reviewer reported "Bash is blocked in this sandbox (EPERM), so this review is
+by inspection of the diff against the spec — no execution." A supervised cycle
+that never runs anything is most of the supervision gone, and it looked like a
+clean pass.
+
+```
+EPERM: operation not permitted, mkdir '/private/tmp/claude-<uid>/<flattened-cwd>'
+```
+
+Three facts meet:
+
+1. The worker runs under a syscall jail (`launch_confined`) whose writable
+   roots are the run's clone. Anything written outside is denied, and a
+   seatbelt denial surfaces to the CLI as `EPERM`.
+2. The framework redirects `HOME`, `CLAUDE_CONFIG_DIR` and `TMPDIR` into a
+   per-run scratch inside that clone.
+3. The Claude CLI does not read `TMPDIR` for its own Bash-sandbox scratch. On
+   darwin that root is a hardcoded `/tmp`; `CLAUDE_CODE_TMPDIR` is the only
+   override. So the sandbox scratch was the one thing still resolving outside
+   the writable roots.
+
+Established by probe: a bare CLI in the same clone path, unjailed, runs `Bash`
+fine, and the flattened scratch dir is created without complaint — so it is
+neither the path shape nor a filesystem permission. Redirecting `TMPDIR` alone
+does not move the sandbox scratch.
+
+**Fix:** `_with_sandbox_tmpdir` adds `CLAUDE_CODE_TMPDIR` to the launch's env
+prefix, set to whatever the framework chose for `TMPDIR` — read off the argv,
+so a framework that moves its scratch moves this with it. Pinned by
+`tests/test_worker_sandbox_tmpdir.py`, whose last case fails loudly if the
+framework ever stops carrying `TMPDIR` there, since the rewrite would silently
+degrade to a no-op and restore the defect.
+
 ### The local gate stage killed the run while tearing itself down
 
 **Was:** any supervised cycle in an affected repo died mid-gate. The process
