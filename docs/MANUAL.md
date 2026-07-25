@@ -246,6 +246,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--no-review` | run · run2 | Pula o revisor. Incompatível com `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confina mudanças a um prefixo (repetível). |
 | `--max-attempts` | run · run2 | Tentativas por worker (padrão 3). |
+| `--review-rounds N` | run | Rodadas extras gastas numa proposta que passou no portão mas o revisor REJEITOU (padrão 1 = entrega ao humano, como antes; teto 5). |
 | `--worker-budget` | run · run2 | Segundos por tentativa (padrão 900). |
 | `--max-repairs` | run2 | Rodadas de reparo no portão combinado (padrão 2). |
 | `--provider static` | run · run2 | Ensaio offline sem LLM (custo zero). |
@@ -378,6 +379,66 @@ guarda-corpos de metodologia, ambos automáticos:
 Paralelismo ganha **wall-clock**, não tokens: 3 features de ~5min viram ~6–7min
 no total em vez de ~15min sequenciais. Verbose padrão: um log por lane
 (`<id>-w0…`) + log principal com a narrativa; replay com `trace`.
+
+## Resultado do run: `outcome`, achados e rodadas de rework
+
+**`succeeded` só quis dizer "o portão passou".** Um orquestrador que roteia por
+ele sozinho embarca uma proposta que o revisor rejeitou, e um run com
+`--no-review` lê como aprovado sem ninguém ter aprovado nada. Todo run agora
+declara um `outcome`, no resumo em texto e no envelope `--json`:
+
+| `outcome` | Significa |
+|---|---|
+| `passed_approved` | Portão passou e o revisor aprovou. Único estado que o `--auto-settle` aceita. |
+| `passed_rejected` | Portão passou, revisor REJEITOU. A proposta fica retida; os achados estão abertos. |
+| `passed_unreviewed` | Portão passou e ninguém aprovou (`--no-review`, `--provider static`, ou veredito ilegível). |
+| `failed` | O portão nunca passou. |
+| `blocked` | O ciclo parou por algo que iterar não conserta (proposta idêntica de novo, rejeição sem achado acionável). `blocked_reason` diz qual. |
+
+**Ledger de achados.** Cada issue que o revisor levanta ganha um id estável e
+fica no ledger até sair por um estado terminal: `fixed` (o revisor parou de
+levantar), `blocked` ou `refused` (ambos exigem razão). O ledger é impresso no
+fim de todo run, **sem ninguém precisar perguntar**, e vai no `--json` como
+`findings`. A severidade é removida antes de calcular o id de propósito:
+rebaixar um achado de ALTO para MÉDIO não é conserto, e um ledger com chave no
+texto cru leria o texto rebaixado como problema novo enquanto fechava o
+original em silêncio.
+
+**`--review-rounds N`.** Portão verde + revisor REJEITOU costumava encerrar o
+ciclo ali: a proposta ficava retida e as objeções não iam a lugar nenhum. Com
+`N > 1`, os achados abertos viram a orientação da próxima passada e o worker
+tenta de novo.
+
+```bash
+shepherd-dev run "add pagination" --repo ~/projetos/meu-app --review-rounds 3
+```
+
+- **Dois orçamentos separados.** Tentativas absorvem *falhas* (run quebrado,
+  violação de política, suíte vermelha); rodadas absorvem *objeções*. Cada
+  rodada carrega seu próprio `--max-attempts`, porque justamente o run que
+  falhou no portão duas vezes é o que mais precisa poder agir sobre o revisor.
+- **Teto fixo em 5**, o mesmo número e a mesma razão do runN: orçamento
+  pré-aprovado é autoridade delegada; loop sem fim contra um critério fixo é só
+  mais chance de burlá-lo.
+- **Para cedo** quando a rejeição não traz achado acionável (`blocked`) ou
+  quando o worker devolve a mesma proposta byte a byte.
+- **Nunca liquida sozinho.** Rodada extra não cria autoridade nova de
+  settlement: quem aceita continua sendo você.
+- **Recusa em vez de ignorar**: `N > 1` não combina com `--no-review`,
+  `--provider static` nem `--best-of` (que amostra candidatos do mesmo estado
+  em vez de iterar um).
+- **Custo do opt-in**: ao reabrir, a proposta rejeitada é descartada, como numa
+  falha de portão. Se a rodada de rework não produzir nada que passe, você fica
+  sem aquela proposta. Padrão 1 mantém o comportamento anterior byte a byte.
+
+O trace mostra as rodadas: `↻ rework round 2/3 — 4 open findings`, e
+`⏹ rework stopped: <razão>` quando o loop desiste.
+
+**Proposta idêntica encerra o loop.** Se uma tentativa devolve exatamente os
+mesmos arquivos da anterior, o feedback não pegou: re-julgar gastaria o resto
+do orçamento para chegar ao mesmo veredito, e o run reportaria "tentativas
+esgotadas" como se a tarefa fosse difícil em vez do loop estar travado. Agora
+para na hora, antes do portão, com `outcome: blocked` nomeando as tentativas.
 
 ## Best-of-N
 

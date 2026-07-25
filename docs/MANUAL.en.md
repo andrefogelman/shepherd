@@ -252,6 +252,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--no-review` | run · run2 | Skips the reviewer. Incompatible with `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confines changes to a prefix (repeatable). |
 | `--max-attempts` | run · run2 | Attempts per worker (default 3). |
+| `--review-rounds N` | run | Extra passes spent on a proposal that passed the gate but the reviewer REJECTED (default 1 = hand it to the human, as before; capped at 5). |
 | `--worker-budget` | run · run2 | Seconds per attempt (default 900). |
 | `--max-repairs` | run2 | Repair rounds on the combined gate (default 2). |
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
@@ -385,6 +386,67 @@ methodology guardrails to stay faithful:
 Parallelism buys **wall-clock**, not tokens: three ~5-minute features finish in
 ~6–7 minutes total instead of ~15 sequential. Verbose by default: one log per
 lane (`<id>-w0…`) plus a main narrative log; replay with `trace`.
+
+## Run result: `outcome`, findings, and rework rounds
+
+**`succeeded` only ever meant "the gate passed".** An orchestrator routing on it
+alone ships a proposal the reviewer rejected, and a `--no-review` run reads as
+approved when nobody approved anything. Every run now states an `outcome`, in
+the prose summary and in the `--json` envelope:
+
+| `outcome` | Meaning |
+|---|---|
+| `passed_approved` | Gate passed and the reviewer approved. The only state `--auto-settle` accepts. |
+| `passed_rejected` | Gate passed, reviewer REJECTED. The proposal stays retained; findings are open. |
+| `passed_unreviewed` | Gate passed and nobody approved (`--no-review`, `--provider static`, or an unreadable verdict). |
+| `failed` | The gate never passed. |
+| `blocked` | The cycle stopped for something iterating cannot fix (an identical proposal again, a rejection with no actionable finding). `blocked_reason` says which. |
+
+**Findings ledger.** Every issue the reviewer raises gets a stable id and stays
+in the ledger until it leaves through a terminal state: `fixed` (the reviewer
+stopped raising it), `blocked` or `refused` (both demand a reason). The ledger
+prints at the end of every run **without anyone having to ask**, and ships in
+`--json` as `findings`. Severity is stripped before hashing the id on purpose:
+re-labelling a finding from HIGH to MEDIUM is not a fix, and a ledger keyed on
+the raw text would read the re-labelled text as a new problem while quietly
+closing the original.
+
+**`--review-rounds N`.** Gate green plus reviewer REJECTED used to end the cycle
+right there: the proposal stayed retained and the objections went nowhere. With
+`N > 1` the open findings become the next pass's guidance and the worker tries
+again.
+
+```bash
+shepherd-dev run "add pagination" --repo ~/projects/my-app --review-rounds 3
+```
+
+- **Two separate budgets.** Attempts absorb *failures* (a broken run, a policy
+  violation, a red suite); rounds absorb *objections*. Each round carries its
+  own `--max-attempts`, because the run that failed the gate twice is exactly
+  the one that most needs to act on the reviewer.
+- **Capped at 5**, the same number and the same reasoning as runN: a
+  pre-approved allowance is delegated authority; an open-ended loop against a
+  fixed pass criterion is just more chances to game it.
+- **Stops early** when the rejection carries no actionable finding (`blocked`),
+  or when the worker hands back the same proposal byte for byte.
+- **Never settles on its own.** An extra round creates no new settlement
+  authority: accepting is still yours.
+- **Refused rather than ignored**: `N > 1` does not combine with `--no-review`,
+  `--provider static`, or `--best-of` (which samples candidates from one state
+  instead of iterating one).
+- **Cost of opting in**: reworking discards the rejected proposal, same as a
+  gate failure. If the rework round produces nothing that passes, you no longer
+  have that proposal. Default 1 keeps the previous behaviour byte for byte.
+
+The trace shows the rounds: `↻ rework round 2/3 — 4 open findings`, and
+`⏹ rework stopped: <reason>` when the loop gives up.
+
+**An identical proposal ends the loop.** If an attempt hands back exactly the
+files of the previous one, the feedback did not land: re-judging would spend the
+rest of the budget to reach the same verdict, and the run would report
+"attempts exhausted" as though the task were hard rather than the loop stuck. It
+now stops immediately, before the gate, with `outcome: blocked` naming the
+attempts.
 
 ## Best-of-N
 
