@@ -1,0 +1,14 @@
+{
+  "name": "shepherd-dev",
+  "version": "0.1.26",
+  "description": "Supervised AI development via Shepherd (arXiv 2605.10913): sandboxed workers, deterministic test gate, skeptical reviewer, human-only settlement. Ships the shepherd-dev usage skill and the /shepherd-dev:run, run2, settle, settle-par, init, optimize commands.",
+  "author": { "name": "Andre Fogelman" },
+  "homepage": "https://github.com/andrefogelman/shepherd",
+  "interface": {
+    "displayName": "shepherd-dev",
+    "shortDescription": "Supervised AI development: sandboxed workers + test gate + human-only settlement"
+  },
+  "skills": ["./skills/"],
+  "commands": ["./commands/"],
+  "skillInstructions": "Adaptação Kimi Code: a skill cita ${CLAUDE_PLUGIN_ROOT}; neste ambiente o diretório do plugin é ~/.kimi-code/plugins/managed/shepherd-dev (a variável KIMI_PLUGIN_ROOT também aponta para lá em hooks). O CLI shepherd-dev normalmente já está instalado (uv tool install git+https://github.com/andrefogelman/shepherd.git); rode o bootstrap scripts/bootstrap.sh apenas se `command -v shepherd-dev` falhar."
+}
