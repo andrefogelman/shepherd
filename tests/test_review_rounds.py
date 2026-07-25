@@ -112,8 +112,9 @@ class DevelopReworkLoopTests(unittest.TestCase):
     """develop() driven by fakes: the substrate is stubbed, the loop is real."""
 
     def _run(self, *, verdicts, review_rounds=1, max_attempts=3, gate_passes=None,
-             review_error=False):
-        """verdicts: approved flag + issues per review call. gate_passes: per attempt."""
+             review_error=False, on_review=None, reporter=None):
+        """verdicts: (approved, issues[, resolved]) per review call. gate_passes:
+        per attempt. on_review: called with each review call's kwargs."""
         from shepherd_dev import supervisor as sup
 
         calls = {"worker": 0, "review": 0, "gates": [], "discards": 0, "guidance": []}
@@ -160,10 +161,17 @@ class DevelopReworkLoopTests(unittest.TestCase):
         def _review(workspace, review_task, **kw):
             i = calls["review"]
             calls["review"] += 1
+            if on_review is not None:
+                on_review(kw)
             if review_error:
                 return sup.ReviewVerdict(approved=False, summary="", error="unreadable")
-            approved, issues = verdicts[i]
-            return sup.ReviewVerdict(approved=approved, summary="s", issues=list(issues))
+            approved, issues, *rest = verdicts[i]
+            return sup.ReviewVerdict(
+                approved=approved,
+                summary="s",
+                issues=list(issues),
+                resolved=list(rest[0]) if rest else [],
+            )
 
         orig = (sup.read_changeset_entries, sup._run_gate, sup.run_review, sup._start_gate_warmup)
         sup.read_changeset_entries = _read_entries
@@ -175,6 +183,7 @@ class DevelopReworkLoopTests(unittest.TestCase):
                 _Workspace(), object(), repo=object(), repo_root=Path("/r"),
                 feature="add X", test_cmd="pytest -q", review_task=object(),
                 max_attempts=max_attempts, review_rounds=review_rounds,
+                **({"reporter": reporter} if reporter is not None else {}),
             )
         finally:
             (sup.read_changeset_entries, sup._run_gate, sup.run_review,
@@ -216,14 +225,43 @@ class DevelopReworkLoopTests(unittest.TestCase):
         self.assertEqual(report.final_run_ref, "run-2")  # nothing thrown away at the end
 
     def test_the_ledger_records_every_round(self):
+        # Round 2 stops mentioning issue B without saying it is gone. That is
+        # not evidence of a fix — most often it is a reword — so B stays open.
         report, _ = self._run(
             verdicts=[(False, ["issue A", "issue B"]), (False, ["issue A"])], review_rounds=2
         )
         assert report.ledger is not None
         by_id = {f.id: f for f in report.ledger.findings}
-        self.assertEqual(by_id[finding_id("issue B")].state, "fixed")
+        self.assertEqual(by_id[finding_id("issue B")].state, "open")
         self.assertEqual(by_id[finding_id("issue A")].state, "open")
         self.assertEqual(by_id[finding_id("issue A")].rounds, [1, 2])
+
+    def test_a_finding_the_reviewer_reports_resolved_closes(self):
+        # The whole wiring end to end: REVIEW.json's `resolved` reaches the
+        # ledger and is the thing that closes an item short of approval.
+        report, _ = self._run(
+            verdicts=[
+                (False, ["issue A", "issue B"]),
+                (False, ["issue A"], [finding_id("issue B")]),
+            ],
+            review_rounds=2,
+        )
+        assert report.ledger is not None
+        by_id = {f.id: f for f in report.ledger.findings}
+        self.assertEqual(by_id[finding_id("issue B")].state, "fixed")
+        self.assertEqual(by_id[finding_id("issue A")].state, "open")
+
+    def test_the_second_round_reviewer_is_handed_the_open_findings(self):
+        seen: list[str] = []
+        report, _ = self._run(
+            verdicts=[(False, ["issue A"]), (False, ["issue A"])],
+            review_rounds=2,
+            on_review=lambda kw: seen.append(kw.get("findings", "")),
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], "")  # round 1 has no prior findings
+        self.assertIn(finding_id("issue A"), seen[1])
+        self.assertIn("issue A", seen[1])
 
     def test_approval_never_spends_a_rework_round(self):
         report, calls = self._run(verdicts=[(True, [])], review_rounds=5)
@@ -264,6 +302,86 @@ class DevelopReworkLoopTests(unittest.TestCase):
         self.assertEqual(report.outcome, "blocked")
         assert report.blocked_reason is not None
         self.assertIn("no actionable", report.blocked_reason)
+
+
+class TheReviewerSeesTheOpenFindings(unittest.TestCase):
+    """Round 2's reviewer used to start blank, so it re-derived round 1's
+    objections and inevitably reworded them — which read as one finding fixed
+    and one newly found. It is handed the open list and answers about it."""
+
+    def test_the_prompt_teaches_the_id_protocol(self):
+        text = get_prompt("review")
+        self.assertIn("findings", text)
+        self.assertIn("resolved", text)
+        self.assertIn("square brackets", text)
+
+    def test_the_review_task_accepts_the_findings_argument(self):
+        import inspect
+
+        from shepherd_dev.tasks import review
+
+        target = getattr(review, "__wrapped__", None) or getattr(review, "fn", None) or review
+        try:
+            params = inspect.signature(target).parameters
+        except (TypeError, ValueError):
+            self.skipTest("task object exposes no inspectable signature")
+        self.assertIn("findings", params, "the reviewer cannot be handed the open list")
+
+    def _drive_review(self, review_json: bytes, findings: str):
+        """run_review against a stub workspace, returning (args, verdict)."""
+        import shepherd_dev.supervisor as sup
+
+        captured: dict = {}
+
+        class _Output:
+            def changeset(self):
+                return {"REVIEW.json": review_json}
+
+            def discard(self):
+                pass
+
+        class _Run:
+            def output(self):
+                return _Output()
+
+        class _Workspace:
+            class tasks:
+                @staticmethod
+                def register(task):
+                    pass
+
+            def git_repo(self):
+                return object()
+
+            def run(self, task, **kw):
+                captured.update(kw)
+                return _Run()
+
+        orig = sup.read_changeset_entries
+        sup.read_changeset_entries = lambda cs: dict(cs)
+        try:
+            verdict = sup.run_review(
+                _Workspace(), object(), feature="add X", diff_text="d", findings=findings
+            )
+        finally:
+            sup.read_changeset_entries = orig
+        return captured.get("args", {}), verdict
+
+    def test_the_open_findings_reach_the_reviewer(self):
+        args, _ = self._drive_review(b'{"approved": true, "summary": "s"}', "- [abc123abc123] cache")
+        self.assertEqual(args.get("findings"), "- [abc123abc123] cache")
+
+    def test_a_resolved_list_is_read_off_the_verdict(self):
+        _, verdict = self._drive_review(
+            b'{"approved": false, "summary": "s", "issues": ["x"], "resolved": ["abc123abc123"]}',
+            "",
+        )
+        self.assertEqual(verdict.resolved, ["abc123abc123"])
+
+    def test_a_verdict_without_resolved_is_still_readable(self):
+        # Every reviewer predating the field, and any that just omits it.
+        _, verdict = self._drive_review(b'{"approved": true, "summary": "s"}', "")
+        self.assertEqual(verdict.resolved, [])
 
 
 if __name__ == "__main__":

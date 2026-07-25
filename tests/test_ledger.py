@@ -88,18 +88,20 @@ class LedgerRoundTests(unittest.TestCase):
         self.assertEqual(led.findings[0].rounds, [1, 2])
         self.assertEqual(led.findings[0].state, "open")
 
-    def test_issue_absent_from_a_later_review_is_fixed(self):
+    def test_issue_absent_from_a_rejection_stays_open(self):
+        # A rejecting reviewer that stops mentioning an item has not said it is
+        # fixed — most often it reworded it. Silence closes nothing.
         led = Ledger()
         led.record_round(1, ["issue A", "issue B"])
         led.record_round(2, ["issue B"])
         by_id = {f.id: f for f in led.findings}
-        self.assertEqual(by_id[finding_id("issue A")].state, "fixed")
+        self.assertEqual(by_id[finding_id("issue A")].state, "open")
         self.assertEqual(by_id[finding_id("issue B")].state, "open")
 
     def test_a_fixed_finding_that_comes_back_reopens(self):
         led = Ledger()
         led.record_round(1, ["issue A"])
-        led.record_round(2, [])
+        led.record_round(2, [], approved=True)
         self.assertEqual(led.findings[0].state, "fixed")
         led.record_round(3, ["issue A"])
         self.assertEqual(led.findings[0].state, "open")
@@ -144,15 +146,107 @@ class LedgerClosureTests(unittest.TestCase):
         self.assertTrue(led.has_open())
         led.close(finding_id("issue A"), "refused", reason="human accepts the risk")
         self.assertEqual([f.text for f in led.open_findings()], ["issue B"])
-        led.record_round(2, [])
+        led.record_round(2, [], approved=True)
         self.assertFalse(led.has_open())
+
+
+class ClosureNeedsEvidenceTests(unittest.TestCase):
+    """A finding closes on evidence, never on the reviewer having gone quiet.
+
+    Closing by absence assumes the later reviewer knew what the earlier one
+    said. It does not, unless it is told — and being a language model it
+    restates the same objection in new words, which reads as one item fixed
+    plus one new item found.
+    """
+
+    #: The pair that exposed it, from a real run: same objection, same rule,
+    #: two roundings of the words. Kept verbatim so a future normalization
+    #: that claims to handle rewording is measured against the real thing.
+    ROUND_1 = (
+        'CONVENTIONS.md "Each module ships its own test file": new module '
+        "duration.py is not accompanied by a test file exercising every "
+        "documented behavior."
+    )
+    ROUND_2 = (
+        "BLOCKING — CONVENTIONS.md 'Each module ships its own test file': new "
+        "module duration.py is not covered by tests."
+    )
+
+    def test_the_observed_reword_does_not_read_as_one_fixed_plus_one_new(self):
+        led = Ledger()
+        led.record_round(1, [self.ROUND_1])
+        led.record_round(2, [self.ROUND_2])
+        self.assertEqual(
+            [f.state for f in led.findings],
+            ["open", "open"],
+            "a reworded objection closed the original as fixed",
+        )
+
+    def test_a_finding_re_raised_by_id_stays_one_finding(self):
+        # The mechanism that makes the round trail true: the reviewer is handed
+        # the open findings with their ids and points at one instead of
+        # describing it again.
+        led = Ledger()
+        led.record_round(1, [self.ROUND_1])
+        fid = finding_id(self.ROUND_1)
+        led.record_round(2, [f"[{fid}] {self.ROUND_2}"])
+        self.assertEqual(len(led.findings), 1)
+        self.assertEqual(led.findings[0].state, "open")
+        self.assertEqual(led.findings[0].rounds, [1, 2])
+
+    def test_a_finding_the_reviewer_reports_resolved_is_fixed(self):
+        led = Ledger()
+        led.record_round(1, ["issue A", "issue B"])
+        led.record_round(2, ["issue B"], resolved=[finding_id("issue A")])
+        by_id = {f.id: f for f in led.findings}
+        self.assertEqual(by_id[finding_id("issue A")].state, "fixed")
+        self.assertEqual(by_id[finding_id("issue B")].state, "open")
+
+    def test_approval_closes_whatever_is_still_open(self):
+        # Approval IS the explicit judgement: the reviewer saw the open list
+        # and signed the change off anyway.
+        led = Ledger()
+        led.record_round(1, ["issue A", "issue B"])
+        led.record_round(2, [], approved=True)
+        self.assertEqual({f.state for f in led.findings}, {"fixed"})
+
+    def test_a_re_raise_beats_a_resolved_claim_for_the_same_finding(self):
+        # Contradictory verdict; the unsafe reading is the one that closes.
+        led = Ledger()
+        led.record_round(1, ["issue A"])
+        fid = finding_id("issue A")
+        led.record_round(2, [f"[{fid}] still there"], resolved=[fid])
+        self.assertEqual(led.findings[0].state, "open")
+
+    def test_resolved_does_not_overwrite_a_terminal_finding(self):
+        led = Ledger()
+        led.record_round(1, ["issue A"])
+        fid = finding_id("issue A")
+        led.close(fid, "refused", reason="human accepts the risk")
+        led.record_round(2, [], resolved=[fid])
+        self.assertEqual(led.findings[0].state, "refused")
+
+    def test_an_unknown_resolved_id_is_ignored(self):
+        led = Ledger()
+        led.record_round(1, ["issue A"])
+        led.record_round(2, ["issue A"], resolved=["deadbeefcafe"])
+        self.assertEqual(led.findings[0].state, "open")
+
+    def test_an_unknown_id_prefix_falls_back_to_the_text_identity(self):
+        # A hallucinated id must not mint a finding keyed on the hallucination,
+        # or the same text next round becomes yet another new item.
+        led = Ledger()
+        led.record_round(1, ["[deadbeefcafe] issue A"])
+        self.assertEqual(led.findings[0].id, finding_id("issue A"))
+        led.record_round(2, ["issue A"])
+        self.assertEqual(len(led.findings), 1)
 
 
 class LedgerRenderTests(unittest.TestCase):
     def test_render_shows_state_round_trail_and_reason(self):
         led = Ledger()
         led.record_round(1, ["issue A", "issue B"])
-        led.record_round(2, ["issue B"])
+        led.record_round(2, ["issue B"], resolved=[finding_id("issue A")])
         led.close(finding_id("issue B"), "blocked", reason="needs a backend change")
         text = led.render()
         self.assertIn("issue A", text)

@@ -9,6 +9,17 @@ survives across rounds, and leaves only through a terminal state.
 Severity is stripped before hashing on purpose. Re-labelling a finding from
 HIGH to MEDIUM is not a fix, and a ledger keyed on the raw text would treat the
 re-labelled text as a brand new problem while quietly closing the original.
+
+Rewording is the same hazard one step up, and text normalization cannot reach
+it: two sentences describing one problem in different words are different
+sentences, and matching them by similarity would eventually fold two genuinely
+different problems into one and close a real finding in silence — strictly
+worse than the failure it repairs. So identity is not guessed. The reviewer is
+handed the open findings with their ids and answers about them directly: an
+item it still sees is re-raised under its id, an item it has verified as gone
+goes in `resolved`. Absence closes nothing on a rejection, because a rejecting
+reviewer that stopped mentioning something has told us nothing about it.
+Approval closes the rest — that one IS an explicit judgement over the change.
 """
 
 from __future__ import annotations
@@ -39,9 +50,28 @@ _SEVERITY_PREFIX = re.compile(
 )
 
 
+#: How the reviewer points at an existing finding instead of restating it:
+#: a bracketed id at the very start of the issue text.
+_ID_PREFIX = re.compile(r"^\s*[\[(]([0-9a-f]{12})[\])]\s*")
+
+
+def split_finding_id(text: str) -> tuple[str | None, str]:
+    """Separate a leading `[id]` reference from the issue text behind it.
+
+    The id is only a claim at this point — the caller checks it against the
+    ledger, because a model can produce twelve plausible hex characters that
+    match nothing. An unrecognised one falls back to the text identity, so a
+    hallucinated reference never mints a finding keyed on the hallucination.
+    """
+    match = _ID_PREFIX.match(text or "")
+    if match is None:
+        return None, text or ""
+    return match.group(1), (text or "")[match.end() :]
+
+
 def normalize_finding(text: str) -> str:
     """Identity of a finding: its problem statement, minus label and shape."""
-    stripped = _SEVERITY_PREFIX.sub("", text or "", count=1)
+    stripped = _SEVERITY_PREFIX.sub("", split_finding_id(text)[1], count=1)
     return re.sub(r"\s+", " ", stripped).strip().strip(".;:!").lower()
 
 
@@ -87,16 +117,30 @@ class Ledger:
     def findings(self) -> list[Finding]:
         return list(self._by_id.values())
 
-    def record_round(self, number: int, issues: list[str] | None) -> None:
+    def record_round(
+        self,
+        number: int,
+        issues: list[str] | None,
+        resolved: list[str] | None = None,
+        approved: bool = False,
+    ) -> None:
         """Fold one review's issues in.
 
-        Raised again: still open, trail grows. Raised before and absent now:
-        the reviewer stopped objecting, so `fixed`. Already terminal: left
+        Raised again — by id, or by matching text: still open, trail grows.
+        Named in `resolved`: the reviewer checked it and the problem is gone,
+        so `fixed`. Merely absent from a rejection: still open, because silence
+        is not a verdict. `approved` closes what is left, that being the one
+        judgement that covers the change as a whole. Already terminal: left
         alone — a later review cannot undo a judgement someone recorded.
+
+        A finding named in both `issues` and `resolved` stays open. The verdict
+        contradicts itself and only one of the two readings can hide a real
+        problem.
         """
         seen: set[str] = set()
         for text in issues or []:
-            fid = finding_id(text)
+            ref, _ = split_finding_id(text)
+            fid = ref if ref in self._by_id else finding_id(text)
             seen.add(fid)
             existing = self._by_id.get(fid)
             if existing is None:
@@ -107,9 +151,16 @@ class Ledger:
             existing.state = "open"
             if number not in existing.rounds:
                 existing.rounds.append(number)
-        for fid, finding in self._by_id.items():
-            if fid not in seen and finding.state == "open" and finding.rounds:
+        for fid in resolved or []:
+            finding = self._by_id.get(fid)
+            if finding is None or fid in seen:
+                continue  # unknown id, or contradicted by a re-raise
+            if finding.state == "open" and finding.rounds:
                 finding.state = "fixed"
+        if approved:
+            for finding in self._by_id.values():
+                if finding.state == "open" and finding.rounds:
+                    finding.state = "fixed"
 
     def close(self, finding_id_: str, state: str, reason: str | None = None) -> Finding:
         if state not in TERMINAL_STATES:

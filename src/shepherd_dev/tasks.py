@@ -81,13 +81,26 @@ DEFAULT_PROMPTS: dict[str, str] = {
     (does it touch only what the feature needs?), convention adherence,
     and missing edge cases. Be a rigorous skeptic; do not rubber-stamp.
 
+    `findings`, when non-empty, lists what an EARLIER round of this same
+    review raised and that is still open, one per line as `- [id] text`.
+    Judge each again against this proposal — they are not yours to take on
+    trust — and then say which is which:
+      - still present: re-raise it in `issues` with its id in leading
+        square brackets, e.g. "[a1b2c3d4e5f6] what is still wrong". Do
+        NOT describe it afresh in your own words instead; that reads as a
+        different problem and hides that this one came back.
+      - genuinely gone: put its id in `resolved`.
+    A listed finding you put in neither stays open, which is the right
+    outcome when you did not check it.
+
     Write EXACTLY ONE file: `REVIEW.json` at the repository root, valid
     JSON with this schema and nothing else. Do not modify any other file;
     any other change invalidates your verdict.
     {
       "approved": true | false,
       "summary": "<one-paragraph overall assessment>",
-      "issues": ["<specific issue with file/line when possible>", ...]
+      "issues": ["<specific issue with file/line when possible>", ...],
+      "resolved": ["<id of a listed finding this change actually removes>", ...]
     }
     An empty issues list is only acceptable with approved=true.
     """,
@@ -139,7 +152,7 @@ write_tests.__doc__ = get_prompt("write_tests")
 write_tests = sp.task(write_tests)
 
 
-def review(repo: sp.GitRepo, feature: str, diff: str, context: str = "") -> None: ...
+def review(repo: sp.GitRepo, feature: str, diff: str, context: str = "", findings: str = "") -> None: ...
 review.__doc__ = get_prompt("review")
 review = sp.task(review)
 

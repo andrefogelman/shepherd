@@ -58,6 +58,9 @@ class ReviewVerdict:
     approved: bool
     summary: str
     issues: list[str] = field(default_factory=list)
+    #: ids of previously-open findings this review checked and found gone —
+    #: the only thing that closes one short of approval (see ledger.py)
+    resolved: list[str] = field(default_factory=list)
     error: str | None = None  # review ran but verdict could not be obtained
 
 
@@ -590,8 +593,14 @@ def run_review(
     provider: str = "claude",
     placement: str = "jail",
     context_pack: str | None = None,
+    findings: str = "",
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
+
+    `findings` carries the still-open findings of earlier rounds, so this
+    reviewer answers about them by id instead of re-deriving the same
+    objections in fresh words — which is what let a re-raised finding read as
+    one item closed and one item newly found (see ledger.py).
 
     v0.2 lane limits (bindings need disjoint roots; multi-binding runs take no
     execution provider) rule out a syscall-read-only reviewer, so isolation is
@@ -609,7 +618,12 @@ def run_review(
             repo=workspace.git_repo(),
             placement=placement,
             runtime={"provider": provider},
-            args={"feature": feature, "diff": diff_text, "context": context_pack or ""},
+            args={
+                "feature": feature,
+                "diff": diff_text,
+                "context": context_pack or "",
+                "findings": findings,
+            },
         )
     except Exception as exc:
         return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
@@ -639,6 +653,7 @@ def run_review(
         approved=bool(data.get("approved", False)),
         summary=str(data.get("summary", "")),
         issues=[str(i) for i in data.get("issues", [])],
+        resolved=[str(i) for i in (data.get("resolved") or [])],
     )
 
 
@@ -1110,6 +1125,7 @@ def develop(
                 provider=provider,
                 placement=placement,
                 context_pack=context_pack,
+                findings=ledger.guidance() if ledger is not None else "",
             )
         report.review = verdict
         if verdict is not None:
@@ -1117,9 +1133,17 @@ def develop(
             for issue in verdict.issues or []:
                 _emit("review.issue", {"text": str(issue)}, attempt=number)
             if not verdict.error and ledger is not None:
-                # Folded in even on approval: an approving verdict raises
-                # nothing, which is exactly what closes the earlier findings.
-                ledger.record_round(round_no, verdict.issues)
+                # Folded in even on approval: approval is the judgement that
+                # closes whatever the reviewer left open. Short of it, only an
+                # explicit `resolved` closes anything — a rejecting reviewer
+                # that merely stopped mentioning an item has said nothing
+                # about it, and usually just reworded it.
+                ledger.record_round(
+                    round_no,
+                    verdict.issues,
+                    resolved=verdict.resolved,
+                    approved=verdict.approved,
+                )
         if verdict is None or verdict.error or verdict.approved:
             return report
 
