@@ -1,7 +1,10 @@
 # A tag that carries no release is a version nobody can see: the bump lands on
 # main, the installer keeps working, and the Releases page stays empty. So the
-# tag push is what publishes. Nothing here is checked out — `gh` talks to the
-# API, and the notes are generated server-side from the history behind the tag.
+# tag push is what publishes.
+#
+# The suite runs first and the publish waits on it. A tool whose whole thesis is
+# that a change passes a real test gate before a human is asked to settle it has
+# no business shipping a version it never ran.
 name: release
 
 on:
@@ -13,9 +16,29 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      # 3.11 is the floor in pyproject — testing the floor is what catches
+      # syntax that only a newer interpreter would have accepted.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the package and its dependencies
+        run: pip install -e .
+
+      - name: Run the suite
+        run: python -m unittest discover -s tests
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      # Nothing is checked out here — `gh` talks to the API, and the notes are
+      # generated server-side from the history behind the tag.
       - name: Publish the release for this tag
         env:
           GH_TOKEN: ${{ github.token }}
