@@ -9,6 +9,7 @@ stays retained; settlement (select/apply/discard) is always a human decision.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -176,6 +177,49 @@ def read_changeset_entries(changeset) -> dict[str, bytes]:
         if entry is not None:
             entries[rel] = entry[0]
     return entries
+
+
+#: Environment the gate must NOT inherit (#4). The gate exists to judge the
+#: PROPOSAL's tree; these point the child's interpreter and test harness back at
+#: the supervisor's own checkout — PYTHONPATH puts our source on the suite's
+#: sys.path, VIRTUAL_ENV/PYTHONHOME redirect the interpreter, and the PYTEST_*
+#: pair leaks the state of whatever pytest run launched us into the child's.
+#: Deliberately narrow: a blanket scrub would take PATH/HOME and the project's
+#: own configuration with it, and break every real gate.
+GATE_ENV_STRIP = frozenset({
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "VIRTUAL_ENV",
+    "PYTEST_CURRENT_TEST",
+    "PYTEST_ADDOPTS",
+    "__PYVENV_LAUNCHER__",
+})
+
+#: Comma-separated overrides for the list above, for a gate that genuinely needs
+#: an inherited PYTHONPATH (KEEP) or a project whose own variables must not
+#: cross into the sandbox (STRIP).
+_GATE_ENV_KEEP_VAR = "SHEPHERD_DEV_GATE_ENV_KEEP"
+_GATE_ENV_STRIP_VAR = "SHEPHERD_DEV_GATE_ENV_STRIP"
+
+
+def _env_list(name: str) -> list[str]:
+    return [p.strip() for p in os.environ.get(name, "").split(",") if p.strip()]
+
+
+def gate_env(
+    base: dict[str, str] | None = None,
+    *,
+    keep: list[str] | None = None,
+    strip: list[str] | None = None,
+) -> dict[str, str]:
+    """The environment a gate subprocess runs under: `base` (default: ours)
+    minus GATE_ENV_STRIP. `keep` re-admits entries, `strip` removes more; both
+    default to the SHEPHERD_DEV_GATE_ENV_{KEEP,STRIP} env lists."""
+    src = dict(os.environ if base is None else base)
+    kept = set(keep if keep is not None else _env_list(_GATE_ENV_KEEP_VAR))
+    dropped = set(GATE_ENV_STRIP | set(strip if strip is not None else _env_list(_GATE_ENV_STRIP_VAR))) - kept
+    return {k: v for k, v in src.items() if k not in dropped}
 
 
 def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> None:
@@ -818,7 +862,8 @@ def _run_gate(
             from .procstream import run_streaming
 
             res = run_streaming(
-                test_cmd, shell=True, cwd=workdir, timeout=timeout, on_line=on_line
+                test_cmd, shell=True, cwd=workdir, timeout=timeout, on_line=on_line,
+                env=gate_env(),
             )
         except OSError as exc:
             return GateResult(False, None, "", infra_error=f"could not run test suite: {exc}")

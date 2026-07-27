@@ -6,6 +6,7 @@ Runnable with: python -m unittest tests.test_gatestream
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,66 @@ from shepherd_dev.events import RunEventLog, gate_line_observer  # noqa: E402
 from shepherd_dev.procstream import run_streaming  # noqa: E402
 from shepherd_dev.remotegate import parse_remote_config, run_remote_gate  # noqa: E402
 from shepherd_dev.supervisor import _run_gate  # noqa: E402
+
+
+class GateEnvIsolation(unittest.TestCase):
+    """#4: the gate judges the PROPOSAL's tree. Inheriting the supervisor's
+    whole environment hands it interpreter state pointing at the supervisor's
+    own checkout — PYTHONPATH/VIRTUAL_ENV/PYTEST_* — so the suite can resolve
+    imports and harness config from outside the tree under test."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="shepherd-gateenv-"))
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_x.py").write_text(
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        pass\n"
+        )
+
+    def _dump_env(self, name: str) -> str:
+        entries = {"tests/test_x.py": (self.repo / "tests" / "test_x.py").read_bytes()}
+        res = _run_gate(self.repo, entries, f'printf "%s" "{name}-<${{{name}:-UNSET}}>"', 60)
+        return res.output_tail
+
+    def test_interpreter_state_is_stripped(self):
+        for var in ("PYTHONPATH", "VIRTUAL_ENV", "PYTHONHOME", "PYTEST_CURRENT_TEST"):
+            with self.subTest(var=var):
+                old = os.environ.get(var)
+                os.environ[var] = "/leaked/from/the/supervisor"
+                try:
+                    self.assertIn(f"{var}-<UNSET>", self._dump_env(var))
+                finally:
+                    if old is None:
+                        os.environ.pop(var, None)
+                    else:
+                        os.environ[var] = old
+
+    def test_ordinary_environment_still_reaches_the_gate(self):
+        # A blanket scrub would break every real gate: PATH, HOME and the
+        # project's own variables must survive.
+        old = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = "postgres://gate"
+        try:
+            self.assertIn("DATABASE_URL-<postgres://gate>", self._dump_env("DATABASE_URL"))
+            self.assertNotIn("PATH-<UNSET>", self._dump_env("PATH"))
+        finally:
+            if old is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = old
+
+    def test_strip_list_is_configurable_in_both_directions(self):
+        from shepherd_dev.supervisor import gate_env
+
+        base = {"PYTHONPATH": "/x", "MY_VAR": "keep", "PATH": "/bin"}
+        self.assertNotIn("PYTHONPATH", gate_env(base))
+        self.assertEqual(gate_env(base)["MY_VAR"], "keep")
+        # opt back in when a gate genuinely needs the parent's PYTHONPATH
+        self.assertEqual(gate_env(base, keep=["PYTHONPATH"])["PYTHONPATH"], "/x")
+        # ...and opt more out
+        self.assertNotIn("MY_VAR", gate_env(base, strip=["MY_VAR"]))
 
 
 class RunStreamingTests(unittest.TestCase):

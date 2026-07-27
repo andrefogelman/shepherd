@@ -32,11 +32,13 @@ def run_streaming(
     cwd=None,
     timeout: float | None = None,
     on_line: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> StreamedResult:
     """Run ``cmd``, streaming each merged output line to ``on_line`` (stripped
     of its newline; callback errors are swallowed). On timeout the process
     GROUP is SIGKILLed and ``timed_out`` is set. Raises OSError only when the
-    command cannot be spawned at all."""
+    command cannot be spawned at all. ``env`` replaces the inherited
+    environment wholesale (None = inherit)."""
     proc = subprocess.Popen(
         cmd,
         shell=shell,
@@ -47,6 +49,7 @@ def run_streaming(
         text=True,
         errors="replace",
         start_new_session=True,
+        env=env,
     )
     lines: list[str] = []
 
