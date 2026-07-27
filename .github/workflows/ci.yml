@@ -1,0 +1,63 @@
+# The suite only ran on whoever's laptop last touched the code. That is how a
+# defect that only reproduces on ONE filesystem reaches main: the stat-based
+# diff fast-path (removed in df1edb4) silently dropped a worker's edit wherever
+# mtime comes off a coarse clock, and passed on APFS every time.
+#
+# So the matrix is the point, not decoration. ubuntu gives coarse mtime (one
+# jiffy) and GNU coreutils; macos gives nanosecond APFS timestamps and BSD
+# userland. The 3.11 floor from pyproject runs alongside a current interpreter,
+# because the floor is what catches syntax a newer one would have accepted.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one platform failing must not hide the other's result
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the package and its dependencies
+        run: pip install -e .
+
+      # PYTHONPATH is unset deliberately: the gate scrubs it (see gate_env),
+      # and a runner that leaked one would be testing something else.
+      - name: Run the suite
+        run: env -u PYTHONPATH python -m unittest discover -s tests -v
+
+  # Timing-sensitive tests pass by luck once. This is the cheap version of the
+  # loop that found the flake: the fast, isolated modules, repeated.
+  repeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: Re-run the timing-sensitive modules
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            echo "── round $i ──"
+            env -u PYTHONPATH python -m unittest \
+              tests.test_diffcollect tests.test_perf tests.test_teepump
+          done
