@@ -118,5 +118,42 @@ class StatusSurvivesADamagedLog(unittest.TestCase):
         self.assertTrue(all(isinstance(r["elapsed_s"], float) for r in rows))
 
 
+class CodexReviewCleansUpItsScratch(unittest.TestCase):
+    def test_a_timeout_does_not_leave_the_temp_file(self):
+        """The old finally only ASSIGNED the path. A review that times out is
+        the one likeliest to be retried, so its leak compounds."""
+        import subprocess
+
+        from shepherd_dev.providers.codex_host import codex_review
+
+        seen: dict = {}
+
+        def timing_out(argv, *, timeout, last_message_path):
+            seen["path"] = last_message_path
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        v = codex_review(
+            Path(mkdtemp()), {"a.py": b"x\n"}, "f",
+            codex_bin="/bin/codex", runner=timing_out,
+        )
+        self.assertIsNotNone(v.error)
+        self.assertFalse(Path(seen["path"]).exists(), "scratch file leaked")
+
+    def test_a_launch_failure_does_not_leave_it_either(self):
+        from shepherd_dev.providers.codex_host import codex_review
+
+        seen: dict = {}
+
+        def no_binary(argv, *, timeout, last_message_path):
+            seen["path"] = last_message_path
+            raise OSError("no such file")
+
+        codex_review(
+            Path(mkdtemp()), {"a.py": b"x\n"}, "f",
+            codex_bin="/bin/codex", runner=no_binary,
+        )
+        self.assertFalse(Path(seen["path"]).exists(), "scratch file leaked")
+
+
 if __name__ == "__main__":
     unittest.main()

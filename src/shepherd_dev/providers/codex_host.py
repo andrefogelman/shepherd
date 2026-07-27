@@ -97,23 +97,26 @@ def codex_review(
     if model:
         argv += ["-m", model]
     argv.append(_review_prompt(entries, feature))
+    # One finally for the whole body: the old one only ASSIGNED cleanup_path,
+    # so the timeout and launch-failure returns left the temp file behind —
+    # and a run that times out is exactly the one likeliest to repeat.
+    cleanup_path = Path(last_message_path)
     try:
-        code, tail = run(argv, timeout=max(60, budget_seconds), last_message_path=last_message_path)
-    except subprocess.TimeoutExpired:
-        return ReviewVerdict(False, "codex review timed out", [], error=f"timeout after {budget_seconds}s")
-    except OSError as exc:
-        return ReviewVerdict(False, "codex review could not launch", [], error=str(exc))
-    finally:
-        cleanup_path = Path(last_message_path)
-    if code != 0:
-        cleanup_path.unlink(missing_ok=True)
-        return ReviewVerdict(False, "codex review failed", [], error=f"codex exited {code}: {tail[-300:]}")
-    try:
-        raw = cleanup_path.read_text()
-    except OSError as exc:
-        return ReviewVerdict(False, "codex review output unreadable", [], error=str(exc))
+        try:
+            code, tail = run(argv, timeout=max(60, budget_seconds), last_message_path=last_message_path)
+        except subprocess.TimeoutExpired:
+            return ReviewVerdict(False, "codex review timed out", [], error=f"timeout after {budget_seconds}s")
+        except OSError as exc:
+            return ReviewVerdict(False, "codex review could not launch", [], error=str(exc))
+        if code != 0:
+            return ReviewVerdict(False, "codex review failed", [], error=f"codex exited {code}: {tail[-300:]}")
+        try:
+            raw = cleanup_path.read_text()
+        except OSError as exc:
+            return ReviewVerdict(False, "codex review output unreadable", [], error=str(exc))
     finally:
         cleanup_path.unlink(missing_ok=True)
+
     verdict = _parse_verdict(raw)
     if verdict is None:
         return ReviewVerdict(
