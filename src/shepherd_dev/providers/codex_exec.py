@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
-from .hosted import ExecResult, HostedExecutor
+from .hosted import ExecResult, HostedExecutor, run_cli_worker
 
 DEFAULT_SANDBOX = "workspace-write"
 
@@ -106,29 +105,7 @@ class CliCodexExecutor:
                 "codex CLI not found — install @openai/codex or set SHEPHERD_DEV_CODEX_CMD",
             )
         argv = self.build_argv(clone, prompt)
-        started = time.monotonic()
-        try:
-            proc = subprocess.run(
-                argv,
-                cwd=str(clone),
-                capture_output=True,
-                text=True,
-                timeout=max(30, budget_seconds),
-                env={**os.environ, "CI": os.environ.get("CI", "1")},
-            )
-        except subprocess.TimeoutExpired:
-            return ExecResult(
-                False,
-                f"codex worker timed out after {budget_seconds}s",
-                round(time.monotonic() - started, 1),
-            )
-        except OSError as exc:
-            return ExecResult(False, f"could not launch codex: {exc}", round(time.monotonic() - started, 1))
-        tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-4000:]
-        duration = round(time.monotonic() - started, 1)
-        if proc.returncode != 0:
-            return ExecResult(False, f"codex exited {proc.returncode}", duration, tail)
-        return ExecResult(True, None, duration, tail)
+        return run_cli_worker(argv, clone, budget_seconds=budget_seconds, label="codex")
 
 
 def build_executor(

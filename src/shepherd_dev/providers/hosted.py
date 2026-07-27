@@ -9,8 +9,10 @@ the same `.shepherd-proposals/` stage as run2/best-of (`settle-par`).
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
@@ -120,6 +122,51 @@ class HostedReport:
                 f"  shepherd-dev settle-par {self.proposal_id}{repo_arg} --reject   # discard",
             ]
         return "\n".join(lines)
+
+
+#: Floor on a hosted worker's wall clock. A CLI agent spends the first seconds
+#: booting node and its MCP servers, so a tiny budget would reap it mid-startup
+#: and report a timeout that says nothing about the model.
+MIN_WORKER_TIMEOUT = 30
+
+
+def run_cli_worker(
+    argv: list[str], clone: Path, *, budget_seconds: int, label: str
+) -> ExecResult:
+    """Run an agent CLI on `clone` under a budget, reaping its WHOLE tree.
+
+    subprocess.run(timeout=...) kills only the direct child, so the CLI's own
+    subprocesses — node, MCP servers, whatever tools it spawned — survive as
+    orphans holding CPU, memory and API sessions with nothing left to reap
+    them. run_streaming puts the child in its own session and SIGKILLs the
+    process GROUP on timeout: the same guarantee the claude path gets from the
+    #A killtree perl, which the hosted path never inherited.
+
+    Shared by every hosted provider, so a new one (cursor, …) gets it for free.
+    """
+    from ..procstream import run_streaming
+
+    started = time.monotonic()
+    try:
+        res = run_streaming(
+            argv,
+            cwd=str(clone),
+            timeout=max(MIN_WORKER_TIMEOUT, budget_seconds),
+            env={**os.environ, "CI": os.environ.get("CI", "1")},
+        )
+    except OSError as exc:
+        return ExecResult(
+            False, f"could not launch {label}: {exc}", round(time.monotonic() - started, 1)
+        )
+    duration = round(time.monotonic() - started, 1)
+    tail = res.output[-4000:]
+    if res.timed_out:
+        return ExecResult(
+            False, f"{label} worker timed out after {budget_seconds}s", duration, tail
+        )
+    if res.returncode != 0:
+        return ExecResult(False, f"{label} exited {res.returncode}", duration, tail)
+    return ExecResult(True, None, duration, tail)
 
 
 def clone_repo(repo_root: Path, *, prefix: str = "shepherd-hosted-") -> Path:
