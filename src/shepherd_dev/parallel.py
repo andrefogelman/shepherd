@@ -34,8 +34,12 @@ from .supervisor import (
     develop,
     materialize_into,
     run_review,
+    start_local_gate_stage,
 )
 from .tasks import implement
+
+#: Module-level seam so tests can observe/replace the shared-stage start.
+_start_local_gate_stage = start_local_gate_stage
 
 # Back-compat for tests/imports that used the private name on this module.
 _stage_proposal = stage_proposal
@@ -211,8 +215,13 @@ def develop_parallel(
     main_log = event_log_main
     clones: list[Path] = []
 
+    gate_stage = None
     try:
         clones = _clone_many(repo_root, 2)
+        # A3: one pristine base, built in the background while both workers run,
+        # shared by the combined gate and every repair round. Without it each of
+        # those gates paid a full tree copy of the repo.
+        gate_stage = _start_local_gate_stage(repo_root, test_cmd)
 
         notes = [
             (
@@ -330,7 +339,8 @@ def develop_parallel(
                    {"passed": g.passed, "exit_code": g.exit_code, "infra_error": g.infra_error})
 
         _pemit(main_log, "phase.start", {"label": "combined gate"})
-        gate = _run_gate(repo_root, combined, test_cmd, gate_timeout, on_line=gate_on_line)
+        gate = _run_gate(repo_root, combined, test_cmd, gate_timeout,
+                         on_line=gate_on_line, stage=gate_stage, keep_stage=True)
         _emit_gate(gate)
         while not gate.passed and not gate.infra_error and report.repairs < max_repairs:
             report.repairs += 1
@@ -365,7 +375,8 @@ def develop_parallel(
             if not (repair.succeeded and repair.entries):
                 break
             combined.update(repair.entries)
-            gate = _run_gate(repo_root, combined, test_cmd, gate_timeout, on_line=gate_on_line)
+            gate = _run_gate(repo_root, combined, test_cmd, gate_timeout,
+                         on_line=gate_on_line, stage=gate_stage, keep_stage=True)
             _emit_gate(gate)
         report.combined_gate = gate
         if not gate.passed:
@@ -405,6 +416,8 @@ def develop_parallel(
         report.succeeded = True
         return report
     finally:
+        if gate_stage is not None:
+            gate_stage.close()  # this call owned the shared base (keep_stage)
         for clone in clones:
             shutil.rmtree(clone.parent, ignore_errors=True)
 
@@ -751,9 +764,13 @@ def develop_best_of(
     logs = list(event_logs) if event_logs else [None] * k
     logs += [None] * (k - len(logs))
     clones: list[Path] = []
+    gate_stage = None
 
     try:
         clones = _clone_many(repo_root, k)
+        # A3: one pristine base, built while the K workers run, shared by every
+        # candidate gate. Each of those gates used to pay a full tree copy.
+        gate_stage = _start_local_gate_stage(repo_root, test_cmd)
         with ThreadPoolExecutor(max_workers=k) as pool:
             futures = [
                 pool.submit(
@@ -820,7 +837,10 @@ def develop_best_of(
 
                 on_line = gate_line_observer(logs[i])
             with gate_lock:
-                gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout, on_line=on_line)
+                gate = _run_gate(
+                    repo_root, w.entries, test_cmd, gate_timeout, on_line=on_line,
+                    stage=gate_stage, keep_stage=True,
+                )
             if logs[i] is not None:
                 try:
                     logs[i].emit(
@@ -907,5 +927,7 @@ def develop_best_of(
         report.succeeded = True
         return report
     finally:
+        if gate_stage is not None:
+            gate_stage.close()  # this call owned the shared base (keep_stage)
         for clone in clones:
             shutil.rmtree(clone.parent, ignore_errors=True)

@@ -207,5 +207,117 @@ class BestOfPipelining(unittest.TestCase):
         self.assertTrue(all(c.succeeded and c.gate_passed for c in first.candidates))
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class SharedGateStage(unittest.TestCase):
+    """A3 + shared stage: run2 and best-of fell back to a FULL materialize on
+    every gate. LocalGateStage already existed for the single-run path; here
+    one pre-staged base serves the combined gate and its repairs (run2) and all
+    K candidate gates (best-of), so the repo tree is copied once instead of
+    once per gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-stage-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+
+    def _count_full_copies(self, run):
+        """Count tree copies whose SOURCE is the real repo — one per gate under
+        the old path, one in total when a stage is shared."""
+        from shepherd_dev import parallel as P
+        from shepherd_dev import supervisor as S
+
+        real = S.fast_copytree
+        seen = {"n": 0}
+
+        def counting(src, dest, ignored=None):
+            if Path(src).resolve() == self.repo.resolve():
+                seen["n"] += 1
+            return real(src, dest, ignored)
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many, S.fast_copytree)
+        S.fast_copytree = counting
+        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_many = lambda repo_root, n: [self.repo] * n
+        try:
+            run(P)
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many, S.fast_copytree) = old
+        return seen["n"]
+
+    def _worker(self, tag):
+        from shepherd_dev.supervisor import DevReport
+
+        import threading
+
+        lock = threading.Lock()
+        seq = {"n": 0}
+
+        def fake_worker(clone, feature, note, **_kw):
+            with lock:
+                seq["n"] += 1
+                mine = seq["n"]
+            report = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            report.entries = {f"src/{tag}{mine}.py": b"X = 1\n"}
+            report.final_run_ref = f"run-{mine}"
+            return report
+
+        return fake_worker
+
+    def test_best_of_copies_the_repo_once_not_once_per_candidate(self):
+        def run(P):
+            P._run_worker = self._worker("c")
+            P.develop_best_of(
+                self.repo, "feat", k=3, test_cmd="true", provider="static",
+            )
+
+        self.assertEqual(
+            self._count_full_copies(run), 1,
+            "3 candidate gates must share one pre-staged base",
+        )
+
+    def test_run2_shares_one_base_across_the_combined_gate(self):
+        def run(P):
+            P._run_worker = self._worker("f")
+            P.develop_parallel(
+                self.repo, ["a", "b"], test_cmd="true", provider="static",
+            )
+
+        self.assertEqual(self._count_full_copies(run), 1)
+
+    def test_stage_is_closed_even_when_the_gate_fails(self):
+        from shepherd_dev import parallel as P
+
+        closed = {"n": 0}
+
+        def run(_P):
+            P._run_worker = self._worker("c")
+            real_start = P._start_local_gate_stage
+
+            def tracking(repo_root, test_cmd):
+                stage = real_start(repo_root, test_cmd)
+                if stage is not None:
+                    real_close = stage.close
+
+                    def close():
+                        closed["n"] += 1
+                        return real_close()
+
+                    stage.close = close
+                return stage
+
+            P._start_local_gate_stage = tracking
+            try:
+                P.develop_best_of(
+                    self.repo, "feat", k=2, test_cmd="false", provider="static",
+                )
+            finally:
+                P._start_local_gate_stage = real_start
+
+        self._count_full_copies(run)
+        self.assertEqual(closed["n"], 1, "the shared stage is closed exactly once")
+
+
 if __name__ == "__main__":
     unittest.main()

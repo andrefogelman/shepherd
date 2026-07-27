@@ -329,6 +329,7 @@ class LocalGateStage:
         self._root = Path(tempfile.mkdtemp(prefix="shepherd-gatestage-"))
         self._thread: threading.Thread | None = None
         self._n = 0
+        self._lock = threading.Lock()
 
     def start(self) -> "LocalGateStage":
         self._thread = threading.Thread(target=self._build, daemon=True, name="shepherd-gate-stage")
@@ -344,14 +345,21 @@ class LocalGateStage:
             self.error = f"gate stage: {exc}"
 
     def stage(self, entries: dict[str, bytes]) -> Path | None:
-        """A fresh work tree = pristine base clone + the proposal overlaid."""
+        """A fresh work tree = pristine base clone + the proposal overlaid.
+
+        Safe to call repeatedly and from several threads: one base serves every
+        gate that borrows this stage (run2's combined gate and its repairs,
+        best-of's K candidates), and the counter that names each work tree is
+        taken under a lock so two callers can never land on the same path.
+        """
         if self._thread is not None:
             self._thread.join(120)
         if self.base is None:
             return None
         try:
-            self._n += 1
-            work = self._root / f"work-{self._n}"
+            with self._lock:
+                self._n += 1
+                work = self._root / f"work-{self._n}"
             fast_copytree(self.base, work)
             _link_dep_dirs(self.repo_root, work)
             materialize_into(work, entries)
@@ -830,6 +838,28 @@ def _start_gate_warmup(repo_root: Path, test_cmd: str | None, timeout: int):
     return GateWarmup(cfg, timeout=timeout).start()
 
 
+def start_local_gate_stage(repo_root: Path, test_cmd: str | None):
+    """A LocalGateStage for callers that run MANY gates off one base (A3):
+    run2's combined gate plus its repairs, best-of's K candidates.
+
+    Local only, deliberately. A remote GateWarmup is single-use — run_remote_gate
+    adopts its workdir and tears it down — so it cannot be shared across gates,
+    and a remote-gated repo simply keeps the ordinary path. None when there is
+    no gate, or when staging cannot start (the gate then falls back to the full
+    materialize it did before).
+    """
+    if test_cmd is None:
+        return None
+    from . import config as _config
+
+    if _config.remote_gate(repo_root) is not None:
+        return None
+    try:
+        return LocalGateStage(repo_root).start()
+    except Exception:
+        return None
+
+
 def _run_gate(
     repo_root: Path,
     entries: dict[str, bytes],
@@ -838,6 +868,7 @@ def _run_gate(
     warmup=None,
     on_line=None,
     stage=None,
+    keep_stage: bool = False,
 ) -> GateResult:
     """Run the repo's test suite against a materialized copy of the proposal.
 
@@ -907,7 +938,11 @@ def _run_gate(
                 return _judge(work)
             # stage failed — fall through to the ordinary full materialize
         finally:
-            stage.close()
+            # keep_stage: the caller runs MANY gates off one base (run2's
+            # combined gate plus repairs, best-of's K candidates) and closes it
+            # itself. Closing here would throw the base away after the first.
+            if not keep_stage:
+                stage.close()
 
     # Not TemporaryDirectory: its cleanup is the same in-process rmtree that
     # _remove_tree exists to avoid, and this tree carries the same dep links.
