@@ -14,6 +14,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from clonestub import clone_stub  # noqa: E402
 
 try:
     import shepherd as _sp  # noqa: F401
@@ -52,7 +55,7 @@ class DevelopManyTests(unittest.TestCase):
 
         old_lane, old_clone = P._run_lane, P._clone_workspace
         P._run_lane = fake_lane
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_workspace = clone_stub(self.repo)
         try:
             return P.develop_many(
                 self.repo, list(features), test_cmd=test_cmd, provider="static", **kw
@@ -135,7 +138,7 @@ class DevelopManyTests(unittest.TestCase):
 
         old_lane, old_clone = P._run_lane, P._clone_workspace
         P._run_lane = fake_lane
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_workspace = clone_stub(self.repo)
         try:
             P.develop_many(self.repo, ["fa", "fb", "fc"], test_cmd="echo ok",
                            provider="static", max_workers=3)

@@ -13,6 +13,8 @@ substitution helpers. Runnable with: python -m unittest tests.test_remotegate_ss
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -131,6 +133,34 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         )
         assert cfg is not None
         self.assertIsNone(RG.preflight(cfg))  # nothing to resolve, do not invent one
+
+    def test_the_gate_runs_where_timeout_is_not_installed(self):
+        """`timeout` is GNU coreutils: absent on macOS and minimal images.
+        Invoking it unconditionally made every gate there exit 127 with
+        `timeout: command not found`, read as an ordinary suite failure."""
+        warm = Path(tempfile.mkdtemp())
+        (warm / "src").mkdir()
+        cfg = parse_remote_config({
+            "ssh": "root@host", "repo_dir": str(warm),
+            "copy_cmd": "cp -R {repo} {workdir}",
+            "test_cmd": "grep -q 'V = 42' src/a.py && echo GATE_OK",
+            "workdir_base": str(Path(tempfile.mkdtemp())),
+        }, "python")
+        assert cfg is not None
+        # a PATH with neither timeout nor gtimeout on it
+        bare = Path(tempfile.mkdtemp())
+        for tool in ("sh", "bash", "cp", "rm", "mkdir", "grep", "echo", "command"):
+            src = shutil.which(tool)
+            if src:
+                (bare / tool).symlink_to(src)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(bare)
+        try:
+            res = run_remote_gate(cfg, {"src/a.py": b"V = 42\n"}, timeout=30)
+        finally:
+            os.environ["PATH"] = old_path
+        self.assertTrue(res.passed, f"exit={res.exit_code} tail={res.output_tail!r}")
+        self.assertNotIn("command not found", res.output_tail or "")
 
     def test_suite_exiting_124_quickly_is_a_gate_failure_not_a_timeout(self):
         """#10: exit 124 was read as "timeout(1) killed it" unconditionally, so

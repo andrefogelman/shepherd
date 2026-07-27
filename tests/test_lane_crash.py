@@ -17,6 +17,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from clonestub import clone_many_stub, clone_stub, make_clone  # noqa: E402
 
 try:
     import shepherd as _sp  # noqa: F401
@@ -45,8 +48,8 @@ class WorkerCrashContainment(unittest.TestCase):
 
         old = (P._run_worker, P._clone_workspace, P._clone_many)
         P._run_worker = fake_worker
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
-        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
 
         def _restore():
             P._run_worker, P._clone_workspace, P._clone_many = old
@@ -96,7 +99,7 @@ class WorkerCrashContainment(unittest.TestCase):
         def boom_on_overlay(repo_root, overlay=None):
             if overlay is not None:  # the handoff clone
                 raise _Boom("no space left")
-            return self.repo
+            return make_clone(self.repo)
 
         P._clone_workspace = boom_on_overlay
         report = P.develop_parallel(
@@ -119,7 +122,7 @@ class WorkerCrashContainment(unittest.TestCase):
         def boom_on_overlay(repo_root, overlay=None):
             if overlay is not None:  # the repair clone
                 raise _Boom("no space left")
-            return self.repo
+            return make_clone(self.repo)
 
         P._clone_workspace = boom_on_overlay
         report = P.develop_parallel(
@@ -201,8 +204,8 @@ class BestOfPipelining(unittest.TestCase):
 
         old = (P._run_worker, P._clone_workspace, P._clone_many, P._run_gate, P.run_review, P.sp)
         P._run_worker = fake_worker
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
-        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
         P._run_gate = lambda *a, **kw: track(
             "gates", gate_delay, lambda: GateResult(True, 0, "ok")
         )
@@ -288,8 +291,8 @@ class SharedGateStage(unittest.TestCase):
 
         old = (P._run_worker, P._clone_workspace, P._clone_many, S.fast_copytree)
         S.fast_copytree = counting
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
-        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
         try:
             run(P)
         finally:
@@ -427,8 +430,8 @@ class Run2SpeculativeReview(unittest.TestCase):
         old = (P._run_worker, P._clone_workspace, P._clone_many,
                P._run_gate, P.run_review, P.develop, P.sp)
         P._run_worker = fake_worker
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
-        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
         P._run_gate = fake_gate
         P.run_review = fake_review
         P.develop = fake_develop
@@ -526,8 +529,8 @@ class Run2SpeculativeReview(unittest.TestCase):
         old = (P._run_worker, P._clone_workspace, P._clone_many,
                P._run_gate, P.run_review, P.sp)
         P._run_worker = fake_worker
-        P._clone_workspace = lambda repo_root, overlay=None: self.repo
-        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
         P._run_gate = lambda *a, **kw: GateResult(True, 0, "ok")
         P.run_review = lambda *a, **kw: ReviewVerdict(
             approved=False, summary="nope", issues=["one", "two"]

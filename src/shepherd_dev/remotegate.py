@@ -431,7 +431,22 @@ def run_remote_gate(
             # 4. the gate itself, with a remote timeout so a hung test is killed
             # remotely. Streamed line by line so verbose mode sees each test as
             # it runs; the local deadline still reaps a hung ssh (process group).
-            test_line = f"cd {wd} && {envp}timeout {timeout} {_sub(cfg.test_cmd, run_id, workdir)}"
+            # `timeout` is GNU coreutils — absent on macOS and on minimal
+            # images. Invoking it unconditionally made every gate on such a
+            # host exit 127 with `timeout: command not found`, read as an
+            # ordinary suite failure. Use it where it exists, fall back to the
+            # bare command where it does not: the LOCAL deadline below still
+            # reaps a hung ssh, so the budget is enforced either way — only the
+            # remote-side kill is lost.
+            remote_cmd = _sub(cfg.test_cmd, run_id, workdir)
+            test_line = (
+                f"cd {wd} && {envp}"
+                f"if command -v timeout >/dev/null 2>&1; then "
+                f"timeout {timeout} {remote_cmd}; "
+                f"elif command -v gtimeout >/dev/null 2>&1; then "
+                f"gtimeout {timeout} {remote_cmd}; "
+                f"else {remote_cmd}; fi"
+            )
             from .procstream import run_streaming
 
             started = time.monotonic()
