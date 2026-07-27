@@ -473,3 +473,53 @@ created in module-level helpers with no TestCase to hang an `addCleanup` on.
 The cleanup child now runs under `gate_env()`, which drops exactly the
 variables that stop an interpreter starting. What survives a full run is one
 `vcs-core-overlay` directory, which belongs to the substrate.
+
+### Every child interpreter shepherd spawns inherited the environment
+
+**Was:** the staged-tree leak above was one site of six. shepherd spawns its
+own interpreter once to remove a staged tree, twice to replay a case during
+`optimize`, and three times to run `shepherd init` for a fresh clone or a
+re-adoption — the `shepherd` console script being a python entry point like
+any other.
+
+All of them passed the environment through untouched, and `PYTHONHOME` names a
+stdlib prefix: a wrong one stops the child booting *before any of our code
+runs*. So the failure never mentions its cause. In `_remove_tree` the
+`check=False` hid it completely; in the replay it surfaces as a candidate
+scored on a failure of the harness rather than of the prompt (compounding the
+replay-timeout defect above); in `shepherd init` it surfaces as
+`shepherd init failed` with a message about the repo.
+
+**Fix:** `child_python_env()` at every one of those sites. It drops
+`PYTHONHOME` and `__PYVENV_LAUNCHER__` and nothing else.
+
+The narrowness is the point, and the reason worth keeping: **`PYTHONPATH` must
+not be stripped here.** `-m shepherd_dev.cli` needs the package importable, and
+anyone running from a source checkout gets that from `PYTHONPATH` — stripping
+it would trade a rare breakage for a common one. Only a child that imports
+nothing but the stdlib can afford the wider `gate_env()` scrub, which is why
+the tree remover uses that one and these do not. Pinned by
+`tests/test_gatestream.py` (`child_python_env` keeps `PYTHONPATH`, drops
+`PYTHONHOME`, and a real child boots under a poisoned one).
+
+### A name read but never bound waited for the first caller to reach it
+
+**Was:** `cli.py` called `os.readlink` in a branch nothing exercised, and never
+imported `os`. A `NameError` sitting in the tree, due to whoever first ran with
+a symlink among their dirty files. It was found by accident, when a test
+written for something else happened to walk that branch.
+
+Coverage is the wrong instrument for this. Tests cannot reach every branch, and
+they do not have to: a missing import is not a behaviour that needs observing,
+it is a name that either resolves or does not, and that is **decidable without
+running anything**.
+
+**Fix:** `tests/test_undefined_names.py` decides it for every module in the
+package. The scope analysis comes from `symtable` — the interpreter's own — so
+nested functions, comprehensions, class bodies, `global`/`nonlocal`, and the
+function-local imports this codebase uses everywhere are handled by Python's
+rules rather than by an approximation of them.
+
+Three cases pin that the check can still fail, one of them the exact `cli.py`
+defect: run against the file as it was, it reports
+`cli.py._digest_dirty_path: os`. A check that cannot fail proves nothing.
