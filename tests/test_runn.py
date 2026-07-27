@@ -214,6 +214,44 @@ class SettleRegateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(written, [])
 
+    def test_partial_write_failure_keeps_the_proposal_staged(self):
+        """#6: settle_run dumps its consumed content to a recovery dir when the
+        worktree write fails; settle_par had no such path. Its content is still
+        on disk, so the equivalent guarantee is: do NOT delete the stage, and
+        say which files landed before the failure."""
+        pid = self._stage(
+            {"src/aaa.py": b"A = 1\n", "src/blocked.py": b"B = 1\n"}, None
+        )
+        # a directory where a file must go: write_bytes raises IsADirectoryError
+        (self.repo / "src" / "blocked.py").mkdir()
+
+        code, written = self._settle(pid)
+        self.assertEqual(code, 2)
+        self.assertEqual(written, [])
+        # the stage survives, so nothing is lost and settling can be retried
+        self.assertTrue((self.repo / ".shepherd-proposals" / pid / "files").is_dir())
+        # ...and the file that DID land is really there
+        self.assertTrue((self.repo / "src" / "aaa.py").is_file())
+
+    def test_partial_write_is_recorded_with_what_landed(self):
+        from shepherd_dev import history
+
+        pid = self._stage(
+            {"src/aaa.py": b"A = 1\n", "src/blocked.py": b"B = 1\n"}, None
+        )
+        (self.repo / "src" / "blocked.py").mkdir()
+        events: list[tuple] = []
+        old = history.record_event
+        history.record_event = lambda kind, payload: events.append((kind, payload))
+        try:
+            self._settle(pid)
+        finally:
+            history.record_event = old
+        actions = [p for k, p in events if p.get("action") == "accept_failed"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["written"], ["src/aaa.py"])
+        self.assertIn("error", actions[0])
+
 
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
 class RunNParserTests(unittest.TestCase):

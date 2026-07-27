@@ -143,12 +143,17 @@ class DevReport:
         return "\n".join(lines)
 
 
-def materialize_into(root: Path, entries: dict[str, bytes]) -> list[str]:
+def materialize_into(
+    root: Path, entries: dict[str, bytes], progress: list[str] | None = None
+) -> list[str]:
     """Write changeset content entries under root.
 
-    Refuses paths that escape root. Returns the list of written paths.
+    Refuses paths that escape root. Returns the list of written paths. When
+    `progress` is given it receives each path as it lands, so a caller that has
+    to report a PARTIAL write still knows what reached the disk (the return
+    value is lost when this raises).
     """
-    written: list[str] = []
+    written: list[str] = progress if progress is not None else []
     resolved_root = root.resolve()
     for rel, content in entries.items():
         target = (root / rel).resolve()

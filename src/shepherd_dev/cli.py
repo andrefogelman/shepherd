@@ -1069,9 +1069,11 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
     # Skip symlinks (#18): a symlink planted in the stage could point outside and
     # copy an external file's content into the repo. Only real files are settled;
     # materialize_into still guards the destination against `..` escapes.
+    # Sorted, not rglob order: a partial write (#6) must report the same
+    # prefix of files every time, or "what landed" is unreproducible.
     entries = {
         str(path.relative_to(files_dir)): path.read_bytes()
-        for path in files_dir.rglob("*")
+        for path in sorted(files_dir.rglob("*"))
         if path.is_file() and not path.is_symlink()
     }
 
@@ -1111,7 +1113,35 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
             return 1, []
         print("re-gate passed")
 
-    written = materialize_into(repo_root, entries)
+    # Partial-write recovery (#6). settle_run has to dump its content to a
+    # recovery dir because the run output is already consumed by this point;
+    # here the content is still on disk under `staging`, so the equivalent
+    # guarantee is simply to NOT delete the stage — settling can be retried
+    # once the obstruction is cleared. Report what landed either way: leaving
+    # the worktree half-written without saying so is the real damage.
+    landed: list[str] = []
+    try:
+        written = materialize_into(repo_root, entries, progress=landed)
+    except Exception as exc:
+        history.record_event(
+            "settle_par",
+            {"repo": str(repo_root), "ref": proposal_id, "action": "accept_failed",
+             "auto": auto, "error": str(exc), "written": landed},
+        )
+        print(
+            f"error: writing {proposal_id} into the worktree failed after "
+            f"{len(landed)} file(s): {exc}",
+            file=sys.stderr,
+        )
+        for rel in landed:
+            print(f"  written: {rel}", file=sys.stderr)
+        print(
+            f"  the proposal is STILL STAGED under {staging} — nothing was lost. "
+            f"Clear the obstruction and settle again, or reject with --reject.",
+            file=sys.stderr,
+        )
+        return 2, []
+
     shutil.rmtree(staging)
     history.record_event(
         "settle_par",
