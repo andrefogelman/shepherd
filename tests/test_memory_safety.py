@@ -97,6 +97,26 @@ class ConcurrentWritersDoNotLoseFacts(_Isolated):
         leftovers = [p.name for p in self.store.iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftovers, [])
 
+class StatusSurvivesADamagedLog(unittest.TestCase):
+    """`status` is what you reach for when something already went wrong. A
+    float() on a corrupted `ts` raised out of the loop, so ONE damaged run made
+    it list none of them."""
+
+    def test_one_bad_timestamp_does_not_hide_every_run(self):
+        from shepherd_dev.status import runs_status
+
+        root = Path(mkdtemp(prefix="shepherd-status-"))
+        for run_id, ts in (("20260101-000000-aaa", "not-a-number"), ("20260102-000000-bbb", 1.0)):
+            d = root / run_id
+            d.mkdir(parents=True)
+            (d / "events.ndjson").write_text(
+                json.dumps({"ts": ts, "kind": "phase.start", "payload": {"label": "gate"}}) + "\n"
+            )
+
+        rows = runs_status(root=root, limit=10)
+        self.assertEqual(len(rows), 2, "a damaged run hid the healthy one")
+        self.assertTrue(all(isinstance(r["elapsed_s"], float) for r in rows))
+
 
 if __name__ == "__main__":
     unittest.main()

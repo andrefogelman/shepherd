@@ -19,6 +19,14 @@ from .events import load_run_events
 #: A run with no summary and no event for this long is presumed dead.
 STALE_AFTER_SECONDS = 30 * 60
 
+
+def _as_ts(value, fallback: float) -> float:
+    """A timestamp off disk, or `fallback` when it is not one."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
 _LANE_SUFFIX_RE = re.compile(r"-(w\d+|c\d+|wa|wb)$")
 
 
@@ -37,8 +45,12 @@ def runs_status(root: Path | None = None, limit: int = 10) -> list[dict]:
         events = load_run_events(run_id, root=base)
         if not events:
             continue
-        first_ts = float(events[0].get("ts", now))
-        last_ts = float(events[-1].get("ts", first_ts))
+        # A run's own log can be truncated or hand-edited, and float() on a
+        # bad `ts` raised out of this loop — so ONE damaged run made `status`
+        # list none of them. Status is the tool you reach for when something
+        # already went wrong; it has to survive the wreckage it reports on.
+        first_ts = _as_ts(events[0].get("ts"), now)
+        last_ts = _as_ts(events[-1].get("ts"), first_ts)
         summary = next((e for e in reversed(events) if e.get("kind") == "run.summary"), None)
         phase_ev = next((e for e in reversed(events) if e.get("kind") == "phase.start"), None)
         phase = (phase_ev or {}).get("payload", {}).get("label")
