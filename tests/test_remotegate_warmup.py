@@ -12,13 +12,20 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shepherd_dev import remotegate as RG  # noqa: E402
-from shepherd_dev.remotegate import GateWarmup, parse_remote_config, run_remote_gate  # noqa: E402
+from shepherd_dev.remotegate import (  # noqa: E402
+    GateWarmup,
+    _adoptable,
+    parse_remote_config,
+    run_remote_gate,
+)
 
 _real_run = subprocess.run
 
@@ -128,6 +135,82 @@ class RemoteGateWarmup(unittest.TestCase):
         w.teardown()                                       # worker produced nothing
         self.assertFalse((self.db / f"d_{run_id}").exists())
         self.assertFalse(Path(w.workdir).exists())
+
+
+class WarmupStillStagingIsNotAdopted(unittest.TestCase):
+    """#1: join() bounded the wait but _stage makes TWO remote calls of
+    `timeout` each, so the thread can outlive the join. `error` is None while
+    staging is merely UNFINISHED, so the old adoption test (`error is None`)
+    read "still copying" as "ready" — the gate then overlaid a half-copied tree
+    and re-ran setup concurrently with the warmup's own."""
+
+    def setUp(self):
+        RG._ssh_base = _fake_ssh_base
+        RG.subprocess.run = _patched_run
+        self.warm = _warm_checkout()
+        self.wbase = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        RG.subprocess.run = _real_run
+
+    def _cfg(self):
+        cfg = parse_remote_config({
+            "ssh": "root@host", "repo_dir": str(self.warm),
+            "copy_cmd": "cp -R {repo} {workdir}",
+            "test_cmd": "true",
+            "workdir_base": str(self.wbase),
+        }, "python")
+        assert cfg is not None
+        return cfg
+
+    def test_join_reports_incomplete_and_workdir_is_not_adopted(self):
+        cfg = self._cfg()
+        release = threading.Event()
+        w = GateWarmup(cfg, timeout=30)
+
+        def _slow_stage():
+            release.wait(10)          # stands in for a copy still in flight
+            w._done.set()
+
+        w._thread = threading.Thread(target=_slow_stage, daemon=True)
+        w._deadline = time.monotonic() + 0.2      # join gives up almost at once
+        w._thread.start()
+        try:
+            self.assertFalse(w.join(), "join must report staging as incomplete")
+            self.assertIsNone(w.error, "an unfinished warmup has no error yet")
+            self.assertFalse(
+                _adoptable(w),
+                "a warmup whose staging thread is still live must not be adopted",
+            )
+        finally:
+            release.set()
+            w._thread.join(5)
+        # ...and the same predicate does say yes once staging finishes, so the
+        # assertion above is about liveness, not a blanket refusal.
+        self.assertTrue(w.join())
+        self.assertTrue(_adoptable(w))
+
+    def test_teardown_of_a_live_warmup_does_not_block_the_gate(self):
+        """teardown() used to join the staging thread inline, so discarding an
+        unfinished warmup stalled the gate for the whole timeout."""
+        cfg = self._cfg()
+        release = threading.Event()
+        w = GateWarmup(cfg, timeout=30)
+
+        def _slow_stage():
+            release.wait(10)
+            w._done.set()
+
+        w._thread = threading.Thread(target=_slow_stage, daemon=True)
+        w._deadline = time.monotonic() + 30
+        w._thread.start()
+        try:
+            started = time.monotonic()
+            w.teardown()
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            release.set()
+            w._thread.join(5)
 
 
 if __name__ == "__main__":

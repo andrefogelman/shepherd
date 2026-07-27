@@ -245,8 +245,17 @@ class GateWarmup:
     pre-setup it. When the worker finishes, run_remote_gate adopts this workdir
     and only overlays + tests, overlapping the copy/setup latency with worker time.
 
-    Always teardown-safe: teardown() joins the staging thread first, so a warmup
-    that is never consumed (worker produced nothing) leaves no orphan.
+    Always teardown-safe: teardown() waits for the staging thread before tearing
+    its state down, so a warmup that is never consumed (worker produced nothing)
+    leaves no orphan.
+
+    Adoption is gated on COMPLETION, not on the absence of an error (#1). _stage
+    makes up to two remote calls of `timeout` each, so the thread's worst case is
+    twice what a single-timeout join allows for; a join that gave up mid-copy
+    left `error` at None, which the caller read as "staged and healthy" — and the
+    gate then overlaid a half-copied tree and re-ran setup alongside the warmup's
+    own still-running one. join() now honours the real staging budget and reports
+    whether staging actually finished.
     """
 
     def __init__(self, cfg: RemoteGateConfig, timeout: int = 600):
@@ -259,8 +268,13 @@ class GateWarmup:
         self._thread: threading.Thread | None = None
         self._torn = False
         self._td_lock = threading.Lock()
+        self._done = threading.Event()
+        #: Absolute monotonic point past which staging cannot legitimately still
+        #: be running: two remote calls of `timeout` each, plus ssh slack.
+        self._deadline: float | None = None
 
     def start(self) -> "GateWarmup":
+        self._deadline = time.monotonic() + 2 * self.timeout + 5
         self._thread = threading.Thread(target=self._stage, daemon=True)
         self._thread.start()
         return self
@@ -281,18 +295,49 @@ class GateWarmup:
                 self.did_setup = True
         except Exception as exc:  # never let a background failure escape
             self.error = f"warmup: {exc}"
+        finally:
+            self._done.set()
 
-    def join(self) -> None:
-        if self._thread is not None:
-            self._thread.join(self.timeout)
+    @property
+    def completed(self) -> bool:
+        """True once _stage has run to its end — success OR recorded failure."""
+        return self._done.is_set()
+
+    def join(self) -> bool:
+        """Wait out the staging budget. False = staging is STILL RUNNING, in
+        which case neither the workdir nor `did_setup` describes anything the
+        caller may rely on."""
+        if self._thread is None:
+            return self._done.is_set()
+        remaining = 0.0 if self._deadline is None else max(0.0, self._deadline - time.monotonic())
+        self._done.wait(remaining)
+        return self._done.is_set()
 
     def teardown(self) -> None:
         with self._td_lock:
             if self._torn:
                 return
             self._torn = True
-        self.join()  # staging must finish before we tear its state down
+        if not self._done.is_set():
+            # Staging still owns the workdir; removing it now would race the ssh
+            # calls writing into it, and blocking here would stall the gate for
+            # the whole budget. Reap behind the caller — the run_id is ours
+            # alone, so a fresh gate attempt cannot collide with it.
+            threading.Thread(target=self._reap, daemon=True).start()
+            return
+        self._reap()
+
+    def _reap(self) -> None:
+        if self._deadline is not None:
+            self._done.wait(max(0.0, self._deadline - time.monotonic()))
         _teardown_workdir(self.cfg, self.run_id, self.workdir, self.did_setup, self.timeout)
+
+
+def _adoptable(warmup: "GateWarmup | None") -> bool:
+    """A warmup may be adopted only once staging has FINISHED and reported no
+    error. `error is None` alone is also true of a warmup that is merely still
+    running (#1)."""
+    return warmup is not None and warmup.completed and warmup.error is None
 
 
 def run_remote_gate(
@@ -317,10 +362,12 @@ def run_remote_gate(
             warmup.teardown()
         return GateResult(False, 1, "remote gate: no test_cmd configured")
 
-    # Adopt a healthy warmup; discard a failed one (clear its partial state).
+    # Adopt a COMPLETED, healthy warmup; discard a failed or still-staging one
+    # (clearing its partial state). Never adopt on `error is None` alone — that
+    # is also true of staging that simply has not finished (#1).
     if warmup is not None:
         warmup.join()
-    staged = warmup if (warmup is not None and warmup.error is None) else None
+    staged = warmup if _adoptable(warmup) else None
     if warmup is not None and staged is None:
         warmup.teardown()
 
