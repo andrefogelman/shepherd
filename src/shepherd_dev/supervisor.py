@@ -453,11 +453,17 @@ def _prior_attempt_guidance(entries: dict[str, bytes], limit: int = 8000) -> str
 # exec (framework-equivalent), setsid blocked → eval-guarded, killpg blocked →
 # single-pid kill. So it can only match or improve the framework, never break
 # the launch (which already relies on perl+exec).
+#
+# The handler is installed BEFORE anything can arm the timer (#11): while
+# SIGALRM carries its default disposition the process dies bare — no group
+# kill, no exit 124. $pid is declared first so the closure can capture it and
+# check definedness, since the alarm may in principle fire before fork returns.
 _KILLTREE_PERL = (
-    "my $b = shift @ARGV; my $pid = fork();"
+    "my $b = shift @ARGV; my $pid;"
+    " $SIG{ALRM} = sub { if (defined $pid) { kill('KILL', -$pid) or kill('KILL', $pid) } exit 124 };"
+    " $pid = fork();"
     ' if (!defined $pid) { exec @ARGV or die "exec: $!" }'
     ' if ($pid == 0) { eval { require POSIX; POSIX::setsid() }; exec @ARGV or die "exec: $!" }'
-    " $SIG{ALRM} = sub { kill('KILL', -$pid) or kill('KILL', $pid); exit 124 };"
     " alarm $b; waitpid($pid, 0); exit($? >> 8)"
 )
 
@@ -519,18 +525,25 @@ def _with_sandbox_tmpdir(argv: list) -> list:
 # lost (the exec replaces the process image); only the budget stop remains.
 # Keeps the literal `exec @ARGV` marker the watchdog greps for on the normal
 # path.
+#
+# The HANDLER therefore has to be installed even earlier (#11). Arming before
+# pipe/fork is load-bearing, so it cannot move; but installing the handler only
+# after the fork left a window — pipe() plus fork() — in which SIGALRM still
+# carried its default disposition, killing the pump bare with no group kill and
+# no exit 124. $pid is declared up front so the closure captures it and can
+# check definedness for a fire that lands inside that window.
 _TEEPUMP_PERL = (
-    "my $b = shift @ARGV; my $tee = shift @ARGV;"
+    "my $b = shift @ARGV; my $tee = shift @ARGV; my $pid;"
+    " $SIG{ALRM} = sub { if (defined $pid) { kill(q{KILL}, -$pid) or kill(q{KILL}, $pid) } exit 124 };"
     " alarm $b;"
     " my ($r, $w); pipe($r, $w) or do { exec @ARGV or die qq{exec: $!} };"
-    " my $pid = fork();"
+    " $pid = fork();"
     ' if (!defined $pid) { exec @ARGV or die qq{exec: $!} }'
     " if ($pid == 0) { eval { require POSIX; POSIX::setsid() };"
     " close $r; open(STDOUT, q{>&}, $w) or die qq{dup: $!}; close $w;"
     ' exec @ARGV or die qq{exec: $!} }'
     " close $w; my $fh; open($fh, q{>}, $tee) or undef $fh;"
     " if ($fh) { my $old = select($fh); $| = 1; select($old) } $| = 1;"
-    " $SIG{ALRM} = sub { kill(q{KILL}, -$pid) or kill(q{KILL}, $pid); exit 124 };"
     " while (my $line = <$r>) { print $line; print {$fh} $line if $fh }"
     " waitpid($pid, 0); exit($? >> 8)"
 )
@@ -592,7 +605,17 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
     remove (#15). If any of it fails, we degrade gracefully — the worker runs on
     the framework's default budget (the #B watchdog still enforces the wall clock)
     — instead of crashing the run. Returns True when the rebind took effect.
+
+    Raises ValueError for a non-positive budget: perl's `alarm 0` CANCELS the
+    timer instead of firing it, so a budget of 0 silently removed the hard kill
+    rather than applying it, and the #B watchdog keys off the same number — the
+    run would have been left with nothing enforcing its wall clock (#11).
     """
+    if seconds <= 0:
+        raise ValueError(
+            f"worker budget must be positive (got {seconds}); "
+            "a budget of 0 disables the hard kill instead of enforcing it"
+        )
     try:
         from shepherd_dialect import providers
         from shepherd_dialect.workspace_control import runtime_provider as rp

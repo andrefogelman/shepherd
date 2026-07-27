@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shepherd_dev.events import RunEventLog, WorkerStreamHook  # noqa: E402
 from shepherd_dev.supervisor import (  # noqa: E402
+    _KILLTREE_PERL,
     _TEEPUMP_PERL,
     _TailingExecution,
     _swap_perl_teepump,
@@ -53,6 +54,39 @@ class SwapArgvTests(unittest.TestCase):
         # degenerate fallback runs with no budget stop at all.
         self.assertLess(_TEEPUMP_PERL.index("alarm $b"), _TEEPUMP_PERL.index("pipe("))
         self.assertLess(_TEEPUMP_PERL.index("alarm $b"), _TEEPUMP_PERL.index("fork()"))
+
+    def test_handler_installed_before_the_alarm_is_armed(self):
+        """#11: arming first left a window (pipe + fork) in which SIGALRM still
+        carried its DEFAULT disposition — terminate, with no group kill and no
+        exit 124. Arming must stay ahead of pipe/fork (above), so the handler
+        has to move ahead of the arming rather than the other way round."""
+        for script in (_TEEPUMP_PERL, _KILLTREE_PERL):
+            with self.subTest(script=script[:24]):
+                self.assertLess(
+                    script.index("$SIG{ALRM}"), script.index("alarm $b"),
+                    "no window may exist where the alarm is armed and unhandled",
+                )
+
+
+class WorkerBudgetValidation(unittest.TestCase):
+    """#11: perl's `alarm 0` CANCELS the timer rather than firing it, so a
+    budget of 0 silently disabled the hard kill instead of enforcing it. The
+    watchdog keys off the same number, so nothing was left supervising."""
+
+    def test_zero_and_negative_budgets_are_refused(self):
+        from shepherd_dev.supervisor import set_worker_budget
+
+        for bad in (0, -1):
+            with self.subTest(budget=bad):
+                with self.assertRaises(ValueError):
+                    set_worker_budget(bad)
+
+    def test_cli_rejects_a_non_positive_budget(self):
+        from shepherd_dev.cli import build_parser
+
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["run", "f", "--worker-budget", "0"])
 
 
 @unittest.skipUnless(os.path.exists(PERL), "perl not available")

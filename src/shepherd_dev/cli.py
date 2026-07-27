@@ -1519,6 +1519,23 @@ def cmd_trace(args) -> int:
     return 0
 
 
+def _positive_seconds(text: str) -> int:
+    """argparse type for a wall-clock budget. Rejects 0 and negatives: perl's
+    `alarm 0` cancels the timer rather than firing it, so a budget of 0 removed
+    the worker's hard kill instead of tightening it — and the watchdog reads the
+    same number, leaving nothing enforcing the wall clock (#11)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {text!r}")
+    if value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive number of seconds (got {value}); "
+            "0 disables the hard kill instead of enforcing it"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Supervised AI development via Shepherd")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1659,7 +1676,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
     p_run.add_argument(
         "--worker-budget",
-        type=int,
+        type=_positive_seconds,
         default=900,
         help="wall-clock seconds each worker attempt may use (claude provider)",
     )
@@ -1730,7 +1747,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")
     p_run2.add_argument("--gate-timeout", type=int, default=600)
-    p_run2.add_argument("--worker-budget", type=int, default=900)
+    p_run2.add_argument("--worker-budget", type=_positive_seconds, default=900)
     p_run2.add_argument("--max-changed-paths", type=int, default=40)
     p_run2.add_argument("--allowed-prefix", action="append", default=[])
     p_run2.set_defaults(func=cmd_run2)
@@ -1753,7 +1770,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_runN.add_argument("--no-review", action="store_true", help="skip the per-lane reviewer")
     p_runN.add_argument("--max-attempts", type=int, default=2, help="attempts per lane (default 2)")
     p_runN.add_argument("--gate-timeout", type=int, default=600)
-    p_runN.add_argument("--worker-budget", type=int, default=900)
+    p_runN.add_argument("--worker-budget", type=_positive_seconds, default=900)
     p_runN.add_argument("--max-changed-paths", type=int, default=40)
     p_runN.add_argument("--allowed-prefix", action="append", default=[])
     p_runN.add_argument("--no-context-pack", action="store_true")
@@ -1788,7 +1805,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--fix-n", type=int, default=3, help="past failures to replay (must improve)")
     p_opt.add_argument("--guard-n", type=int, default=3, help="past passes to replay (must not regress)")
     p_opt.add_argument("--model", default="claude-opus-4-8", help="meta-optimizer model")
-    p_opt.add_argument("--worker-budget", type=int, default=900)
+    p_opt.add_argument("--worker-budget", type=_positive_seconds, default=900)
     p_opt.add_argument("--apply", action="store_true", help="persist the edit if it passes (default: dry-run)")
     p_opt.set_defaults(func=cmd_optimize)
 
