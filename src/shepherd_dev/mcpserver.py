@@ -236,6 +236,11 @@ def _call_tool(name: str, arguments: dict) -> dict:
         argv = _argv_for(name, arguments or {})
     except KeyError as exc:
         return {"content": [{"type": "text", "text": f"missing required argument: {exc}"}], "isError": True}
+    except (TypeError, ValueError) as exc:
+        # int() on a client-supplied best_of / max_attempts / max_workers. Only
+        # KeyError was caught, so a string where a number belonged escaped to
+        # the serve loop and ended the session over one bad argument.
+        return {"content": [{"type": "text", "text": f"bad argument: {exc}"}], "isError": True}
     try:
         code, out = _run_cli(argv)
     except subprocess.TimeoutExpired:
@@ -305,7 +310,14 @@ def serve(stdin: IO[str] | None = None, stdout: IO[str] | None = None) -> int:
             dst.write(json.dumps(_err(None, -32700, "parse error")) + "\n")
             dst.flush()
             continue
-        response = handle_message(msg)
+        # One bad message must not end the session. A client holds run-refs and
+        # proposal-ids across calls; a server that dies takes the references to
+        # every retained proposal with it, and the proposals themselves are
+        # still on disk waiting for a settle nobody can now name.
+        try:
+            response = handle_message(msg)
+        except Exception as exc:
+            response = _err(msg.get("id"), -32603, f"internal error: {exc}")
         if response is not None:
             dst.write(json.dumps(response) + "\n")
             dst.flush()

@@ -119,6 +119,49 @@ class ToolCall(unittest.TestCase):
                             "params": {"name": "shepherd_run", "arguments": {}}})
         self.assertTrue(r["result"]["isError"])
 
+    def test_a_malformed_number_is_an_error_not_a_crash(self):
+        """_argv_for coerces best_of/max_attempts/max_workers with int(). A
+        client sending a string raises ValueError, which the caller — catching
+        only KeyError — let escape all the way out of the serve loop, ending
+        the SESSION over one bad argument."""
+        for tool, args in (
+            ("shepherd_run", {"feature": "x", "best_of": "abc"}),
+            ("shepherd_run", {"feature": "x", "max_attempts": "lots"}),
+            ("shepherd_runN", {"features": ["a", "b"], "max_workers": "3.5.1"}),
+        ):
+            with self.subTest(tool=tool):
+                r = self._call(tool, args)
+                self.assertTrue(r["result"]["isError"], f"{args} should be an error")
+                self.assertNotIn("argv", self.seen)  # the CLI was never invoked
+
+    def test_an_unexpected_failure_in_one_call_does_not_end_the_session(self):
+        """Whatever a future handler raises, the client keeps its connection.
+        A crashed server loses every retained proposal reference the client
+        was holding."""
+        import io
+
+        def boom(name, arguments):
+            raise RuntimeError("handler bug")
+
+        old = M._call_tool
+        M._call_tool = boom
+        try:
+            out = io.StringIO()
+            M.serve(
+                stdin=io.StringIO(
+                    '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+                    '"params":{"name":"shepherd_run","arguments":{"feature":"x"}}}\n'
+                    '{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+                ),
+                stdout=out,
+            )
+        finally:
+            M._call_tool = old
+
+        replies = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(replies), 2, "the server stopped answering after the failure")
+        self.assertEqual(replies[1]["id"], 2)  # the ping after it was still served
+
     def _call(self, name, args):
         return handle_message({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                                "params": {"name": name, "arguments": args}})
