@@ -6,30 +6,7 @@ the mechanism is the part worth remembering.
 
 ## Open
 
-### The adoption fingerprint still trusts mtime for dirty files
-
-`_adoption_key` hashes HEAD plus `(mtime, size)` of every dirty path. That is
-the same evidence the diff fast-path was removed for: on a coarse-timestamp
-filesystem a same-size rewrite can land on the recorded mtime and read as
-unchanged, so a stale adoption would be reused.
-
-Materially safer than the diff case and left open deliberately. There, the
-snapshot and the worker's write were milliseconds apart by construction; here
-the two key computations are whole runs apart, so a collision needs two edits
-in the same jiffy in different runs. Closing it means hashing the content of
-the dirty files — usually a handful, so the cost is small if it ever bites.
-
-### The watchdog can signal a reused pid
-
-`_read_proctable` takes a snapshot; `_kill_subtree` signals afterwards, with
-three seconds between SIGTERM and SIGKILL. A pid freed in that window and
-reissued would be signalled instead of the intended process.
-
-Bounded rather than fixed: only descendants of shepherd's own pid are ever
-selected, so the blast radius is this process's own tree. A real fix needs
-`pidfd_open` (Linux-only), which costs the portability the watchdog is written
-for. Recorded because the reasoning, not the risk, is what would otherwise be
-re-litigated.
+None.
 
 ## Fixed
 
@@ -429,3 +406,70 @@ of them repays a section of its own.
 - **`run2` stopped emitting `review.verdict`.** A restructuring left the
   emission under `else:` (no review task), where the verdict is always `None` —
   dead code, and the verbose log silently lost the reviewer's outcome.
+
+### The adoption fingerprint trusted mtime for dirty files
+
+**Was:** `_adoption_key` decides whether a worker may build on the CACHED
+adoption instead of re-adopting the worktree. It hashed `(mtime, size)` per
+dirty path — the same evidence the diff fast-path above was removed for. On a
+coarse-timestamp filesystem a same-size rewrite inside one tick keeps the pair
+identical, so the stale adoption is reused and the worker builds on a base that
+no longer matches the worktree, silently.
+
+Kept open for a while on the grounds that the window is far narrower here: the
+two key computations are whole runs apart, so a collision needs two edits in
+the same jiffy in different runs, where the diff case had them milliseconds
+apart by construction. That reasoning was sound about the ODDS and beside the
+point about the FIX, which turned out to cost almost nothing.
+
+**Fix:** hash the content. Only dirty paths are read — normally a handful —
+each streamed in chunks so one enormous file costs time rather than memory.
+Content also stops a bare `touch` forcing a multi-second re-adoption, which the
+old key did. `_digest_dirty_path` handles what else a dirty path can be: a
+symlink folds in its target, a submodule folds in a marker rather than walking
+an unbounded tree, and an unreadable file folds in a marker rather than
+freezing the key on its last good value — unreadable is not evidence of
+unchanged. Pinned by `tests/test_perf.py` (`AdoptionKeyTests`), which forces
+the collision with `utime` instead of racing the clock.
+
+Writing the symlink branch surfaced a latent `NameError`: `cli.py` had never
+imported `os`.
+
+### The watchdog could signal a reused pid
+
+**Was:** targets are chosen from a `ps` snapshot and signalled afterwards, with
+a whole grace period between SIGTERM and SIGKILL. A pid is not an identity —
+one freed inside that window goes straight to the next process the OS starts,
+and signalling it kills a stranger.
+
+**Fix:** `_kill_subtree` takes the snapshot the pids came from and re-reads
+`ps` immediately before each signal, dropping any pid whose parent and command
+line no longer match. That narrows the window from the whole kill sequence to a
+single `ps` call. Deliberately not proof: a pid could in principle be reused by
+an identical command under the same parent, but that is a different order of
+unlikelihood from plain reuse, and `pidfd_open` — which would be proof — is
+Linux-only while this runs on darwin too. The re-check runs twice, since the
+grace is the widest part of the window and a target killed by the SIGTERM
+spends all of it releasing its pid. A machine where `ps` fails changes nothing
+rather than sparing everything.
+
+### The suite littered the temp root, and the gate leaked its staged tree
+
+**Was:** a full run left 88 directories behind. Litter rather than breakage —
+but a stray tree is indistinguishable from one a test meant to leave, which is
+how the TMPDIR-deletion defect above went unnoticed.
+
+Chasing the last one found a real leak. `_remove_tree` deletes the staged gate
+tree from a CHILD interpreter, deliberately, so the substrate's `os.unlink`
+patch is not in play. It spawned that child with the environment inherited
+verbatim — and the child is OUR interpreter, so a `PYTHONHOME` or `PYTHONPATH`
+aimed elsewhere stops it booting at all. With `check=False` and a bare
+`except: pass`, that failure is invisible and every staged tree leaks in
+silence.
+
+**Fix:** `tests/tmpdirs.py` wraps `mkdtemp` and removes what it made at
+interpreter exit — atexit rather than teardown because most of these are
+created in module-level helpers with no TestCase to hang an `addCleanup` on.
+The cleanup child now runs under `gate_env()`, which drops exactly the
+variables that stop an interpreter starting. What survives a full run is one
+`vcs-core-overlay` directory, which belongs to the substrate.
