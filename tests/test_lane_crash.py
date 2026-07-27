@@ -105,5 +105,107 @@ class WorkerCrashContainment(unittest.TestCase):
         self.assertEqual(len([c for c in report.candidates if c.succeeded]), 2)
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class BestOfPipelining(unittest.TestCase):
+    """A1: best-of ran K x (gate, review) strictly in series. The gate is
+    CPU-bound and must stay serialized; the review is network-bound and has no
+    reason to wait for the next candidate's gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-bestof-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+
+    def _run(self, k=3, review_delay=0.4, gate_delay=0.2):
+        import threading
+        import time
+
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import DevReport, GateResult, ReviewVerdict
+
+        counters = {"gates_now": 0, "gates_max": 0, "reviews_now": 0, "reviews_max": 0}
+        lock = threading.Lock()
+        seq = {"n": 0}
+
+        def track(key, delay, make):
+            with lock:
+                counters[f"{key}_now"] += 1
+                counters[f"{key}_max"] = max(counters[f"{key}_max"], counters[f"{key}_now"])
+            try:
+                time.sleep(delay)
+                return make()
+            finally:
+                with lock:
+                    counters[f"{key}_now"] -= 1
+
+        def fake_worker(clone, feature, note, **_kw):
+            with lock:
+                seq["n"] += 1
+                mine = seq["n"]
+            report = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            report.entries = {f"src/c{mine}.py": b"C = 1\n"}
+            report.final_run_ref = f"run-{mine}"
+            return report
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many, P._run_gate, P.run_review, P.sp)
+        P._run_worker = fake_worker
+        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._run_gate = lambda *a, **kw: track(
+            "gates", gate_delay, lambda: GateResult(True, 0, "ok")
+        )
+        P.run_review = lambda *a, **kw: track(
+            "reviews", review_delay,
+            lambda: ReviewVerdict(approved=True, summary="ok", issues=[]),
+        )
+
+        class _FakeSp:
+            @staticmethod
+            def open(path):
+                class _Ctx:
+                    def __enter__(self):
+                        return object()
+
+                    def __exit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        P.sp = _FakeSp()
+        try:
+            started = time.monotonic()
+            report = P.develop_best_of(
+                self.repo, "feat", k=k, test_cmd="true", provider="static",
+                review_task=object(),
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many,
+             P._run_gate, P.run_review, P.sp) = old
+        return report, counters, elapsed
+
+    def test_gates_never_overlap_but_reviews_do(self):
+        _report, counters, _elapsed = self._run(k=3)
+        self.assertEqual(counters["gates_max"], 1, "gates are CPU-bound: never two at once")
+        self.assertGreater(counters["reviews_max"], 1, "reviews must overlap")
+
+    def test_wall_clock_beats_the_serial_sum(self):
+        k, review_delay, gate_delay = 3, 0.4, 0.2
+        _report, _counters, elapsed = self._run(k, review_delay, gate_delay)
+        serial = k * (review_delay + gate_delay)
+        self.assertLess(elapsed, serial * 0.85, f"{elapsed:.2f}s vs serial {serial:.2f}s")
+
+    def test_candidate_order_and_ranking_stay_deterministic(self):
+        first, _c, _e = self._run(k=3)
+        second, _c, _e = self._run(k=3)
+        self.assertEqual([c.index for c in first.candidates], [0, 1, 2])
+        self.assertEqual(
+            [c.index for c in first.candidates], [c.index for c in second.candidates]
+        )
+        self.assertTrue(all(c.succeeded and c.gate_passed for c in first.candidates))
+
+
 if __name__ == "__main__":
     unittest.main()

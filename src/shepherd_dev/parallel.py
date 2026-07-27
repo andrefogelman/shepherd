@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -548,8 +549,6 @@ def develop_many(
     stream_hook=None,
 ) -> ManyReport:
     """Up to MAX_LANES independent features, each staged as its own proposal."""
-    import threading
-
     n = len(features)
     assert 2 <= n <= MAX_LANES, f"runN takes 2..{MAX_LANES} features"
     policy = policy or ChangesetPolicy()
@@ -784,27 +783,44 @@ def develop_best_of(
                 except Exception as exc:
                     workers.append(exc)
 
+        # Gate + review per candidate, PIPELINED (A1). Serially this was
+        # K x (gate + review); the gate is CPU-bound and must stay serialized —
+        # never two suites at once, same rule runN's gate_lock enforces — but
+        # the review is network-bound and has no reason to wait for the next
+        # candidate's gate. Under the lock the gates still run one at a time,
+        # while each review overlaps the gates that follow it, hiding up to
+        # (K-1) review latencies. Candidates are collected by index afterwards,
+        # so the ranking below stays byte-for-byte deterministic.
         entries_by_idx: dict[int, dict[str, bytes]] = {}
+        judged: dict[int, BestOfCandidate] = {}
+        live: list[int] = []
+
         for i, w in enumerate(workers):
             if isinstance(w, Exception):
-                report.candidates.append(BestOfCandidate(
+                judged[i] = BestOfCandidate(
                     i, False, None, 0, 0, False, None,
                     f"crashed: {type(w).__name__}: {w}",
-                ))
-                continue
-            if not (w.succeeded and w.entries):
-                verdict = w.attempts[-1].verdict if w.attempts else "did not run"
-                report.candidates.append(
-                    BestOfCandidate(i, False, w.final_run_ref, 0, 0, False, None, verdict)
                 )
-                continue
-            entries_by_idx[i] = w.entries
+            elif not (w.succeeded and w.entries):
+                verdict = w.attempts[-1].verdict if w.attempts else "did not run"
+                judged[i] = BestOfCandidate(
+                    i, False, w.final_run_ref, 0, 0, False, None, verdict
+                )
+            else:
+                entries_by_idx[i] = w.entries
+                live.append(i)
+
+        gate_lock = threading.Lock()
+
+        def _judge(i: int) -> BestOfCandidate:
+            w = workers[i]
             on_line = None
             if logs[i] is not None:
                 from .events import gate_line_observer
 
                 on_line = gate_line_observer(logs[i])
-            gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout, on_line=on_line)
+            with gate_lock:
+                gate = _run_gate(repo_root, w.entries, test_cmd, gate_timeout, on_line=on_line)
             if logs[i] is not None:
                 try:
                     logs[i].emit(
@@ -826,18 +842,30 @@ def develop_best_of(
                         placement=placement,
                         context_pack=context_pack,
                     )
-            report.candidates.append(
-                BestOfCandidate(
-                    i,
-                    True,
-                    w.final_run_ref,
-                    len(w.entries),
-                    sum(len(v) for v in w.entries.values()),
-                    gate.passed,
-                    review,
-                    "passed" if gate.passed else "gate_failed",
-                )
+            return BestOfCandidate(
+                i,
+                True,
+                w.final_run_ref,
+                len(w.entries),
+                sum(len(v) for v in w.entries.values()),
+                gate.passed,
+                review,
+                "passed" if gate.passed else "gate_failed",
             )
+
+        if live:
+            with ThreadPoolExecutor(max_workers=len(live)) as pool:
+                for i, fut in zip(live, [pool.submit(_judge, i) for i in live]):
+                    try:
+                        judged[i] = fut.result()
+                    except Exception as exc:
+                        judged[i] = BestOfCandidate(
+                            i, False, workers[i].final_run_ref, 0, 0, False, None,
+                            f"crashed: {type(exc).__name__}: {exc}",
+                        )
+                        entries_by_idx.pop(i, None)
+
+        report.candidates.extend(judged[i] for i in range(k))
 
         # Deterministic ranking: gate first, then review approval, fewer review
         # issues, fewer files, smaller diff. Candidate order breaks ties.
