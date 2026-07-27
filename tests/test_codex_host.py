@@ -145,6 +145,40 @@ class CodexReviewParsing(unittest.TestCase):
         self.assertEqual(v.summary, "ok")
         self.assertIsNone(v.error)
 
+    def test_only_a_real_json_true_approves(self):
+        """`bool()` on the reviewer's answer fails OPEN: bool("false") is True,
+        and so is bool("no") and bool(0.0 != 0). A model that answers with the
+        STRING "false" — which they do — had its rejection read as approval,
+        and --auto-settle applies an approved proposal without asking."""
+        for answer in ("false", "no", "0", "False", 0, [], {}, None, "true", 1):
+            with self.subTest(answer=answer):
+                def runner(argv, *, timeout, last_message_path, _a=answer):
+                    Path(last_message_path).write_text(
+                        json.dumps({"approved": _a, "summary": "s", "issues": []})
+                    )
+                    return 0, "done"
+
+                v = codex_review(
+                    Path(mkdtemp()), self._entries(), "f",
+                    codex_bin="/bin/codex", runner=runner,
+                )
+                # Only a JSON literal `true` is approval. Everything else —
+                # including a truthy non-boolean — is not the reviewer saying yes.
+                self.assertFalse(v.approved, f"{answer!r} must not approve")
+
+    def test_a_json_true_still_approves(self):
+        def runner(argv, *, timeout, last_message_path):
+            Path(last_message_path).write_text(
+                json.dumps({"approved": True, "summary": "ok", "issues": []})
+            )
+            return 0, "done"
+
+        v = codex_review(
+            Path(mkdtemp()), self._entries(), "f",
+            codex_bin="/bin/codex", runner=runner,
+        )
+        self.assertTrue(v.approved)
+
     def test_rejected_with_issues(self):
         def runner(argv, *, timeout, last_message_path):
             Path(last_message_path).write_text(

@@ -132,7 +132,13 @@ def _parse_verdict(raw: str) -> ReviewVerdict | None:
         if isinstance(data, dict) and "approved" in data:
             issues = data.get("issues") or []
             return ReviewVerdict(
-                approved=bool(data["approved"]),
+                # `is True`, not bool(). bool() fails OPEN on the one answer a
+                # model most plausibly gets wrong: bool("false") is True, and so
+                # is bool("no"). A rejection read as approval feeds
+                # --auto-settle, which applies without asking. Only the JSON
+                # literal `true` is the reviewer saying yes; anything else,
+                # truthy or not, is not.
+                approved=data["approved"] is True,
                 summary=str(data.get("summary", ""))[:500],
                 issues=[str(i)[:300] for i in issues if str(i).strip()][:20],
             )

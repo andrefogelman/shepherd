@@ -780,7 +780,11 @@ def run_review(
             pass
 
     return ReviewVerdict(
-        approved=bool(data.get("approved", False)),
+        # `is True`, not bool(). bool() fails OPEN on the answer a model most
+        # plausibly gets wrong — bool("false") is True — and an approval feeds
+        # --auto-settle, which writes without asking. Only the JSON literal
+        # `true` is the reviewer saying yes.
+        approved=data.get("approved") is True,
         summary=str(data.get("summary", "")),
         issues=[str(i) for i in data.get("issues", [])],
         resolved=[str(i) for i in (data.get("resolved") or [])],

@@ -383,6 +383,25 @@ class TheReviewerSeesTheOpenFindings(unittest.TestCase):
         _, verdict = self._drive_review(b'{"approved": true, "summary": "s"}', "")
         self.assertEqual(verdict.resolved, [])
 
+    def test_only_a_json_true_is_approval(self):
+        """`bool()` on the reviewer's answer fails OPEN. bool("false") is True,
+        and so is bool("no") — and an approval is what --auto-settle applies
+        without asking. Approval has to be the literal, not the truthiness."""
+        for raw in (
+            b'{"approved": "false", "summary": "s"}',
+            b'{"approved": "no", "summary": "s"}',
+            b'{"approved": "False", "summary": "s"}',
+            b'{"approved": 1, "summary": "s"}',
+            b'{"approved": "true", "summary": "s"}',   # the STRING, not the literal
+            b'{"summary": "s"}',                       # absent entirely
+        ):
+            with self.subTest(raw=raw):
+                _, verdict = self._drive_review(raw, "")
+                self.assertFalse(verdict.approved, f"{raw!r} must not approve")
+
+        _, verdict = self._drive_review(b'{"approved": true, "summary": "s"}', "")
+        self.assertTrue(verdict.approved)  # ...and a real one still does
+
 
 class TheAttemptLabelNamesItsOwnBudget(unittest.TestCase):
     def test_a_single_round_run_prints_what_it_always_printed(self):
