@@ -87,6 +87,51 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         assert cfg is not None
         self.assertIsNotNone(RG.preflight(cfg))
 
+    def test_preflight_looks_past_an_env_prefix(self):
+        """#9: `MIX_ENV=test mix test` is a normal test_cmd. Taking argv[0]
+        blindly made the binary check `command -v MIX_ENV=test`, which can
+        never resolve — preflight rejected a perfectly good remote config."""
+        warm = Path(tempfile.mkdtemp())
+        # a binary guaranteed absent, so the check has to RUN and name it
+        for test_cmd, missing in (
+            ("MIX_ENV=test nope-xyz-123 test", "nope-xyz-123"),
+            ("RAILS_ENV=test CI=1 nope-xyz-456 exec rspec", "nope-xyz-456"),
+        ):
+            with self.subTest(test_cmd=test_cmd):
+                cfg = parse_remote_config(
+                    {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": test_cmd}, None
+                )
+                assert cfg is not None
+                err = RG.preflight(cfg)
+                self.assertIsNotNone(err)
+                self.assertIn(missing, err or "")       # the real command word
+                self.assertNotIn("_ENV=test", err or "")  # never the assignment
+
+    def test_preflight_accepts_a_real_binary_behind_an_env_prefix(self):
+        warm = Path(tempfile.mkdtemp())
+        cfg = parse_remote_config(
+            {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "MIX_ENV=test sh -c true"},
+            None,
+        )
+        assert cfg is not None
+        self.assertIsNone(RG.preflight(cfg))
+
+    def test_preflight_still_checks_the_binary_after_a_prefix(self):
+        warm = Path(tempfile.mkdtemp())
+        cfg = parse_remote_config(
+            {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "FOO=bar true"}, None
+        )
+        assert cfg is not None
+        self.assertIsNone(RG.preflight(cfg))  # `true` does exist
+
+    def test_preflight_skips_the_check_for_an_all_assignment_command(self):
+        warm = Path(tempfile.mkdtemp())
+        cfg = parse_remote_config(
+            {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "FOO=bar"}, None
+        )
+        assert cfg is not None
+        self.assertIsNone(RG.preflight(cfg))  # nothing to resolve, do not invent one
+
     def test_full_gate_with_spaces_and_operators(self):
         warm = Path(tempfile.mkdtemp())
         (warm / "src").mkdir()

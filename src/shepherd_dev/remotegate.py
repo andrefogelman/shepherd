@@ -128,11 +128,32 @@ def _remote(cfg: RemoteGateConfig, script: str, timeout: int) -> subprocess.Comp
     )
 
 
+def _command_word(test_cmd: str) -> str:
+    """The binary a test_cmd actually invokes, looking past any leading VAR=…
+    assignments. `MIX_ENV=test mix test` runs `mix`, not `MIX_ENV=test` — taking
+    argv[0] blindly made preflight demand a binary literally named after the
+    assignment, which can never resolve, so a valid remote config was rejected
+    before any worker ran (#9). Returns "" when there is nothing to check."""
+    try:
+        parts = shlex.split(test_cmd)
+    except ValueError:  # unbalanced quotes — leave it to the remote shell
+        return ""
+    for part in parts:
+        # An assignment only counts as a prefix while no command word has been
+        # seen: `mix test FOO=bar` invokes mix, and `=x` / `1=x` are not valid
+        # assignments, so they ARE the command word.
+        name, sep, _ = part.partition("=")
+        if sep and name.isidentifier():
+            continue
+        return part
+    return ""
+
+
 def preflight(cfg: RemoteGateConfig, timeout: int = 20) -> str | None:
     """Verify the remote is usable BEFORE any worker runs. Returns an error
     string, or None when ready. Generic: only checks SSH + repo_dir + the test
     binary — nothing stack-specific."""
-    binary = shlex.split(cfg.test_cmd)[0] if cfg.test_cmd.strip() else ""
+    binary = _command_word(cfg.test_cmd)
     checks = [
         f"test -d {shlex.quote(cfg.repo_dir)} || {{ echo 'repo_dir missing: {cfg.repo_dir}' >&2; exit 3; }}",
     ]
