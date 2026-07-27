@@ -193,6 +193,7 @@ def develop_parallel(
     event_logs=None,
     event_log_main=None,
     stream_hook=None,
+    speculative_review: bool = False,
 ) -> ParallelReport:
     """Coordinate two parallel workers into one gated, reviewed, staged proposal.
 
@@ -338,6 +339,45 @@ def develop_parallel(
             _pemit(main_log, "gate.result",
                    {"passed": g.passed, "exit_code": g.exit_code, "infra_error": g.infra_error})
 
+        # Speculative review (A4, opt-in): the reviewer needs only the proposal,
+        # not the gate's verdict, so overlap the two and hide min(gate, review)
+        # from the wall clock. Same bargain as the single-run flag — a failed
+        # gate throws the verdict away, tokens included, hence opt-in. The
+        # snapshot is `combined` AS IT STANDS NOW: a repair round changes it,
+        # which invalidates the verdict (checked at the review point below).
+        spec_result: dict = {}
+        spec_thread = None
+        spec_basis = dict(combined)
+        if review_task is not None and speculative_review:
+            def _speculate():
+                try:
+                    with sp.open(clones[0]) as workspace:
+                        spec_result["verdict"] = run_review(
+                            workspace,
+                            review_task,
+                            feature=f"combined proposal for: {features[0]} + {features[1]}",
+                            diff_text=_entries_diff_text(spec_basis),
+                            provider=provider,
+                            placement=placement,
+                            context_pack=context_pack,
+                        )
+                except Exception:
+                    pass  # spec failure → the sequential path below reruns it
+
+            spec_thread = threading.Thread(
+                target=_speculate, daemon=True, name="shepherd-spec-review"
+            )
+            spec_thread.start()
+
+        def _reap_spec():
+            """Join the speculative reviewer and return its verdict. Every exit
+            below must call it: the thread holds clones[0] and describes a
+            specific `combined`, so one left running outlives the state it was
+            reviewing."""
+            if spec_thread is not None:
+                spec_thread.join()
+            return spec_result.get("verdict")
+
         _pemit(main_log, "phase.start", {"label": "combined gate"})
         gate = _run_gate(repo_root, combined, test_cmd, gate_timeout,
                          on_line=gate_on_line, stage=gate_stage, keep_stage=True)
@@ -380,21 +420,32 @@ def develop_parallel(
             _emit_gate(gate)
         report.combined_gate = gate
         if not gate.passed:
+            _reap_spec()  # the verdict dies with the proposal; the thread must not
             report.error = gate.infra_error or "combined gate failed after repairs"
             return report
 
         if review_task is not None:
             _pemit(main_log, "phase.start", {"label": "review"})
-            with sp.open(clones[0]) as workspace:
-                report.review = run_review(
-                    workspace,
-                    review_task,
-                    feature=f"combined proposal for: {features[0]} + {features[1]}",
-                    diff_text=_entries_diff_text(combined),
-                    provider=provider,
-                    placement=placement,
-                    context_pack=context_pack,
-                )
+            verdict = _reap_spec()
+            if verdict is not None and combined != spec_basis:
+                # A repair round moved the proposal after the speculation
+                # started, so that verdict describes a changeset that no longer
+                # exists. Discard it and review what is actually being staged.
+                verdict = None
+            if verdict is None:
+                with sp.open(clones[0]) as workspace:
+                    verdict = run_review(
+                        workspace,
+                        review_task,
+                        feature=f"combined proposal for: {features[0]} + {features[1]}",
+                        diff_text=_entries_diff_text(combined),
+                        provider=provider,
+                        placement=placement,
+                        context_pack=context_pack,
+                    )
+            report.review = verdict
+        else:
+            _reap_spec()
             if report.review is not None:
                 _pemit(main_log, "review.verdict", {"approved": report.review.approved})
                 for issue in report.review.issues or []:

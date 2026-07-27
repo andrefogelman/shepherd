@@ -1000,6 +1000,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         event_logs=event_logs,
         event_log_main=event_log_main,
         stream_hook=stream_hook,
+        speculative_review=getattr(args, "speculative_review", False),
     )
     if event_log_main is not None:
         event_log_main.emit(
@@ -1743,6 +1744,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--optimize-apply",
         action="store_true",
         help="with --optimize-after (or auto_optimize): persist a passing prompt edit",
+    )
+    p_run2.add_argument(
+        "--speculative-review",
+        action="store_true",
+        help="run the reviewer in parallel with the combined gate (hides review "
+             "latency; spends review tokens when the gate fails, and re-reviews "
+             "if a repair round changes the proposal)",
     )
     p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")

@@ -319,5 +319,133 @@ class SharedGateStage(unittest.TestCase):
         self.assertEqual(closed["n"], 1, "the shared stage is closed exactly once")
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class Run2SpeculativeReview(unittest.TestCase):
+    """A4: the review/gate overlap existed only in develop(). run2 ran its
+    reviewer strictly after the combined gate, even though the reviewer needs
+    only the proposal, not the gate's verdict. Opt-in, like the single-run
+    flag: a failed gate throws the verdict (and its tokens) away."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-spec2-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+
+    def _run(self, *, speculative, gate_delay=0.5, gate_passes=True, repairs=0):
+        import threading
+        import time
+
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import DevReport, GateResult, ReviewVerdict
+
+        marks: dict = {}
+        seq = {"n": 0}
+        lock = threading.Lock()
+        gates = {"n": 0}
+
+        def fake_worker(clone, feature, note, **_kw):
+            with lock:
+                seq["n"] += 1
+                mine = seq["n"]
+            report = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            report.entries = {f"src/w{mine}.py": b"W = 1\n"}
+            report.final_run_ref = f"run-{mine}"
+            return report
+
+        def fake_gate(*a, **kw):
+            gates["n"] += 1
+            marks.setdefault("gate_start", time.monotonic())
+            time.sleep(gate_delay)
+            marks["gate_end"] = time.monotonic()
+            passing = gate_passes and gates["n"] > repairs
+            return GateResult(passing, 0 if passing else 1, "ok" if passing else "boom")
+
+        def fake_review(*a, **kw):
+            marks.setdefault("review_start", time.monotonic())
+            marks["review_count"] = marks.get("review_count", 0) + 1
+            return ReviewVerdict(approved=True, summary="spec", issues=[])
+
+        def fake_develop(*a, **kw):
+            # the repair worker: returns a change so `combined` really moves
+            report = DevReport(feature="repair", succeeded=True, repo=str(self.repo))
+            report.entries = {"src/repair.py": b"R = 1\n"}
+            report.final_run_ref = "run-repair"
+            return report
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many,
+               P._run_gate, P.run_review, P.develop, P.sp)
+        P._run_worker = fake_worker
+        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._run_gate = fake_gate
+        P.run_review = fake_review
+        P.develop = fake_develop
+
+        class _Workspace:
+            def git_repo(self):
+                return None
+
+        class _FakeSp:
+            @staticmethod
+            def open(path):
+                class _Ctx:
+                    def __enter__(self):
+                        return _Workspace()
+
+                    def __exit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        P.sp = _FakeSp()
+        try:
+            report = P.develop_parallel(
+                self.repo, ["a", "b"], test_cmd="true", provider="static",
+                review_task=object(), speculative_review=speculative,
+            )
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many,
+             P._run_gate, P.run_review, P.develop, P.sp) = old
+        return report, marks
+
+    def test_reviewer_starts_before_the_gate_finishes(self):
+        report, marks = self._run(speculative=True)
+        self.assertTrue(report.succeeded)
+        self.assertIsNotNone(report.review)
+        self.assertLess(
+            marks["review_start"], marks["gate_end"],
+            "the reviewer must overlap the gate, not queue behind it",
+        )
+        self.assertEqual(marks["review_count"], 1, "no duplicate review on the happy path")
+
+    def test_off_by_default_the_review_still_follows_the_gate(self):
+        report, marks = self._run(speculative=False)
+        self.assertTrue(report.succeeded)
+        self.assertGreaterEqual(marks["review_start"], marks["gate_end"])
+
+    def test_a_repair_invalidates_the_speculative_verdict(self):
+        """The speculation reviews the proposal as it stood BEFORE the gate. A
+        repair round changes `combined`, so that verdict describes something
+        that no longer exists and must be re-run."""
+        report, marks = self._run(speculative=True, repairs=1)
+        self.assertTrue(report.succeeded)
+        self.assertEqual(report.repairs, 1)
+        self.assertEqual(marks["review_count"], 2, "stale verdict must be discarded")
+
+    def test_gate_failure_discards_the_verdict_and_reaps_the_thread(self):
+        import threading
+
+        report, _marks = self._run(speculative=True, gate_passes=False)
+        self.assertFalse(report.succeeded)
+        self.assertIsNone(report.review)
+        self.assertFalse(
+            any(t.name == "shepherd-spec-review" and t.is_alive()
+                for t in threading.enumerate()),
+            "no speculative reviewer may outlive the run",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
