@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 import json  # noqa: E402
 import tempfile  # noqa: E402
@@ -59,7 +62,7 @@ class RemotePlaceholderResolve(unittest.TestCase):
     def test_run_gate_resolves_remote_placeholder_no_ssh(self):  # #11
         # a remote test_cmd using {EXUNIT_TESTS} + a proposal with no ExUnit test
         # -> _run_gate returns a "no tests" GateResult WITHOUT touching ssh.
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / ".shepherd-dev.json").write_text(json.dumps({
             "test_remote": {"ssh": "root@host", "repo_dir": "/x", "test_cmd": "mix test {EXUNIT_TESTS}"}
         }))

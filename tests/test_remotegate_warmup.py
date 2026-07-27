@@ -18,6 +18,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev import remotegate as RG  # noqa: E402
 from shepherd_dev.remotegate import (  # noqa: E402
@@ -52,7 +55,7 @@ def _patched_popen(argv, **kw):
 
 
 def _warm_checkout() -> Path:
-    warm = Path(tempfile.mkdtemp())
+    warm = Path(mkdtemp())
     (warm / "src").mkdir()
     (warm / "src" / "a.py").write_text("V = 1\n")
     return warm
@@ -65,9 +68,9 @@ class RemoteGateWarmup(unittest.TestCase):
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         PS.subprocess.Popen = _patched_popen
-        self.db = Path(tempfile.mkdtemp())          # stands in for a DB/service store
+        self.db = Path(mkdtemp())          # stands in for a DB/service store
         self.warm = _warm_checkout()
-        self.wbase = Path(tempfile.mkdtemp())
+        self.wbase = Path(mkdtemp())
 
     def tearDown(self):
         from shepherd_dev import procstream as PS
@@ -148,7 +151,7 @@ class WarmupStillStagingIsNotAdopted(unittest.TestCase):
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         self.warm = _warm_checkout()
-        self.wbase = Path(tempfile.mkdtemp())
+        self.wbase = Path(mkdtemp())
 
     def tearDown(self):
         RG.subprocess.run = _real_run

@@ -14,6 +14,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 
 try:  # parallel.py imports the substrate; skip where absent
@@ -263,7 +266,7 @@ class StartupOverlapTests(unittest.TestCase):
     ssh-preflights the host) share nothing, but ran end to end."""
 
     def setUp(self):
-        self.repo = Path(tempfile.mkdtemp(prefix="shepherd-startup-"))
+        self.repo = Path(mkdtemp(prefix="shepherd-startup-"))
         (self.repo / "a.py").write_text("A = 1\n")
 
     def _args(self):
@@ -342,7 +345,7 @@ class SpeculativeReviewTests(unittest.TestCase):
     def _develop(self, test_cmd: str, monkey_review, on_discard=None):
         from shepherd_dev import supervisor as S
 
-        repo = Path(tempfile.mkdtemp(prefix="shepherd-spec-"))
+        repo = Path(mkdtemp(prefix="shepherd-spec-"))
         (repo / "seed.txt").write_text("s\n")
 
         class _CS:

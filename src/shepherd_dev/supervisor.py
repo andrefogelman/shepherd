@@ -301,6 +301,11 @@ def _remove_tree(path: Path) -> None:
              "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)",
              str(path)],
             check=False, timeout=120,
+            # Scrubbed, because this child is OUR interpreter: a PYTHONHOME or
+            # PYTHONPATH pointing somewhere else stops it booting at all, and
+            # with check=False the failure is invisible — every staged tree then
+            # leaks in silence. gate_env drops exactly those.
+            env=gate_env(),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:

@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.diffcollect import (  # noqa: E402
     collect_changed_entries,
@@ -18,8 +21,8 @@ from shepherd_dev.diffcollect import (  # noqa: E402
 
 class CollectChanged(unittest.TestCase):
     def test_new_and_modified(self):
-        base = Path(tempfile.mkdtemp())
-        mod = Path(tempfile.mkdtemp())
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
         (base / "a.py").write_text("a=1\n")
         (base / "b.py").write_text("b=1\n")
         (mod / "a.py").write_text("a=1\n")  # unchanged
@@ -31,8 +34,8 @@ class CollectChanged(unittest.TestCase):
         self.assertEqual(entries["c.py"], b"c=3\n")
 
     def test_ignores_venv(self):
-        base = Path(tempfile.mkdtemp())
-        mod = Path(tempfile.mkdtemp())
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
         (mod / ".venv").mkdir()
         (mod / ".venv" / "x.py").write_text("nope\n")
         (mod / "ok.py").write_text("ok\n")
@@ -46,8 +49,8 @@ class BaselineSnapshot(unittest.TestCase):
     mid-run."""
 
     def test_concurrent_edit_to_original_does_not_enter_the_proposal(self):
-        base = Path(tempfile.mkdtemp())
-        mod = Path(tempfile.mkdtemp())
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
         (base / "untouched.py").write_text("v=1\n")
         (base / "target.py").write_text("t=1\n")
         (mod / "untouched.py").write_text("v=1\n")  # worker never touched it
@@ -66,8 +69,8 @@ class BaselineSnapshot(unittest.TestCase):
     def test_without_baseline_the_stale_file_leaks_in(self):
         # Pins the reason the baseline exists: the live-tree comparison is
         # exactly what drags an unrelated human edit into the changeset.
-        base = Path(tempfile.mkdtemp())
-        mod = Path(tempfile.mkdtemp())
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
         (base / "untouched.py").write_text("v=1\n")
         (mod / "untouched.py").write_text("v=1\n")
         (base / "untouched.py").write_text("v=2  # human edit\n")
@@ -83,8 +86,8 @@ class BaselineSnapshot(unittest.TestCase):
         disappearing-work failure #3 exists to prevent. Simulated here with
         utime, since APFS timestamps are too fine-grained to hit it naturally.
         """
-        base = Path(tempfile.mkdtemp())
-        mod = Path(tempfile.mkdtemp())
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
         target = mod / "target.py"
         target.write_text("t=1\n")
         st = target.stat()
@@ -99,7 +102,7 @@ class BaselineSnapshot(unittest.TestCase):
                          {"target.py": b"t=2\n"})
 
     def test_snapshot_covers_new_files_and_ignores_noise(self):
-        mod = Path(tempfile.mkdtemp())
+        mod = Path(mkdtemp())
         (mod / "a.py").write_text("a=1\n")
         (mod / ".venv").mkdir()
         (mod / ".venv" / "x.py").write_text("nope\n")

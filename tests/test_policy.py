@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.policy import ChangesetPolicy, check_paths  # noqa: E402
 from shepherd_dev.remotegate import _is_safe_rel, _overlay, parse_remote_config  # noqa: E402
@@ -69,8 +72,8 @@ class SettleProposalSymlink(unittest.TestCase):
 
         from shepherd_dev.cli import settle_proposal
 
-        root = Path(tempfile.mkdtemp())
-        secret = Path(tempfile.mkdtemp()) / "secret.txt"
+        root = Path(mkdtemp())
+        secret = Path(mkdtemp()) / "secret.txt"
         secret.write_text("TOPSECRET")
         files = root / ".shepherd-proposals" / "p1" / "files"
         files.mkdir(parents=True)

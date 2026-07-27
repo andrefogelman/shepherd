@@ -10,13 +10,16 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.staging import stage_proposal  # noqa: E402
 
 
 class ProposalIdCollision(unittest.TestCase):
     def test_two_stages_get_distinct_ids(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         id1, w1 = stage_proposal(root, {"a.py": b"1\n"}, {"feature": "x"})
         id2, w2 = stage_proposal(root, {"b.py": b"2\n"}, {"feature": "y"})
         self.assertNotEqual(id1, id2)  # even back-to-back (same second), the uuid suffix differs

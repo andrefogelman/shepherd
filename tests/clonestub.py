@@ -17,13 +17,14 @@ Not named test_*.py so unittest discovery leaves it alone.
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
+
+from tmpdirs import mkdtemp
 
 
 def make_clone(seed: Path, *, overlay: dict[str, bytes] | None = None) -> Path:
     """A throwaway copy of `seed`, laid out as production lays out a clone."""
-    dest = Path(tempfile.mkdtemp(prefix="shepherd-clonestub-"))
+    dest = Path(mkdtemp(prefix="shepherd-clonestub-"))
     clone = dest / "repo"
     shutil.copytree(seed, clone, symlinks=True)
     for rel, content in (overlay or {}).items():

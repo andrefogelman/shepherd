@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.policy import ChangesetPolicy  # noqa: E402
 from shepherd_dev.providers.grok_exec import FakeGrokExecutor  # noqa: E402
@@ -17,7 +20,7 @@ from shepherd_dev.providers.grok_host import develop_grok  # noqa: E402
 
 class GrokHostLoop(unittest.TestCase):
     def test_fake_worker_gates_and_stages(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         # trivial always-pass gate
         report = develop_grok(
@@ -46,7 +49,7 @@ class GrokHostLoop(unittest.TestCase):
         """#3: a file the human edits mid-run, untouched by the worker, must
         stay out of the proposal — otherwise settling rewrites it with the
         stale copy the clone was made from."""
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         (root / "human.py").write_text("original\n")
 
@@ -68,7 +71,7 @@ class GrokHostLoop(unittest.TestCase):
         self.assertEqual(list(report.entries or {}), ["hello.py"])
 
     def test_policy_rejects_escape(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_grok(
             root,
@@ -84,7 +87,7 @@ class GrokHostLoop(unittest.TestCase):
         self.assertFalse(report.succeeded)
 
     def test_gate_fail_retries(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_grok(
             root,

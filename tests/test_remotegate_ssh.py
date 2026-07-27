@@ -23,6 +23,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev import remotegate as RG  # noqa: E402
 from shepherd_dev.remotegate import (  # noqa: E402
@@ -84,7 +87,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertIn("test -d /x && echo Y", argv[-1])
 
     def test_preflight_passes_for_existing_repo(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         (warm / "src").mkdir()
         cfg = parse_remote_config({"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None)
         assert cfg is not None
@@ -99,7 +102,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         """#9: `MIX_ENV=test mix test` is a normal test_cmd. Taking argv[0]
         blindly made the binary check `command -v MIX_ENV=test`, which can
         never resolve — preflight rejected a perfectly good remote config."""
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         # a binary guaranteed absent, so the check has to RUN and name it
         for test_cmd, missing in (
             ("MIX_ENV=test nope-xyz-123 test", "nope-xyz-123"),
@@ -116,7 +119,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
                 self.assertNotIn("_ENV=test", err or "")  # never the assignment
 
     def test_preflight_accepts_a_real_binary_behind_an_env_prefix(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "MIX_ENV=test sh -c true"},
             None,
@@ -125,7 +128,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertIsNone(RG.preflight(cfg))
 
     def test_preflight_still_checks_the_binary_after_a_prefix(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "FOO=bar true"}, None
         )
@@ -133,7 +136,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertIsNone(RG.preflight(cfg))  # `true` does exist
 
     def test_preflight_skips_the_check_for_an_all_assignment_command(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "FOO=bar"}, None
         )
@@ -166,7 +169,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
 
         for available in (True, False):
             with self.subTest(timeout_available=available):
-                stub = Path(tempfile.mkdtemp())
+                stub = Path(mkdtemp())
                 (stub / "sh").symlink_to("/bin/sh")
                 (stub / "echo").write_text('#!/bin/sh\n/bin/echo "$@"\n')
                 (stub / "echo").chmod(0o755)
@@ -190,13 +193,13 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         """#10: exit 124 was read as "timeout(1) killed it" unconditionally, so
         a suite that exits 124 on its own became an infra_error — which aborts
         the whole run instead of counting as a retryable gate failure."""
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         (warm / "src").mkdir()
         cfg = parse_remote_config({
             "ssh": "root@host", "repo_dir": str(warm),
             "copy_cmd": "cp -R {repo} {workdir}",
             "test_cmd": "sh -c 'exit 124'",
-            "workdir_base": str(Path(tempfile.mkdtemp())),
+            "workdir_base": str(Path(mkdtemp())),
         }, "python")
         assert cfg is not None
         res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=30)
@@ -211,7 +214,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         Driven by what the remote REPORTS rather than by editing PATH: the
         probe runs on the remote, and stripping the local PATH only breaks the
         harness's own `bash -lc`."""
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None
         )
@@ -245,7 +248,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         """Stubbed like the case above. Letting the real probe run would make
         the assertion depend on whether THIS machine ships timeout(1) — which
         is the very platform difference under test."""
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None
         )
@@ -267,20 +270,20 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertNotIn("no timeout(1)", err.getvalue())
 
     def test_a_real_remote_timeout_is_still_infra(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         (warm / "src").mkdir()
         cfg = parse_remote_config({
             "ssh": "root@host", "repo_dir": str(warm),
             "copy_cmd": "cp -R {repo} {workdir}",
             "test_cmd": "sleep 30",
-            "workdir_base": str(Path(tempfile.mkdtemp())),
+            "workdir_base": str(Path(mkdtemp())),
         }, "python")
         assert cfg is not None
         # This asserts the REMOTE kill, so the remote needs a timeout(1) to do
         # it with. macOS has none, and without one `sleep 30` simply finishes
         # inside the local deadline and the gate passes — correct behaviour,
         # but not what this test is about. Put a shim first on PATH.
-        shim = Path(tempfile.mkdtemp())
+        shim = Path(mkdtemp())
         (shim / "timeout").write_text(
             '#!/bin/sh\nlimit=$1; shift\n"$@" & pid=$!\n'
             '( sleep "$limit"; kill -9 $pid 2>/dev/null ) & watcher=$!\n'
@@ -299,16 +302,16 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertIn("timed out", res.infra_error or "")
 
     def test_full_gate_with_spaces_and_operators(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         (warm / "src").mkdir()
         (warm / "src" / "a.py").write_text("V=1\n")
-        db = Path(tempfile.mkdtemp())
+        db = Path(mkdtemp())
         cfg = parse_remote_config({
             "ssh": "root@host", "repo_dir": str(warm), "copy_cmd": "cp -R {repo} {workdir}",
             "setup_cmd": f"mkdir -p {db}/d_{{id}} && echo up > {db}/d_{{id}}/s",
             "test_cmd": f"test \"$(cat {db}/d_{{id}}/s)\" = up && grep -q 'V = 42' src/a.py && echo GATE_OK",
             "teardown_cmd": f"rm -rf {db}/d_{{id}}",
-            "workdir_base": tempfile.mkdtemp(),
+            "workdir_base": mkdtemp(),
         }, "python")
         assert cfg is not None
         res = run_remote_gate(cfg, {"src/a.py": b"V = 42\n"}, timeout=30)

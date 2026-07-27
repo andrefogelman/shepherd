@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.policy import ChangesetPolicy  # noqa: E402
 from shepherd_dev.providers.codex_exec import FakeCodexExecutor  # noqa: E402
@@ -21,7 +24,7 @@ from shepherd_dev.supervisor import ReviewVerdict  # noqa: E402
 
 class CodexHostLoop(unittest.TestCase):
     def test_fake_worker_gates_and_stages(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_codex(
             root,
@@ -42,7 +45,7 @@ class CodexHostLoop(unittest.TestCase):
         self.assertEqual(manifest.get("provider"), "codex")
 
     def test_policy_rejects_escape(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_codex(
             root,
@@ -55,7 +58,7 @@ class CodexHostLoop(unittest.TestCase):
         self.assertFalse(report.succeeded)
 
     def test_gate_fail_retries(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_codex(
             root,
@@ -70,7 +73,7 @@ class CodexHostLoop(unittest.TestCase):
 
     def test_review_fn_injected(self):
         """do_review=True routes through the codex reviewer (injected here)."""
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         seen: dict = {}
 
@@ -97,7 +100,7 @@ class CodexHostLoop(unittest.TestCase):
         self.assertTrue(manifest["review"]["approved"])
 
     def test_summary_names_codex(self):
-        root = Path(tempfile.mkdtemp())
+        root = Path(mkdtemp())
         (root / "seed.txt").write_text("seed\n")
         report = develop_codex(
             root,
@@ -135,7 +138,7 @@ class CodexReviewParsing(unittest.TestCase):
             return 0, "done"
 
         v = codex_review(
-            Path(tempfile.mkdtemp()), self._entries(), "f",
+            Path(mkdtemp()), self._entries(), "f",
             codex_bin="/bin/codex", runner=runner,
         )
         self.assertTrue(v.approved)
@@ -150,7 +153,7 @@ class CodexReviewParsing(unittest.TestCase):
             return 0, "done"
 
         v = codex_review(
-            Path(tempfile.mkdtemp()), self._entries(), "f",
+            Path(mkdtemp()), self._entries(), "f",
             codex_bin="/bin/codex", runner=runner,
         )
         self.assertFalse(v.approved)
@@ -164,7 +167,7 @@ class CodexReviewParsing(unittest.TestCase):
             return 0, "done"
 
         v = codex_review(
-            Path(tempfile.mkdtemp()), self._entries(), "f",
+            Path(mkdtemp()), self._entries(), "f",
             codex_bin="/bin/codex", runner=runner,
         )
         self.assertTrue(v.approved)
@@ -174,7 +177,7 @@ class CodexReviewParsing(unittest.TestCase):
             return 1, "exploded"
 
         v = codex_review(
-            Path(tempfile.mkdtemp()), self._entries(), "f",
+            Path(mkdtemp()), self._entries(), "f",
             codex_bin="/bin/codex", runner=runner,
         )
         self.assertFalse(v.approved)
@@ -182,7 +185,7 @@ class CodexReviewParsing(unittest.TestCase):
 
     def test_no_binary_is_error_verdict(self):
         v = codex_review(
-            Path(tempfile.mkdtemp()), self._entries(), "f", codex_bin=None,
+            Path(mkdtemp()), self._entries(), "f", codex_bin=None,
         )
         self.assertFalse(v.approved)
         self.assertIsNotNone(v.error)

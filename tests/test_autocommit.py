@@ -12,6 +12,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.cli import auto_commit_branch  # noqa: E402
 
@@ -21,7 +24,7 @@ def _git(root, *argv):
 
 
 def _repo() -> Path:
-    root = Path(tempfile.mkdtemp())
+    root = Path(mkdtemp())
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "t@t.co")
     _git(root, "config", "user.name", "t")

@@ -16,6 +16,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.progress import ProgressReporter  # noqa: E402
 from shepherd_dev.supervisor import _prior_attempt_guidance, develop  # noqa: E402
@@ -95,7 +98,7 @@ class _Workspace:
 
 class RetryCarriesPriorDiff(unittest.TestCase):
     def test_attempt2_guidance_has_attempt1_proposal(self):
-        repo_root = Path(tempfile.mkdtemp())
+        repo_root = Path(mkdtemp())
         (repo_root / "seed.txt").write_text("seed\n")
         ws = _Workspace([
             {"impl.py": b"def f():\n    return 'ATTEMPT_ONE_MARKER'\n"},
@@ -116,7 +119,7 @@ class RetryCarriesPriorDiff(unittest.TestCase):
 
 class ProgressWiring(unittest.TestCase):
     def test_reporter_receives_phase_lines_and_activity(self):
-        repo_root = Path(tempfile.mkdtemp())
+        repo_root = Path(mkdtemp())
         (repo_root / "seed.txt").write_text("seed\n")
         ws = _Workspace([{"impl.py": b"def f():\n    return 1\n"}])
         buf = io.StringIO()

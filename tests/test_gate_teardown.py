@@ -24,6 +24,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.supervisor import DEP_DIRS, LocalGateStage, _remove_tree  # noqa: E402
 
@@ -93,7 +96,7 @@ def _link_deps(guarded: Path, dest: Path, names=DEP_DIRS) -> None:
 
 def _stage_with_link_into(guarded: Path, names=DEP_DIRS) -> Path:
     """A stage shaped like the gate's: real files plus dep-dir symlinks."""
-    root = Path(tempfile.mkdtemp(prefix="shepherd-teardown-test-"))
+    root = Path(mkdtemp(prefix="shepherd-teardown-test-"))
     (root / "base" / "src").mkdir(parents=True)
     (root / "base" / "src" / "mod.py").write_bytes(b"x = 1\n")
     _link_deps(guarded, root / "base", names)
@@ -108,7 +111,7 @@ class GuardSimulationTests(unittest.TestCase):
         """Pinned separately so a platform where the probe cannot resolve a
         dir_fd fails here by name, instead of quietly turning every test below
         into one that raises nothing and proves nothing."""
-        directory = Path(tempfile.mkdtemp(prefix="shepherd-fdprobe-"))
+        directory = Path(mkdtemp(prefix="shepherd-fdprobe-"))
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         fd = os.open(directory, os.O_RDONLY)
         self.addCleanup(os.close, fd)
@@ -121,7 +124,7 @@ class GuardSimulationTests(unittest.TestCase):
     def test_an_in_process_rmtree_dies_on_a_link_into_the_guarded_tree(self):
         for name in DEP_DIRS:
             with self.subTest(dep_dir=name):
-                guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
+                guarded = Path(mkdtemp(prefix="shepherd-guarded-"))
                 self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
                 stage = _stage_with_link_into(guarded, [name])
                 self.addCleanup(shutil.rmtree, stage, ignore_errors=True)
@@ -133,9 +136,9 @@ class GuardSimulationTests(unittest.TestCase):
                 self.assertTrue(stage.exists())
 
     def test_the_guard_leaves_an_ordinary_stage_alone(self):
-        guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
+        guarded = Path(mkdtemp(prefix="shepherd-guarded-"))
         self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
-        stage = Path(tempfile.mkdtemp(prefix="shepherd-teardown-test-"))
+        stage = Path(mkdtemp(prefix="shepherd-teardown-test-"))
         (stage / "src").mkdir()
         (stage / "src" / "mod.py").write_bytes(b"x = 1\n")
 
@@ -146,7 +149,7 @@ class GuardSimulationTests(unittest.TestCase):
 
 class RemoveTreeTests(unittest.TestCase):
     def test_teardown_survives_a_link_into_the_guarded_tree(self):
-        guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
+        guarded = Path(mkdtemp(prefix="shepherd-guarded-"))
         self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
         stage = _stage_with_link_into(guarded)
         self.addCleanup(shutil.rmtree, stage, ignore_errors=True)
@@ -159,7 +162,7 @@ class RemoveTreeTests(unittest.TestCase):
             self.assertTrue((guarded / name).is_dir(), name)
 
     def test_local_gate_stage_close_survives_the_same_stage(self):
-        guarded = Path(tempfile.mkdtemp(prefix="shepherd-guarded-"))
+        guarded = Path(mkdtemp(prefix="shepherd-guarded-"))
         self.addCleanup(shutil.rmtree, guarded, ignore_errors=True)
         stage = LocalGateStage(guarded)
         self.addCleanup(shutil.rmtree, stage._root, ignore_errors=True)
@@ -172,14 +175,14 @@ class RemoveTreeTests(unittest.TestCase):
         self.assertFalse(stage._root.exists())
 
     def test_teardown_of_a_plain_tree_still_removes_it(self):
-        stage = Path(tempfile.mkdtemp(prefix="shepherd-teardown-test-"))
+        stage = Path(mkdtemp(prefix="shepherd-teardown-test-"))
         (stage / "a").mkdir()
         (stage / "a" / "b.py").write_bytes(b"1\n")
         _remove_tree(stage)
         self.assertFalse(stage.exists())
 
     def test_teardown_of_a_missing_tree_is_a_no_op(self):
-        missing = Path(tempfile.mkdtemp(prefix="shepherd-teardown-test-")) / "gone"
+        missing = Path(mkdtemp(prefix="shepherd-teardown-test-")) / "gone"
         _remove_tree(missing)  # must not raise
         self.assertFalse(missing.exists())
 
@@ -200,7 +203,7 @@ class RealSubstrateTeardownTests(unittest.TestCase):
     """
 
     def _workspace(self) -> Path:
-        repo = Path(tempfile.mkdtemp(prefix="shepherd-ws-test-")) / "repo"
+        repo = Path(mkdtemp(prefix="shepherd-ws-test-")) / "repo"
         repo.mkdir()
         self.addCleanup(shutil.rmtree, repo.parent, ignore_errors=True)
         for cmd in (

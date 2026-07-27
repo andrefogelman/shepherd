@@ -10,6 +10,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.providers.codex_exec import (  # noqa: E402
     CliCodexExecutor,
@@ -86,19 +89,19 @@ class Factory(unittest.TestCase):
 
 class FakeExecutor(unittest.TestCase):
     def test_writes_files(self):
-        clone = Path(tempfile.mkdtemp())
+        clone = Path(mkdtemp())
         res = FakeCodexExecutor({"pkg/mod.py": b"ok\n"}).run(clone, "x", budget_seconds=5)
         self.assertTrue(res.ok)
         self.assertEqual((clone / "pkg" / "mod.py").read_bytes(), b"ok\n")
 
     def test_blocks_escape(self):
-        clone = Path(tempfile.mkdtemp())
+        clone = Path(mkdtemp())
         res = FakeCodexExecutor({"../evil.py": b"x"}).run(clone, "x", budget_seconds=5)
         self.assertFalse(res.ok)
 
     def test_fail_mode(self):
         res = FakeCodexExecutor(fail=True, error="boom").run(
-            Path(tempfile.mkdtemp()), "x", budget_seconds=5
+            Path(mkdtemp()), "x", budget_seconds=5
         )
         self.assertFalse(res.ok)
         self.assertEqual(res.error, "boom")

@@ -7,6 +7,7 @@ Runnable with: python -m unittest tests.test_gatestream
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev import procstream as PS  # noqa: E402
 from shepherd_dev import remotegate as RG  # noqa: E402
@@ -31,7 +35,7 @@ class GateEnvIsolation(unittest.TestCase):
     imports and harness config from outside the tree under test."""
 
     def setUp(self):
-        self.repo = Path(tempfile.mkdtemp(prefix="shepherd-gateenv-"))
+        self.repo = Path(mkdtemp(prefix="shepherd-gateenv-"))
         (self.repo / "tests").mkdir()
         (self.repo / "tests" / "test_x.py").write_text(
             "import unittest\n"
@@ -71,6 +75,28 @@ class GateEnvIsolation(unittest.TestCase):
                 os.environ.pop("DATABASE_URL", None)
             else:
                 os.environ["DATABASE_URL"] = old
+
+    def test_the_stage_is_removed_even_under_a_broken_pythonhome(self):
+        """_remove_tree deletes the staged tree from a CHILD interpreter. That
+        child is ours, so a PYTHONHOME aimed elsewhere stops it booting — and
+        with check=False the failure is invisible and every staged tree leaks."""
+        import tempfile as _tf
+
+        scratch = Path(mkdtemp(prefix="shepherd-removeprobe-"))
+        before = set(Path(_tf.gettempdir()).glob("shepherd-gate-*"))
+        old = os.environ.get("PYTHONHOME")
+        os.environ["PYTHONHOME"] = "/nonexistent/interpreter"
+        try:
+            entries = {"tests/test_x.py": (self.repo / "tests" / "test_x.py").read_bytes()}
+            _run_gate(self.repo, entries, "true", 60)
+        finally:
+            if old is None:
+                os.environ.pop("PYTHONHOME", None)
+            else:
+                os.environ["PYTHONHOME"] = old
+            shutil.rmtree(scratch, ignore_errors=True)
+        after = set(Path(_tf.gettempdir()).glob("shepherd-gate-*"))
+        self.assertEqual(after - before, set(), "the gate's staged tree leaked")
 
     def test_strip_list_is_configurable_in_both_directions(self):
         from shepherd_dev.supervisor import gate_env
@@ -215,7 +241,7 @@ class RemoteGateStreamingTests(unittest.TestCase):
         PS.subprocess.Popen = _real_popen
 
     def test_remote_test_step_streams_lines(self):
-        warm = Path(tempfile.mkdtemp())
+        warm = Path(mkdtemp())
         (warm / "src").mkdir()
         (warm / "src" / "a.py").write_text("V = 1\n")
         cfg = parse_remote_config({
@@ -223,7 +249,7 @@ class RemoteGateStreamingTests(unittest.TestCase):
             "repo_dir": str(warm),
             "copy_cmd": "cp -R {repo} {workdir}",
             "test_cmd": 'echo "FAILED tests/test_x.py::test_a - remote boom"; exit 1',
-            "workdir_base": tempfile.mkdtemp(),
+            "workdir_base": mkdtemp(),
         }, "python")
         assert cfg is not None
         lines: list[str] = []

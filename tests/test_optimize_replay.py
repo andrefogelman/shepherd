@@ -15,6 +15,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.optimize import (  # noqa: E402
     REPLAY_GATE_TIMEOUT,
@@ -63,7 +66,7 @@ class ReplayInvocation(unittest.TestCase):
                 return _P()
             return real_run(argv, **kw)
 
-        repo = Path(tempfile.mkdtemp())
+        repo = Path(mkdtemp())
         real_run(["git", "init", "-q"], cwd=repo)
         real_run(["git", "config", "user.email", "t@t"], cwd=repo)
         real_run(["git", "config", "user.name", "t"], cwd=repo)

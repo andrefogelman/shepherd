@@ -17,6 +17,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.contextpack import (  # noqa: E402
     build_pack,
@@ -26,7 +29,7 @@ from shepherd_dev.contextpack import (  # noqa: E402
 
 
 def _repo(files: dict[str, str]) -> Path:
-    root = Path(tempfile.mkdtemp())
+    root = Path(mkdtemp())
     for rel, content in files.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
