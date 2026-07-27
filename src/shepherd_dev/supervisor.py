@@ -1082,6 +1082,19 @@ def develop(
                 target=_speculate, daemon=True, name="shepherd-spec-review"
             )
             spec_thread.start()
+
+        def _reap_spec():
+            """Reap the speculative reviewer and hand back its verdict (None if
+            it never produced one). EVERY exit from this attempt must call it:
+            the thread holds `workspace` and reads the very changeset the
+            failure paths discard, so one left running both races
+            output.discard() and overlaps the NEXT attempt's workspace.run.
+            The join only ever sat on the review path, which both gate-failure
+            exits jump straight over."""
+            if spec_thread is not None:
+                spec_thread.join()
+            return spec_result.get("verdict")
+
         if test_cmd is not None:
             reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · gate")
             _emit("phase.start", {"label": "gate"}, attempt=number)
@@ -1109,6 +1122,7 @@ def develop(
                 # Surface the run-ref so the summary tells the user how to settle/reject
                 # the retained proposal — else the next run blocks on a pending output
                 # with no visible ref (#9).
+                _reap_spec()
                 reporter.fail(f"gate infra: {gate.infra_error[:80]}")
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
                 report.final_run_ref = run.run_ref
@@ -1117,6 +1131,7 @@ def develop(
                 return report
 
             if not gate.passed:
+                _reap_spec()  # before discard(): the reviewer is still reading it
                 output.discard()
                 reporter.fail(f"gate failed (exit {gate.exit_code})")
                 report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
@@ -1128,16 +1143,14 @@ def develop(
         report.final_run_ref = run.run_ref
         report.entries = entries
         if review_task is None:
+            _reap_spec()
             return report
 
         reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · review")
         _emit("phase.start", {"label": "review"}, attempt=number)
         # A local, not report.review: on a rework round the previous verdict is
         # still on the report, and reusing it would skip this round's review.
-        verdict = None
-        if spec_thread is not None:
-            spec_thread.join()  # already ran overlapped with the gate
-            verdict = spec_result.get("verdict")
+        verdict = _reap_spec()  # already ran overlapped with the gate
         if verdict is None:
             verdict = run_review(
                 workspace,

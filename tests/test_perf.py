@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -174,7 +175,7 @@ class SpeculativeReviewTests(unittest.TestCase):
     is on: the reviewer starts BEFORE the gate finishes; its verdict is used
     on gate pass and discarded on gate fail."""
 
-    def _develop(self, test_cmd: str, monkey_review):
+    def _develop(self, test_cmd: str, monkey_review, on_discard=None):
         from shepherd_dev import supervisor as S
 
         repo = Path(tempfile.mkdtemp(prefix="shepherd-spec-"))
@@ -200,7 +201,8 @@ class SpeculativeReviewTests(unittest.TestCase):
                 return self._cs
 
             def discard(self):
-                pass
+                if on_discard is not None:
+                    on_discard()
 
         class _Run:
             def __init__(self):
@@ -260,6 +262,38 @@ class SpeculativeReviewTests(unittest.TestCase):
         report = self._develop("exit 1", fake_review)
         self.assertFalse(report.succeeded)
         self.assertIsNone(report.review)  # speculative result thrown away
+
+    def test_reviewer_is_reaped_before_the_gate_fail_path_proceeds(self):
+        """The spec thread holds the workspace and reads the very changeset the
+        failure path discards; leaving it running let it overlap the NEXT
+        attempt's workspace.run. join() only existed on the review path, which
+        both gate-failure exits jump over."""
+        from shepherd_dev.supervisor import ReviewVerdict
+
+        def spec_alive():
+            return any(
+                t.name == "shepherd-spec-review" and t.is_alive()
+                for t in threading.enumerate()
+            )
+
+        alive_at_discard = []
+        release = threading.Event()
+
+        def slow_review(*a, **kw):
+            release.wait(10)  # outlives the (instantly failing) gate
+            return ReviewVerdict(approved=True, summary="ok", issues=[])
+
+        def on_discard():
+            release.set()  # let the reviewer finish, then observe
+            alive_at_discard.append(spec_alive())
+
+        report = self._develop("exit 1", slow_review, on_discard=on_discard)
+        self.assertFalse(report.succeeded)
+        self.assertEqual(
+            alive_at_discard, [False],
+            "the spec reviewer must be joined before output.discard() runs",
+        )
+        self.assertFalse(spec_alive(), "no spec reviewer may outlive the attempt")
 
 
 if __name__ == "__main__":
