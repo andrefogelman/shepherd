@@ -190,6 +190,82 @@ class AdoptionKeyTests(unittest.TestCase):
         self.assertNotEqual(k0, self._key())
 
 
+class StartupOverlapTests(unittest.TestCase):
+    """A6: the context pack and the gate resolution (whose remote branch
+    ssh-preflights the host) share nothing, but ran end to end."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="shepherd-startup-"))
+        (self.repo / "a.py").write_text("A = 1\n")
+
+    def _args(self):
+        import argparse
+
+        return argparse.Namespace(
+            feature="a feature", repo=str(self.repo), test_cmd=None,
+            provider="static", allowed_prefix=[], no_context_pack=False,
+            no_plan=False, best_of=1, no_review=True, auto_settle=False,
+            review_rounds=1, mode="feature", quiet=True, verbose=False,
+            json=False, fresh_adopt=False,
+        )
+
+    def _run(self, delay=0.4):
+        import time
+
+        from shepherd_dev import cli as C
+
+        marks: dict = {}
+
+        def slow_pack(args, repo_root, feature_text, scan=None, out=None):
+            marks["pack_start"] = time.monotonic()
+            time.sleep(delay)
+            marks["pack_end"] = time.monotonic()
+            return "PACK", {"planned_files": []}
+
+        def slow_gate(repo_root, cmd, provider):
+            marks["gate_start"] = time.monotonic()
+            time.sleep(delay)
+            marks["gate_end"] = time.monotonic()
+            return "true", None, True
+
+        class _Stop(Exception):
+            pass
+
+        def stop_here(repo_root, fresh=False):
+            raise _Stop  # everything under test has already happened
+
+        old = (C._build_pack, C._resolve_gate, C._resolve_repo, C._refresh_substrate)
+        C._build_pack = slow_pack
+        C._resolve_gate = slow_gate
+        C._resolve_repo = lambda repo: self.repo
+        C._refresh_substrate = stop_here
+        started = time.monotonic()
+        try:
+            C.cmd_run(self._args())
+        except _Stop:
+            pass
+        finally:
+            (C._build_pack, C._resolve_gate, C._resolve_repo,
+             C._refresh_substrate) = old
+        return marks, time.monotonic() - started
+
+    def test_pack_and_gate_resolution_overlap(self):
+        marks, _elapsed = self._run()
+        self.assertLess(marks["pack_start"], marks["gate_end"])
+        self.assertLess(marks["gate_start"], marks["pack_end"])
+
+    def test_startup_is_not_the_serial_sum(self):
+        delay = 0.4
+        _marks, elapsed = self._run(delay)
+        self.assertLess(elapsed, 2 * delay * 0.85, f"{elapsed:.2f}s vs {2 * delay:.2f}s serial")
+
+    def test_the_pack_thread_never_outlives_the_startup(self):
+        self._run(0.1)
+        self.assertFalse(
+            any(t.name == "shepherd-pack" and t.is_alive() for t in threading.enumerate())
+        )
+
+
 class SpeculativeReviewTests(unittest.TestCase):
     """develop() overlaps the reviewer with the gate when speculative_review
     is on: the reviewer starts BEFORE the gate finishes; its verdict is used

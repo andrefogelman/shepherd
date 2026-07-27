@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -689,11 +690,38 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"error: --best-of is not supported with --provider {args.provider} yet (use claude)", file=sys.stderr)
         return 2
 
-    args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
+    # Startup overlap (A6): the context pack (planning subprocess + repo scan)
+    # and the gate resolution (which, for a remote gate, ssh-preflights the
+    # host) share nothing — the pack is built from args.feature, before the
+    # gate hint is appended. Run them together instead of end to end.
+    #
+    # _refresh_substrate deliberately stays serial after both: it rmtree's
+    # .vcscore under the repo the pack is walking, and that removal takes no
+    # lock. Overlapping it would trade startup seconds for a race.
+    pack_out: list[str] = []
+    pack_box: dict = {}
+
+    def _pack_lane():
+        try:
+            pack_box["result"] = _build_pack(args, repo_root, args.feature, out=pack_out)
+        except Exception as exc:
+            pack_box["error"] = exc
+
+    pack_thread = threading.Thread(target=_pack_lane, name="shepherd-pack", daemon=True)
+    pack_thread.start()
+    try:
+        args.test_cmd, gate_hint, ok = _resolve_gate(repo_root, args.test_cmd, args.provider)
+    finally:
+        pack_thread.join()  # never leave it walking the repo we are about to touch
+    for line in pack_out:
+        print(line)
     if not ok:
         return 2
+    if "error" in pack_box:
+        print(f"error: context pack failed: {pack_box['error']}", file=sys.stderr)
+        return 2
     feature = _with_hint(args.feature, gate_hint)
-    pack, pack_stats = _build_pack(args, repo_root, args.feature)
+    pack, pack_stats = pack_box.get("result", (None, {}))
 
     # ── Hosted paths (L1 host / L2 try): no Claude, no workspace.run by default ──
     if args.provider in ("grok", "codex"):
