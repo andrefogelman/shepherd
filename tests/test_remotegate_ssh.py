@@ -155,24 +155,36 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertTrue(line.rstrip().endswith("else pytest -q; fi"))
 
     def test_the_fallback_chain_actually_runs_under_each_shape(self):
-        """Each branch of the guard must be a runnable command, not just a
-        string that looks right."""
+        """Each branch must be a runnable command, not a string that looks
+        right — and each must be the branch actually taken. A stub that only
+        forwards would pass whichever branch ran, so it prints a marker.
+
+        PATH holds nothing but the stub dir plus a symlinked `sh`, so
+        "unavailable" really means unavailable: pointing at /usr/bin would find
+        the system timeout on Linux and silently test the wrong branch."""
         import subprocess as real_sub
 
-        for available, expected in ((True, "0"), (False, "0")):
+        for available in (True, False):
             with self.subTest(timeout_available=available):
                 stub = Path(tempfile.mkdtemp())
+                (stub / "sh").symlink_to("/bin/sh")
+                (stub / "echo").write_text('#!/bin/sh\n/bin/echo "$@"\n')
+                (stub / "echo").chmod(0o755)
                 if available:
-                    (stub / "timeout").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+                    (stub / "timeout").write_text(
+                        '#!/bin/sh\n/bin/echo VIA_TIMEOUT\nshift\nexec "$@"\n'
+                    )
                     (stub / "timeout").chmod(0o755)
                 line = _build_test_line(".", "", "echo GATE_OK", 5)
                 proc = real_sub.run(
-                    ["sh", "-c", line], capture_output=True, text=True,
-                    env={"PATH": f"{stub}:/usr/bin:/bin"},
+                    ["/bin/sh", "-c", line], capture_output=True, text=True,
+                    env={"PATH": str(stub)},
                 )
-                self.assertEqual(str(proc.returncode), expected, proc.stderr)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("GATE_OK", proc.stdout)
                 self.assertNotIn("not found", proc.stderr)
+                # the branch that ran is the branch under test
+                self.assertEqual(available, "VIA_TIMEOUT" in proc.stdout)
 
     def test_suite_exiting_124_quickly_is_a_gate_failure_not_a_timeout(self):
         """#10: exit 124 was read as "timeout(1) killed it" unconditionally, so
@@ -230,14 +242,28 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertIn("no timeout(1)", err.getvalue())
 
     def test_preflight_stays_quiet_when_the_remote_has_timeout(self):
+        """Stubbed like the case above. Letting the real probe run would make
+        the assertion depend on whether THIS machine ships timeout(1) — which
+        is the very platform difference under test."""
         warm = Path(tempfile.mkdtemp())
         cfg = parse_remote_config(
             {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None
         )
         assert cfg is not None
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""  # the probe found one, so it said nothing
+
+        old = RG._remote
+        RG._remote = lambda cfg_, script, timeout_: _Proc()
         err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.assertIsNone(RG.preflight(cfg))
+        try:
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(RG.preflight(cfg))
+        finally:
+            RG._remote = old
         self.assertNotIn("no timeout(1)", err.getvalue())
 
     def test_a_real_remote_timeout_is_still_infra(self):
