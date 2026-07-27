@@ -289,9 +289,9 @@ def develop_hosted(
                 if test_cmd is not None:
                     reporter.step(f"attempt {number} · gate")
                     gate = _run_gate(
-                    repo_root, entries, test_cmd, gate_timeout,
-                    stage=gate_stage, keep_stage=True,
-                )
+                        repo_root, entries, test_cmd, gate_timeout,
+                        stage=gate_stage, keep_stage=True,
+                    )
                     if gate.infra_error:
                         reporter.fail(f"gate infra: {gate.infra_error[:80]}")
                         report.attempts.append(

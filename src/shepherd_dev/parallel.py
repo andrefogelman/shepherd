@@ -294,7 +294,16 @@ def develop_parallel(
                     stream_hook.bind(logs[1])
                 except Exception:
                     pass
-            handoff_clone = _clone_workspace(repo_root, overlay=entries_a)
+            # Same rule as the worker futures: a failure here comes back as a
+            # report, not as a raise out of develop_parallel. Both workers have
+            # already run, so their proposals are on the report either way.
+            try:
+                handoff_clone = _clone_workspace(repo_root, overlay=entries_a)
+            except Exception as exc:
+                report.error = (
+                    f"handoff clone failed: {type(exc).__name__}: {exc}"
+                )
+                return report
             clones.append(handoff_clone)
             handoff_guidance = (
                 "HANDOFF: your teammate's changes are ALREADY APPLIED to this "
@@ -390,7 +399,15 @@ def develop_parallel(
                     stream_hook.bind(main_log)  # repair worker streams into the main narrative
                 except Exception:
                     pass
-            repair_clone = _clone_workspace(repo_root, overlay=combined)
+            try:
+                repair_clone = _clone_workspace(repo_root, overlay=combined)
+            except Exception as exc:
+                # Give up on repairing rather than raising: the combined gate's
+                # verdict is already on the report and the caller can act on it.
+                _pemit(main_log, "parallel.repair_failed",
+                       {"round": report.repairs, "error": f"{type(exc).__name__}: {exc}"})
+                report.repairs -= 1
+                break
             clones.append(repair_clone)
             repair_feature = (
                 "The combined work of two teammates is applied to this repository "
@@ -420,7 +437,9 @@ def develop_parallel(
             _emit_gate(gate)
         report.combined_gate = gate
         if not gate.passed:
-            _reap_spec()  # the verdict dies with the proposal; the thread must not
+            # The verdict dies with the proposal, but the thread holding it must
+            # still be reaped before this returns.
+            _reap_spec()
             report.error = gate.infra_error or "combined gate failed after repairs"
             return report
 
@@ -444,12 +463,12 @@ def develop_parallel(
                         context_pack=context_pack,
                     )
             report.review = verdict
-        else:
-            _reap_spec()
             if report.review is not None:
                 _pemit(main_log, "review.verdict", {"approved": report.review.approved})
                 for issue in report.review.issues or []:
                     _pemit(main_log, "review.issue", {"text": str(issue)})
+        else:
+            _reap_spec()
 
         report.proposal_id, report.staged_paths = stage_proposal(
             repo_root,

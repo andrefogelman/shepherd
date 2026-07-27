@@ -8,8 +8,6 @@ Deletions are not represented (same limitation as the v0.3.0 workspace lane).
 from __future__ import annotations
 
 import hashlib
-import time
-from dataclasses import dataclass
 from pathlib import Path
 
 # Match supervisor IGNORED_DIRS + VCS noise when walking trees.
@@ -40,74 +38,33 @@ def _walk(root: Path, ignore: set[str]):
         yield rel.as_posix(), path
 
 
-@dataclass(frozen=True)
-class _Entry:
-    sha: str
-    size: int
-    mtime_ns: int
-
-
-@dataclass(frozen=True)
-class TreeSnapshot:
-    """What a tree contained at one instant: content hash plus the stat pair
-    that lets a later comparison skip re-reading files nothing touched."""
-
-    entries: dict[str, _Entry]
-    taken_ns: int
-
-    def __contains__(self, rel: str) -> bool:
-        return rel in self.entries
-
-    def __iter__(self):
-        return iter(self.entries)
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-    def unchanged(self, rel: str, st) -> bool:
-        """True when `st` matches the snapshot closely enough to skip the read.
-
-        Size AND mtime must both match — the same evidence make and git's index
-        rely on. A file stamped at or after the snapshot instant is NOT trusted:
-        filesystem timestamp granularity means a write inside that window can
-        land on the recorded mtime, so those are re-read and hashed (git calls
-        this the racily-clean case).
-        """
-        prior = self.entries.get(rel)
-        return (
-            prior is not None
-            and prior.size == st.st_size
-            and prior.mtime_ns == st.st_mtime_ns
-            and st.st_mtime_ns < self.taken_ns
-        )
-
-    def matches(self, rel: str, data: bytes) -> bool:
-        prior = self.entries.get(rel)
-        return prior is not None and prior.sha == hashlib.sha256(data).hexdigest()
-
-
-def snapshot_tree(root: Path, *, ignore_dirs: set[str] | None = None) -> TreeSnapshot:
-    """Snapshot every regular file under `root` (sha256 + size + mtime).
+def snapshot_tree(root: Path, *, ignore_dirs: set[str] | None = None) -> dict[str, str]:
+    """Return relative-path → sha256 hex for every regular file under `root`.
 
     Taken right after the worker's clone is made, this pins the base the
     proposal is later diffed against. Without it the diff compares the clone to
     the LIVE repo, so a file the human edits mid-run looks "changed" and enters
     the proposal carrying the worker's stale copy — settling then reverts the
     human's edit in silence (#3).
+
+    Content hashes, not stat metadata. A (size, mtime) fast-path to dismiss
+    untouched files without reading them is UNSOUND here: Linux stamps mtime
+    from a coarse clock (one jiffy, 1-4ms), so a same-size rewrite landing in
+    the tick the snapshot was taken in is indistinguishable from no write at
+    all — and the worker's edit then vanishes from the changeset in silence,
+    which is the very failure #3 exists to prevent. Nor can a racy-window
+    margin rescue it: a freshly made clone's files are milliseconds old at
+    snapshot time, so every one of them falls inside any sound margin and gets
+    hashed regardless. The optimization is worth nothing once it is correct.
     """
     ignore = ignore_dirs if ignore_dirs is not None else DEFAULT_IGNORE_DIRS
-    entries: dict[str, _Entry] = {}
+    snapshot: dict[str, str] = {}
     for rel, path in _walk(root.resolve(), ignore):
         try:
-            st = path.stat()
-            entries[rel] = _Entry(
-                sha=hashlib.sha256(path.read_bytes()).hexdigest(),
-                size=st.st_size,
-                mtime_ns=st.st_mtime_ns,
-            )
+            snapshot[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             continue
-    return TreeSnapshot(entries=entries, taken_ns=time.time_ns())
+    return snapshot
 
 
 def collect_changed_entries(
@@ -115,33 +72,26 @@ def collect_changed_entries(
     modified: Path,
     *,
     ignore_dirs: set[str] | None = None,
-    baseline: TreeSnapshot | None = None,
+    baseline: dict[str, str] | None = None,
 ) -> dict[str, bytes]:
     """Return relative-path → bytes for files that are new or differ in `modified`.
 
     `baseline` (from ``snapshot_tree`` at clone time) takes precedence over
     `original` when given: it — not the live tree — decides what counts as
     changed, so a concurrent edit to `original` cannot pull an untouched file
-    into the result (#3). It also lets an untouched file be dismissed on its
-    stat alone, instead of reading every file of both trees on every attempt.
+    into the result (#3).
     """
     ignore = ignore_dirs if ignore_dirs is not None else DEFAULT_IGNORE_DIRS
     original = original.resolve()
     modified = modified.resolve()
     entries: dict[str, bytes] = {}
     for rel, path in _walk(modified, ignore):
-        if baseline is not None:
-            try:
-                if baseline.unchanged(rel, path.stat()):
-                    continue  # the worker never touched it: no read, no hash
-            except OSError:
-                pass
         try:
             data = path.read_bytes()
         except OSError:
             continue
         if baseline is not None:
-            if baseline.matches(rel, data):
+            if baseline.get(rel) == hashlib.sha256(data).hexdigest():
                 continue
         else:
             orig = original / rel

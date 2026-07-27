@@ -79,6 +79,56 @@ class WorkerCrashContainment(unittest.TestCase):
         # the surviving worker's result is still on the report, not discarded
         self.assertEqual(len(report.workers), 1)
 
+    def test_run2_handoff_clone_failure_returns_a_report(self):
+        """The worker futures were wrapped, but the clones taken LATER — for the
+        conflict handoff and for each repair round — still raised straight out
+        of develop_parallel."""
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import GateResult
+
+        def fake(clone, feature, note, **_kw):
+            # both workers touch the SAME file, so the handoff path is taken
+            return self._ok_report(feature, clone, {"src/shared.py": b"S = 1\n"})
+
+        self._patch(fake)
+        P._run_gate = lambda *a, **kw: GateResult(True, 0, "ok")
+
+        def boom_on_overlay(repo_root, overlay=None):
+            if overlay is not None:  # the handoff clone
+                raise _Boom("no space left")
+            return self.repo
+
+        P._clone_workspace = boom_on_overlay
+        report = P.develop_parallel(
+            self.repo, ["a", "b"], test_cmd="true", provider="static"
+        )
+        self.assertFalse(report.succeeded)
+        self.assertIn("handoff clone failed", report.error or "")
+        self.assertIn("_Boom", report.error or "")
+
+    def test_run2_repair_clone_failure_ends_repairs_without_raising(self):
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import GateResult
+
+        def fake(clone, feature, note, **_kw):
+            return self._ok_report(feature, clone, {f"src/{feature}.py": b"X = 1\n"})
+
+        self._patch(fake)
+        P._run_gate = lambda *a, **kw: GateResult(False, 1, "boom")  # forces a repair
+
+        def boom_on_overlay(repo_root, overlay=None):
+            if overlay is not None:  # the repair clone
+                raise _Boom("no space left")
+            return self.repo
+
+        P._clone_workspace = boom_on_overlay
+        report = P.develop_parallel(
+            self.repo, ["a", "b"], test_cmd="true", provider="static"
+        )
+        self.assertFalse(report.succeeded)
+        self.assertIsNotNone(report.combined_gate)  # the gate's verdict survives
+        self.assertEqual(report.repairs, 0)  # the round that could not start is not counted
+
     def test_best_of_crash_does_not_sink_the_other_candidates(self):
         import threading
 
@@ -433,6 +483,72 @@ class Run2SpeculativeReview(unittest.TestCase):
         self.assertTrue(report.succeeded)
         self.assertEqual(report.repairs, 1)
         self.assertEqual(marks["review_count"], 2, "stale verdict must be discarded")
+
+    def test_the_verdict_is_still_emitted_to_the_verbose_log(self):
+        """The review.verdict/review.issue emission must live on the branch
+        that ACTUALLY produces a verdict. Sitting under `else:` (review_task is
+        None) it was dead code, and run2's verbose log silently lost the
+        reviewer's outcome."""
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import DevReport, GateResult, ReviewVerdict
+
+        events: list[tuple] = []
+
+        class _Log:
+            def emit(self, kind, payload=None):
+                events.append((kind, payload))
+
+        seq = {"n": 0}
+
+        def fake_worker(clone, feature, note, **_kw):
+            seq["n"] += 1
+            report = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            report.entries = {f"src/w{seq['n']}.py": b"W = 1\n"}
+            report.final_run_ref = f"run-{seq['n']}"
+            return report
+
+        class _Workspace:
+            def git_repo(self):
+                return None
+
+        class _FakeSp:
+            @staticmethod
+            def open(path):
+                class _Ctx:
+                    def __enter__(self):
+                        return _Workspace()
+
+                    def __exit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many,
+               P._run_gate, P.run_review, P.sp)
+        P._run_worker = fake_worker
+        P._clone_workspace = lambda repo_root, overlay=None: self.repo
+        P._clone_many = lambda repo_root, n: [self.repo] * n
+        P._run_gate = lambda *a, **kw: GateResult(True, 0, "ok")
+        P.run_review = lambda *a, **kw: ReviewVerdict(
+            approved=False, summary="nope", issues=["one", "two"]
+        )
+        P.sp = _FakeSp()
+        try:
+            report = P.develop_parallel(
+                self.repo, ["a", "b"], test_cmd="true", provider="static",
+                review_task=object(), event_log_main=_Log(),
+            )
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many,
+             P._run_gate, P.run_review, P.sp) = old
+
+        self.assertIsNotNone(report.review)
+        kinds = [k for k, _ in events]
+        self.assertIn("review.verdict", kinds)
+        verdicts = [p for k, p in events if k == "review.verdict"]
+        self.assertEqual(verdicts, [{"approved": False}])
+        issues = [p["text"] for k, p in events if k == "review.issue"]
+        self.assertEqual(issues, ["one", "two"])
 
     def test_gate_failure_discards_the_verdict_and_reaps_the_thread(self):
         import threading
