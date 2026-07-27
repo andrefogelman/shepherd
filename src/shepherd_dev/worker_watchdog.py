@@ -85,9 +85,45 @@ def find_worker_pids(own_pid: int, table: dict[int, tuple[int, str]]) -> set[int
     return targets
 
 
-def _kill_subtree(pids: set[int], grace: float = 3.0) -> int:
-    """SIGTERM then (after grace) SIGKILL the given pids. Returns count signaled."""
+def _still_the_same(pids: list[int], snapshot: dict[int, tuple[int, str]]) -> list[int]:
+    """Of `pids`, those whose (ppid, command) still match what the snapshot saw.
+
+    A pid is not an identity. The targets are chosen from a `ps` snapshot and
+    signalled afterwards — with a whole grace period between SIGTERM and
+    SIGKILL — and a pid freed in that window is handed straight to the next
+    process the OS starts. Signalling it would kill a stranger.
+
+    Re-reading `ps` and demanding the same parent and command line narrows the
+    window from "the whole kill sequence" to "one ps call", and costs one
+    process listing. It is not proof — a pid could in principle be reused by
+    something with an identical command under the same parent — but that is a
+    different order of unlikelihood from mere reuse. `pidfd_open` would be
+    proof, and is Linux-only; the watchdog runs on darwin too.
+    """
+    current = _read_proctable()
+    if not current:  # ps unavailable: no evidence either way, so change nothing
+        return list(pids)
+    return [p for p in pids if p in current and current[p] == snapshot.get(p)]
+
+
+def _kill_subtree(
+    pids: set[int],
+    grace: float = 3.0,
+    snapshot: dict[int, tuple[int, str]] | None = None,
+) -> int:
+    """SIGTERM then (after grace) SIGKILL the given pids. Returns count signaled.
+
+    With `snapshot` (the process table the pids were chosen from), each pid's
+    identity is re-checked immediately before each signal, so a pid recycled
+    between selection and the kill is spared. Without one the behaviour is
+    exactly as it was.
+    """
     live = [p for p in pids if p != os.getpid()]
+    if snapshot is not None:
+        live = _still_the_same(live, snapshot)
+    if not live:
+        return 0
+
     for p in live:
         try:
             os.kill(p, signal.SIGTERM)
@@ -95,8 +131,13 @@ def _kill_subtree(pids: set[int], grace: float = 3.0) -> int:
             pass
         except Exception:
             pass
-    if live:
-        time.sleep(grace)
+    signalled = len(live)
+
+    time.sleep(grace)
+    # Re-check again: the grace is the widest part of the window, and a target
+    # that died from the SIGTERM has been freeing its pid throughout it.
+    if snapshot is not None:
+        live = _still_the_same(live, snapshot)
     for p in live:
         try:
             os.kill(p, signal.SIGKILL)
@@ -104,7 +145,7 @@ def _kill_subtree(pids: set[int], grace: float = 3.0) -> int:
             pass
         except Exception:
             pass
-    return len(live)
+    return signalled
 
 
 #: Seconds past the budget before the backstop escalates.
@@ -150,7 +191,9 @@ class WorkerWatchdog:
         pids = find_worker_pids(self._own_pid, table)
         if pids:
             self._fired = True
-            _kill_subtree(pids)
+            # Hand the table along: it is what these pids were selected from,
+            # so the kill can confirm each one is still that process.
+            _kill_subtree(pids, snapshot=table)
 
     def start(self) -> "WorkerWatchdog":
         self._thread = threading.Thread(target=self._watch, daemon=True)

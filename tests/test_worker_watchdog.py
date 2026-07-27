@@ -8,6 +8,7 @@ unique marker, so only the test's own tree is ever signaled. Runnable with:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shepherd_dev.supervisor import _KILLTREE_PERL, _swap_perl_killtree  # noqa: E402
 from shepherd_dev.worker_watchdog import (  # noqa: E402
-    WorkerWatchdog, _descendants, _kill_subtree, find_worker_pids,
+    WorkerWatchdog, _descendants, _kill_subtree, _read_proctable, find_worker_pids,
 )
 
 
@@ -122,6 +123,54 @@ class RealKill(unittest.TestCase):
         time.sleep(0.3)
         out2 = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True)
         self.assertNotIn(marker, out2.stdout, "tagged processes survived the kill")
+
+
+class PidReuse(unittest.TestCase):
+    """The pids are chosen from a `ps` SNAPSHOT and signalled afterwards, with
+    a grace between SIGTERM and SIGKILL. A pid freed in that window and handed
+    to something else would be signalled in the target's place — so identity is
+    re-checked against the live table before each signal, not assumed."""
+
+    def test_a_pid_whose_command_changed_is_not_signalled(self):
+        marker = f"WD_REUSE_{uuid.uuid4().hex[:8]}"
+        victim = subprocess.Popen(["sh", "-c", f": innocent {marker}; sleep 30"])
+        self.addCleanup(_reap, victim)
+        time.sleep(0.4)
+
+        # the snapshot claims this pid was a worker; the live table disagrees
+        stale = {victim.pid: (os.getpid(), "node runner.mjs payload.json")}
+        signalled = _kill_subtree({victim.pid}, grace=0.1, snapshot=stale)
+
+        self.assertEqual(signalled, 0, "a pid that no longer matches must be spared")
+        self.assertIsNone(victim.poll(), "the innocent process was killed")
+
+    def test_a_pid_that_still_matches_is_signalled(self):
+        marker = f"WD_MATCH_{uuid.uuid4().hex[:8]}"
+        target = subprocess.Popen(["sh", "-c", f": runner.mjs {marker}; sleep 30"])
+        self.addCleanup(_reap, target)
+        time.sleep(0.4)
+
+        table = _read_proctable()
+        snapshot = {target.pid: table[target.pid]}
+        self.assertEqual(_kill_subtree({target.pid}, grace=0.1, snapshot=snapshot), 1)
+        target.wait(timeout=5)
+
+    def test_without_a_snapshot_the_behaviour_is_unchanged(self):
+        """Callers that never had identity to check keep working."""
+        marker = f"WD_PLAIN_{uuid.uuid4().hex[:8]}"
+        target = subprocess.Popen(["sh", "-c", f": {marker}; sleep 30"])
+        self.addCleanup(_reap, target)
+        time.sleep(0.4)
+        self.assertEqual(_kill_subtree({target.pid}, grace=0.1), 1)
+        target.wait(timeout=5)
+
+
+def _reap(proc):
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
 
 
 class WatchdogLifecycle(unittest.TestCase):
