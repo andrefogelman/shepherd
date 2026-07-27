@@ -174,6 +174,29 @@ def preflight(cfg: RemoteGateConfig, timeout: int = 20) -> str | None:
     return None
 
 
+def _build_test_line(wd: str, envp: str, remote_cmd: str, timeout: int) -> str:
+    """The remote gate's test step, with its own kill where one is available.
+
+    `timeout` is GNU coreutils: absent on macOS and on minimal images.
+    Invoking it unconditionally made every gate on such a host exit 127 with
+    `timeout: command not found`, reported as an ordinary suite failure. Prefer
+    it, then `gtimeout` (coreutils under its Homebrew name), then run bare.
+
+    Losing the remote-side kill is not losing the budget: run_remote_gate's
+    LOCAL deadline still reaps the ssh and its process group. What the remote
+    `timeout` adds is killing the suite ON the remote host rather than leaving
+    it to whatever the severed ssh session takes down with it.
+    """
+    return (
+        f"cd {wd} && {envp}"
+        f"if command -v timeout >/dev/null 2>&1; then "
+        f"timeout {timeout} {remote_cmd}; "
+        f"elif command -v gtimeout >/dev/null 2>&1; then "
+        f"gtimeout {timeout} {remote_cmd}; "
+        f"else {remote_cmd}; fi"
+    )
+
+
 def _tar_entries(entries: dict[str, bytes]) -> bytes:
     """Pack the proposal's changed files into a tar stream (for overlay)."""
     buf = BytesIO()
@@ -431,21 +454,8 @@ def run_remote_gate(
             # 4. the gate itself, with a remote timeout so a hung test is killed
             # remotely. Streamed line by line so verbose mode sees each test as
             # it runs; the local deadline still reaps a hung ssh (process group).
-            # `timeout` is GNU coreutils — absent on macOS and on minimal
-            # images. Invoking it unconditionally made every gate on such a
-            # host exit 127 with `timeout: command not found`, read as an
-            # ordinary suite failure. Use it where it exists, fall back to the
-            # bare command where it does not: the LOCAL deadline below still
-            # reaps a hung ssh, so the budget is enforced either way — only the
-            # remote-side kill is lost.
-            remote_cmd = _sub(cfg.test_cmd, run_id, workdir)
-            test_line = (
-                f"cd {wd} && {envp}"
-                f"if command -v timeout >/dev/null 2>&1; then "
-                f"timeout {timeout} {remote_cmd}; "
-                f"elif command -v gtimeout >/dev/null 2>&1; then "
-                f"gtimeout {timeout} {remote_cmd}; "
-                f"else {remote_cmd}; fi"
+            test_line = _build_test_line(
+                wd, envp, _sub(cfg.test_cmd, run_id, workdir), timeout
             )
             from .procstream import run_streaming
 

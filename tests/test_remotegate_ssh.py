@@ -13,8 +13,6 @@ substitution helpers. Runnable with: python -m unittest tests.test_remotegate_ss
 
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,7 +22,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shepherd_dev import remotegate as RG  # noqa: E402
-from shepherd_dev.remotegate import parse_remote_config, run_remote_gate, _remote_argv  # noqa: E402
+from shepherd_dev.remotegate import (  # noqa: E402
+    _build_test_line,
+    _remote_argv,
+    parse_remote_config,
+    run_remote_gate,
+)
 
 _real_run = subprocess.run
 
@@ -134,33 +137,39 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         assert cfg is not None
         self.assertIsNone(RG.preflight(cfg))  # nothing to resolve, do not invent one
 
-    def test_the_gate_runs_where_timeout_is_not_installed(self):
+    def test_the_test_step_does_not_require_gnu_timeout(self):
         """`timeout` is GNU coreutils: absent on macOS and minimal images.
-        Invoking it unconditionally made every gate there exit 127 with
-        `timeout: command not found`, read as an ordinary suite failure."""
-        warm = Path(tempfile.mkdtemp())
-        (warm / "src").mkdir()
-        cfg = parse_remote_config({
-            "ssh": "root@host", "repo_dir": str(warm),
-            "copy_cmd": "cp -R {repo} {workdir}",
-            "test_cmd": "grep -q 'V = 42' src/a.py && echo GATE_OK",
-            "workdir_base": str(Path(tempfile.mkdtemp())),
-        }, "python")
-        assert cfg is not None
-        # a PATH with neither timeout nor gtimeout on it
-        bare = Path(tempfile.mkdtemp())
-        for tool in ("sh", "bash", "cp", "rm", "mkdir", "grep", "echo", "command"):
-            src = shutil.which(tool)
-            if src:
-                (bare / tool).symlink_to(src)
-        old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = str(bare)
-        try:
-            res = run_remote_gate(cfg, {"src/a.py": b"V = 42\n"}, timeout=30)
-        finally:
-            os.environ["PATH"] = old_path
-        self.assertTrue(res.passed, f"exit={res.exit_code} tail={res.output_tail!r}")
-        self.assertNotIn("command not found", res.output_tail or "")
+        Invoking it unconditionally made every gate on such a host exit 127
+        with `timeout: command not found`, read as an ordinary suite failure.
+
+        Asserted on the command itself. Emptying PATH to prove it end-to-end
+        would take the copy, overlay and teardown steps down with it, and test
+        those rather than this."""
+        line = _build_test_line("/w", "", "pytest -q", 600)
+        self.assertIn("command -v timeout", line)
+        self.assertIn("timeout 600 pytest -q", line)
+        self.assertIn("gtimeout 600 pytest -q", line)  # coreutils under brew
+        self.assertTrue(line.rstrip().endswith("else pytest -q; fi"))
+
+    def test_the_fallback_chain_actually_runs_under_each_shape(self):
+        """Each branch of the guard must be a runnable command, not just a
+        string that looks right."""
+        import subprocess as real_sub
+
+        for available, expected in ((True, "0"), (False, "0")):
+            with self.subTest(timeout_available=available):
+                stub = Path(tempfile.mkdtemp())
+                if available:
+                    (stub / "timeout").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+                    (stub / "timeout").chmod(0o755)
+                line = _build_test_line(".", "", "echo GATE_OK", 5)
+                proc = real_sub.run(
+                    ["sh", "-c", line], capture_output=True, text=True,
+                    env={"PATH": f"{stub}:/usr/bin:/bin"},
+                )
+                self.assertEqual(str(proc.returncode), expected, proc.stderr)
+                self.assertIn("GATE_OK", proc.stdout)
+                self.assertNotIn("not found", proc.stderr)
 
     def test_suite_exiting_124_quickly_is_a_gate_failure_not_a_timeout(self):
         """#10: exit 124 was read as "timeout(1) killed it" unconditionally, so
