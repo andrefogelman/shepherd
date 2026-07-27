@@ -119,6 +119,21 @@ codex` ou `--provider grok` o `claude` CLI não é necessário.
 (como o run2). Ver [2026-07-14-grok-provider-l1-l2.md](2026-07-14-grok-provider-l1-l2.md).
 O default `--provider claude` não muda.
 
+> **O worker Grok NÃO roda em sandbox.** Ele é lançado com `--always-approve
+> --permission-mode bypassPermissions` e sem confinamento de SO, então o
+> isolamento dele é o clone temporário e mais nada — um diretório copiado, não
+> uma fronteira. Um worker que resolva escrever fora do clone consegue. O
+> Claude roda sob syscall jail e o Codex sob Seatbelt/Landlock; o Grok não tem
+> flag equivalente que o shepherd possa passar, então isto é uma lacuna, não
+> uma configuração.
+>
+> O que decorre disso: a garantia de settlement (nada chega à sua worktree até
+> você aceitar) se apoia no worker permanecer dentro do clone, o que no Grok é
+> convenção e não imposição. Prefira `codex` ou `claude` para repositórios ou
+> pedidos em que você não confia inteiramente. `--auto-settle` é recusado com
+> Grok de qualquer forma: ele não tem CLI de review, e a heurística que faz as
+> vezes de uma conta arquivos e bytes sem ler o diff.
+
 **Worker Codex (sem Claude, com review LLM real):** use `--provider codex`. O
 worker é o `codex exec` headless (`codex` no PATH; override `--codex-cmd` /
 `SHEPHERD_DEV_CODEX_CMD`, modelo via `--codex-model`). Isolamento duplo: clone

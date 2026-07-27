@@ -123,6 +123,20 @@ CLI (`grok` on PATH or `~/.grok/bin/grok`); proposals are staged for
 `settle-par` (same as run2). See [2026-07-14-grok-provider-l1-l2.md](2026-07-14-grok-provider-l1-l2.md).
 Default `--provider claude` is unchanged.
 
+> **The Grok worker is NOT sandboxed.** It is launched with `--always-approve
+> --permission-mode bypassPermissions` and no OS confinement, so its isolation
+> is the temp clone and nothing else — a copied directory, not a boundary. A
+> worker that decides to write outside its clone can. Claude runs under a
+> syscall jail and Codex under Seatbelt/Landlock; Grok has no equivalent flag
+> that shepherd can pass, so this is a gap, not a setting.
+>
+> What follows from it: the settlement guarantee (nothing reaches your worktree
+> until you accept) rests on the worker staying inside its clone, which for
+> Grok is a convention rather than an enforcement. Prefer `codex` or `claude`
+> for repositories or feature requests you do not fully trust. `--auto-settle`
+> is refused with Grok in any case: it has no reviewer CLI, and the heuristic
+> that stands in for one counts files and bytes without reading the diff.
+
 **Codex worker (no Claude, real LLM review):** pass `--provider codex`. The
 worker is headless `codex exec` (`codex` on PATH; override `--codex-cmd` /
 `SHEPHERD_DEV_CODEX_CMD`, model via `--codex-model`). Isolation is double: a
