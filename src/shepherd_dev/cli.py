@@ -348,6 +348,7 @@ def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: 
     co = git("checkout", "-b", branch)
     if co.returncode != 0:
         return None, f"git checkout -b failed: {(co.stderr or co.stdout).strip()[:300]}"
+    committed = False
     try:
         add = git("add", "--", *written)
         if add.returncode != 0:
@@ -355,13 +356,21 @@ def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: 
         commit = git("commit", "-m", message)
         if commit.returncode != 0:
             return None, f"git commit failed: {(commit.stderr or commit.stdout).strip()[:300]}"
+        committed = True
         return branch, None
     finally:
-        # unstage + restore the original branch even on a mid-way failure; the
-        # accepted files remain in the worktree either way (they were already
-        # materialized by settle before commit).
+        # unstage + restore the original branch even on a mid-way failure.
         git("reset", "-q")
         git("checkout", original)
+        if committed:
+            # The accepted files now live ONLY in the shepherd branch's commit,
+            # so checking the original branch back out deletes them from the
+            # worktree — contradicting this function's contract and settle's own
+            # "revise e comite no git quando quiser" message (#8). Put them back
+            # as ordinary uncommitted changes; the commit on shepherd/* keeps
+            # them recoverable regardless.
+            git("checkout", branch, "--", *written)
+            git("reset", "-q")  # restored, not staged
 
 
 def _auto_settle_conditions(report) -> str | None:

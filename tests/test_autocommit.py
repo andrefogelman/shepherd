@@ -48,6 +48,37 @@ class AutoCommitBranch(unittest.TestCase):
         self.assertEqual(_branch(root), original)
         self.assertEqual(_git(root, "rev-parse", "--verify", "--quiet", branch).returncode, 0)
 
+    def test_accepted_files_stay_in_the_worktree_after_a_successful_commit(self):
+        """The finally's comment and settle's own message both promise the
+        accepted files remain in the working tree. On the SUCCESS path they did
+        not: committing them onto shepherd/* and then checking out the original
+        branch deletes them from the worktree, because that is where they now
+        exclusively live."""
+        root = _repo()
+        (root / "feature.py").write_text("x = 1\n")            # new file
+        (root / "seed.txt").write_text("seed\nchanged\n")      # modified tracked file
+        branch, err = auto_commit_branch(
+            root, ["feature.py", "seed.txt"], "add-feature", "feat: x"
+        )
+        self.assertIsNone(err)
+        self.assertTrue((root / "feature.py").is_file())
+        self.assertEqual((root / "feature.py").read_text(), "x = 1\n")
+        self.assertEqual((root / "seed.txt").read_text(), "seed\nchanged\n")
+
+    def test_restored_files_are_not_left_staged(self):
+        root = _repo()
+        (root / "feature.py").write_text("x = 1\n")
+        auto_commit_branch(root, ["feature.py"], "add-feature", "feat: x")
+        staged = _git(root, "diff", "--cached", "--name-only").stdout.strip()
+        self.assertEqual(staged, "", "restoring must not leave an index full of changes")
+
+    def test_files_stay_in_the_worktree_when_a_step_fails(self):
+        root = _repo()
+        (root / "feature.py").write_text("x = 1\n")
+        # 'missing.py' makes `git add` fail, so nothing is committed
+        auto_commit_branch(root, ["feature.py", "missing.py"], "bad", "feat: bad")
+        self.assertTrue((root / "feature.py").is_file())
+
     def test_returns_to_original_even_when_a_step_fails(self):
         root = _repo()
         original = _branch(root)
