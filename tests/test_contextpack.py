@@ -18,7 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from shepherd_dev.contextpack import build_pack  # noqa: E402
+from shepherd_dev.contextpack import (  # noqa: E402
+    build_pack,
+    repo_file_view,
+    scan_repo,
+)
 
 
 def _repo(files: dict[str, str]) -> Path:
@@ -126,6 +130,80 @@ class ContextPackEnrichment(unittest.TestCase):
         root = _repo({"a.py": "x = 1\n"})
         _, stats = build_pack(root, "thing", planned_targets=("nope.py",))
         self.assertEqual(stats["planned"], 0)
+
+
+class SharedRepoScan(unittest.TestCase):
+    """A2: the repo walk + file reads do not depend on the feature, but runN
+    redid them for every one of its N features (twice each, counting the
+    planning prefetch's own view). One scan, reused."""
+
+    def _sample(self):
+        return _repo({
+            "svc/orders.py": "from svc import util\n\ndef list_orders():\n    return []\n",
+            "svc/util.py": "def helper():\n    return 1\n",
+            "svc/payments.py": "def charge():\n    return True\n",
+            "tests/test_orders.py": "from svc.orders import list_orders\n\ndef test_x():\n    pass\n",
+        })
+
+    def test_pack_is_byte_identical_with_and_without_a_shared_scan(self):
+        root = self._sample()
+        scan = scan_repo(root)
+        for feature in ("orders listing", "payments charge"):
+            with self.subTest(feature=feature):
+                plain, plain_stats = build_pack(root, feature)
+                shared, shared_stats = build_pack(root, feature, scan=scan)
+                self.assertEqual(plain, shared)
+                self.assertEqual(plain_stats, shared_stats)
+
+    def test_repo_file_view_matches_too(self):
+        root = self._sample()
+        scan = scan_repo(root)
+        self.assertEqual(repo_file_view(root), repo_file_view(root, scan=scan))
+
+    def test_a_shared_scan_walks_the_repo_once_for_n_features(self):
+        from shepherd_dev import contextpack as CP
+
+        root = self._sample()
+        features = ["orders listing", "payments charge", "util helper"]
+
+        real = CP._iter_files
+        walks = {"n": 0}
+
+        def counting(repo_root, allowed_prefixes):
+            walks["n"] += 1
+            return real(repo_root, allowed_prefixes)
+
+        CP._iter_files = counting
+        try:
+            for f in features:
+                build_pack(root, f)
+                repo_file_view(root)
+            per_feature = walks["n"]
+
+            walks["n"] = 0
+            scan = scan_repo(root)
+            for f in features:
+                build_pack(root, f, scan=scan)
+                repo_file_view(root, scan=scan)
+            shared = walks["n"]
+        finally:
+            CP._iter_files = real
+
+        self.assertEqual(per_feature, 2 * len(features))  # pack + planning view
+        self.assertEqual(shared, 1)
+
+    def test_allowed_prefixes_are_honoured_by_the_scan(self):
+        root = self._sample()
+        scan = scan_repo(root, allowed_prefixes=("svc",))
+        pack, _ = build_pack(root, "orders listing", allowed_prefixes=("svc",), scan=scan)
+        self.assertNotIn("tests/test_orders.py", pack)
+
+    def test_a_scan_taken_for_other_prefixes_is_refused(self):
+        # Silently reusing a narrower scan would quietly change the pack.
+        root = self._sample()
+        scan = scan_repo(root, allowed_prefixes=("svc",))
+        with self.assertRaises(ValueError):
+            build_pack(root, "orders listing", allowed_prefixes=(), scan=scan)
 
 
 if __name__ == "__main__":

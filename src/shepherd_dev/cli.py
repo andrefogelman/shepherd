@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import shepherd as sp
@@ -476,11 +477,16 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
     return 0 if report.succeeded else 1
 
 
-def _run_planning(args, repo_root: Path, feature_text: str) -> tuple[tuple[str, ...], str]:
+def _run_planning(
+    args, repo_root: Path, feature_text: str, scan=None, out=None
+) -> tuple[tuple[str, ...], str]:
     """Cheap-model planning prefetch (#4). Returns (planned_targets, plan_text).
 
     Best-effort: disabled by --no-plan / static / config, and any failure returns
-    empty so the run proceeds on keyword-scored targets exactly as before."""
+    empty so the run proceeds on keyword-scored targets exactly as before.
+    `out` collects the progress lines instead of printing them, so concurrent
+    callers do not interleave (A2)."""
+    say = print if out is None else out.append
     if getattr(args, "no_plan", False) or args.provider == "static":
         return (), ""
     from . import config as _config
@@ -490,23 +496,29 @@ def _run_planning(args, repo_root: Path, feature_text: str) -> tuple[tuple[str, 
     cfg = _config.planning_config(repo_root)
     if not cfg["enabled"]:
         return (), ""
-    tree_text, repo_rels = repo_file_view(repo_root, tuple(args.allowed_prefix))
+    tree_text, repo_rels = repo_file_view(repo_root, tuple(args.allowed_prefix), scan=scan)
     if not repo_rels:
         return (), ""
     result = plan_targets(feature_text, tree_text, repo_rels, model=cfg["model"])
     if result.error:
-        print(f"planning: skipped ({result.error})")
+        say(f"planning: skipped ({result.error})")
         return (), ""
-    print(f"planning: {len(result.targets)} target(s) via {cfg['model']}")
+    say(f"planning: {len(result.targets)} target(s) via {cfg['model']}")
     return tuple(result.targets), result.plan
 
 
-def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, dict]:
+def _build_pack(
+    args, repo_root: Path, feature_text: str, scan=None, out=None
+) -> tuple[str | None, dict]:
     """Build the context pack (+ repo memory + planning prefetch) once per command.
-    Disabled by --no-context-pack or on the static provider (no LLM to feed)."""
+    Disabled by --no-context-pack or on the static provider (no LLM to feed).
+
+    `scan` (A2) is a pre-computed RepoScan shared across features; `out`, when
+    given, collects the progress lines for the caller to print in order."""
+    say = print if out is None else out.append
     if getattr(args, "no_context_pack", False) or args.provider == "static":
         return None, {}
-    planned, plan_text = _run_planning(args, repo_root, feature_text)
+    planned, plan_text = _run_planning(args, repo_root, feature_text, scan=scan, out=out)
     pack, stats = build_pack(
         repo_root,
         feature_text,
@@ -514,8 +526,9 @@ def _build_pack(args, repo_root: Path, feature_text: str) -> tuple[str | None, d
         memory_text=repo_memory.memory_text(repo_root),
         planned_targets=planned,
         plan_text=plan_text,
+        scan=scan,
     )
-    print(
+    say(
         f"context pack: {stats['chars']} chars "
         f"({stats['files_full']} full + {stats['files_skeleton']} skeleton files, "
         f"{stats['scanned']} scanned"
@@ -1183,12 +1196,40 @@ def cmd_runN(args) -> int:
     # PREFLIGHT overlap guardrail — predicted interference across supposedly
     # independent features is warned about BEFORE any worker spends tokens
     # (coupled features belong in run2, which coordinates them).
-    packs: list[str | None] = []
-    planned_by_feature: list[set[str]] = []
-    for feature in features:
-        pack, stats = _build_pack(args, repo_root, feature)
-        packs.append(pack)
-        planned_by_feature.append(set((stats or {}).get("planned_files") or []))
+    #
+    # A2: this was N x (planning subprocess + two full repo scans), in series.
+    # The scan does not depend on the feature, so take it once; the planning
+    # calls are network-bound and independent, so run them concurrently. Output
+    # is collected per feature and printed in order — N interleaved progress
+    # lines would be unreadable.
+    packs: list[str | None] = [None] * len(features)
+    planned_by_feature: list[set[str]] = [set()] * len(features)
+    shared_scan = None
+    if not (getattr(args, "no_context_pack", False) or args.provider == "static"):
+        from .contextpack import scan_repo
+
+        shared_scan = scan_repo(repo_root, tuple(args.allowed_prefix))
+
+    def _pack_lane(i: int):
+        lines: list[str] = []
+        pack, stats = _build_pack(args, repo_root, features[i], scan=shared_scan, out=lines)
+        return i, pack, set((stats or {}).get("planned_files") or []), lines
+
+    with ThreadPoolExecutor(max_workers=len(features)) as pool:
+        lanes = [pool.submit(_pack_lane, i) for i in range(len(features))]
+        collected: dict[int, list[str]] = {}
+        for fut in lanes:
+            try:
+                i, pack, planned, lines = fut.result()
+            except Exception as exc:  # a pack lane must not sink the run
+                print(f"context pack failed for a feature: {exc}", file=sys.stderr)
+                continue
+            packs[i] = pack
+            planned_by_feature[i] = planned
+            collected[i] = lines
+    for i in range(len(features)):
+        for line in collected.get(i, []):
+            print(f"[{i + 1}/{len(features)}] {line}")
     overlap: dict[str, list[int]] = {}
     for i, planned in enumerate(planned_by_feature):
         for path in planned:

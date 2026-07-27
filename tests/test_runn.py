@@ -254,6 +254,119 @@ class SettleRegateTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class RunNPackPipelining(unittest.TestCase):
+    """A2: cmd_runN built its N packs serially, each with its own planning
+    subprocess and two full repo scans. The scan does not depend on the
+    feature; the planning calls are independent and network-bound."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-runn-pack-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+        # named so keyword scoring puts a different file in each feature's pack
+        (self.repo / "src" / "alpha.py").write_text("ALPHA = 1\n")
+        (self.repo / "src" / "beta.py").write_text("BETA = 1\n")
+
+    def _args(self, features):
+        import argparse
+
+        return argparse.Namespace(
+            features=list(features), repo=str(self.repo), test_cmd="true",
+            provider="claude", allowed_prefix=[], no_context_pack=False,
+            no_plan=False, max_attempts=1, gate_timeout=600, worker_budget=900,
+            max_changed_paths=40, max_workers=len(features), no_review=True,
+            verbose=False, json=False, notify=False,
+        )
+
+    def _run(self, features, plan_delay=0.3):
+        import threading
+        import time
+
+        from shepherd_dev import cli as C
+
+        marks = {"plans_now": 0, "plans_max": 0, "scans": 0}
+        stamps: list[float] = []
+        lock = threading.Lock()
+
+        def fake_planning(args, repo_root, feature_text, scan=None, out=None):
+            with lock:
+                marks["plans_now"] += 1
+                marks["plans_max"] = max(marks["plans_max"], marks["plans_now"])
+                stamps.append(time.monotonic())
+            try:
+                time.sleep(plan_delay)
+                return (), ""
+            finally:
+                with lock:
+                    marks["plans_now"] -= 1
+                    stamps.append(time.monotonic())
+
+        from shepherd_dev import contextpack as CP
+
+        real_iter = CP._iter_files
+
+        def counting_iter(repo_root, allowed_prefixes):
+            with lock:
+                marks["scans"] += 1
+            return real_iter(repo_root, allowed_prefixes)
+
+        old = (C._run_planning, CP._iter_files, C._resolve_repo, C._resolve_gate)
+        C._run_planning = fake_planning
+        CP._iter_files = counting_iter
+        C._resolve_repo = lambda repo: self.repo
+        C._resolve_gate = lambda root, cmd, provider: ("true", None, True)
+
+        from shepherd_dev import parallel as P
+
+        old_many = P.develop_many
+        captured = {}
+
+        def fake_many(repo_root, features_, **kw):
+            captured["packs"] = kw.get("context_packs")
+            from shepherd_dev.parallel import ManyReport
+
+            report = ManyReport(features=list(features_))
+            report.succeeded = True
+            return report
+
+        P.develop_many = fake_many
+        try:
+            C.cmd_runN(self._args(features))
+        finally:
+            C._run_planning, CP._iter_files, C._resolve_repo, C._resolve_gate = old
+            P.develop_many = old_many
+        # the pack PHASE only — cmd_runN does plenty around it
+        pack_phase = (max(stamps) - min(stamps)) if stamps else 0.0
+        return marks, pack_phase, captured
+
+    def test_planning_runs_concurrently_across_features(self):
+        marks, _elapsed, _cap = self._run(["feat a", "feat b", "feat c"])
+        self.assertGreater(marks["plans_max"], 1, "planning must overlap across lanes")
+
+    def test_the_repo_is_scanned_once_for_all_features(self):
+        marks, _elapsed, _cap = self._run(["feat a", "feat b", "feat c"])
+        self.assertEqual(marks["scans"], 1)
+
+    def test_pack_phase_beats_the_serial_sum(self):
+        features = ["feat a", "feat b", "feat c"]
+        delay = 0.3
+        _marks, pack_phase, _cap = self._run(features, plan_delay=delay)
+        self.assertLess(pack_phase, len(features) * delay * 0.8,
+                        f"{pack_phase:.2f}s vs serial {len(features) * delay:.2f}s")
+
+    def test_every_feature_still_gets_its_own_pack_in_order(self):
+        _marks, _phase, captured = self._run(["alpha module", "beta module"])
+        packs = captured["packs"]
+        self.assertEqual(len(packs), 2)
+        self.assertIn("src/alpha.py", packs[0])
+        self.assertNotIn("== FILE: src/beta.py", packs[0])
+        self.assertIn("src/beta.py", packs[1])
+        self.assertNotIn("== FILE: src/alpha.py", packs[1])
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
 class RunNParserTests(unittest.TestCase):
     def _parse(self, argv):
         from shepherd_dev.cli import build_parser

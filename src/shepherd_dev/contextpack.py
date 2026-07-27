@@ -15,6 +15,7 @@ feature => byte-identical pack.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .supervisor import IGNORED_DIRS
@@ -120,6 +121,61 @@ def _read_text(path: Path) -> str:
         return path.read_bytes()[:READ_CAP].decode("utf-8", errors="replace")
     except OSError:
         return ""
+
+
+@dataclass(frozen=True)
+class RepoScan:
+    """The feature-INDEPENDENT half of pack building: the filtered file list and
+    every file's text, walked and read once (A2).
+
+    Only scoring depends on the feature, so runN was paying for N identical
+    walks of the repo — two apiece, counting the planning prefetch's own view.
+    Pass one of these to build_pack/repo_file_view and they reuse it.
+    """
+
+    repo_root: Path
+    allowed_prefixes: tuple[str, ...]
+    files: tuple[Path, ...]
+    texts: dict[str, str]  # str(path) -> text
+
+    def text(self, path: Path) -> str:
+        """The cached text, falling back to a read for a path outside the scan
+        (import-graph neighbors resolve within it, but be defensive)."""
+        cached = self.texts.get(str(path))
+        return _read_text(path) if cached is None else cached
+
+    def check(self, repo_root: Path, allowed_prefixes: tuple[str, ...]) -> None:
+        """Refuse a scan taken for a different view. Silently reusing a narrower
+        one would change the pack without anything saying so."""
+        if Path(repo_root).resolve() != self.repo_root:
+            raise ValueError(
+                f"scan is for {self.repo_root}, not {Path(repo_root).resolve()}"
+            )
+        if tuple(allowed_prefixes) != self.allowed_prefixes:
+            raise ValueError(
+                f"scan was taken for allowed_prefixes={self.allowed_prefixes!r}, "
+                f"asked for {tuple(allowed_prefixes)!r}"
+            )
+
+
+def scan_repo(repo_root: Path, allowed_prefixes: tuple[str, ...] = ()) -> RepoScan:
+    """Walk + read the repo once, for reuse across several packs (A2)."""
+    files = _iter_files(repo_root, tuple(allowed_prefixes))
+    return RepoScan(
+        repo_root=Path(repo_root).resolve(),
+        allowed_prefixes=tuple(allowed_prefixes),
+        files=tuple(files),
+        texts={str(p): _read_text(p) for p in files},
+    )
+
+
+def _resolve_scan(
+    scan: RepoScan | None, repo_root: Path, allowed_prefixes: tuple[str, ...]
+) -> RepoScan:
+    if scan is None:
+        return scan_repo(repo_root, tuple(allowed_prefixes))
+    scan.check(repo_root, tuple(allowed_prefixes))
+    return scan
 
 
 def score_file(rel: str, text: str, keywords: list[str]) -> int:
@@ -282,10 +338,15 @@ def _test_files_for(rel: str, repo_rels: set[str]) -> list[str]:
     return out
 
 
-def repo_file_view(repo_root: Path, allowed_prefixes: tuple[str, ...] = ()) -> tuple[str, set[str]]:
+def repo_file_view(
+    repo_root: Path,
+    allowed_prefixes: tuple[str, ...] = (),
+    *,
+    scan: RepoScan | None = None,
+) -> tuple[str, set[str]]:
     """The pack's file listing as (tree_text, repo_rels) — the same filtered view
     build_pack uses, reused by the planning prefetch (#4) to build its prompt."""
-    files = _iter_files(repo_root, tuple(allowed_prefixes))
+    files = list(_resolve_scan(scan, repo_root, tuple(allowed_prefixes)).files)
     tree_text = _tree(repo_root, files)
     repo_rels = {_norm(str(f.relative_to(repo_root))) for f in files}
     return tree_text, repo_rels
@@ -330,6 +391,7 @@ def build_pack(
     target_n: int = TARGET_N,
     planned_targets: tuple[str, ...] = (),
     plan_text: str = "",
+    scan: RepoScan | None = None,
 ) -> tuple[str, dict]:
     """Build the pack. Returns (pack_text, stats).
 
@@ -339,13 +401,18 @@ def build_pack(
     (#3). planned_targets/plan_text come from the planning prefetch (#4): the
     planned files are force-included and treated as targets, and plan_text is
     surfaced as a stable section the worker should follow.
+
+    `scan` (A2) supplies the feature-independent walk + reads, so several packs
+    over one repo pay for them once. Byte-identical either way — only scoring
+    depends on the feature.
     """
     keywords = extract_keywords(feature)
-    files = _iter_files(repo_root, tuple(allowed_prefixes))
+    scan = _resolve_scan(scan, repo_root, tuple(allowed_prefixes))
+    files = list(scan.files)
     scored: list[tuple[int, str, Path, str]] = []
     for path in files:
         rel = str(path.relative_to(repo_root))
-        text = _read_text(path)
+        text = scan.text(path)
         s = score_file(rel, text, keywords)
         if s > 0:
             scored.append((s, rel, path, text))
@@ -402,7 +469,7 @@ def build_pack(
         path = files_by_rel.get(rel_n)
         if path is None:
             continue
-        text = _read_text(path)
+        text = scan.text(path)
         if len(text) <= FULL_FILE_LIMIT:
             block = f"== FILE: {rel_n} (planned target; full) ==\n{text}\n"
             is_full = True
@@ -447,7 +514,7 @@ def build_pack(
             path = files_by_rel.get(rel_n)
             if path is None:
                 continue
-            block = f"== FILE: {rel_n} ({marker}; signatures) ==\n{skeleton(_read_text(path), path.suffix.lower())}\n"
+            block = f"== FILE: {rel_n} ({marker}; signatures) ==\n{skeleton(scan.text(path), path.suffix.lower())}\n"
             if used + len(block) > budget:
                 continue
             sections.append(block)
@@ -469,7 +536,7 @@ def build_pack(
             path = files_by_rel.get(rel_n)
             if path is None:
                 continue
-            text = _read_text(path)
+            text = scan.text(path)
             if len(text) <= FULL_FILE_LIMIT:
                 block = f"== FILE: {rel_n} (test contract for {target}; full) ==\n{text}\n"
             else:
