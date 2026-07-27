@@ -63,6 +63,11 @@ class ReviewVerdict:
     #: the only thing that closes one short of approval (see ledger.py)
     resolved: list[str] = field(default_factory=list)
     error: str | None = None  # review ran but verdict could not be obtained
+    #: True when no model read the diff — the verdict is a deterministic
+    #: heuristic over its SHAPE (file count, byte size). Useful as a signal,
+    #: never as authority: --auto-settle refuses it, because approving a change
+    #: nobody read is the machine settling its own work.
+    advisory: bool = False
 
 
 @dataclass

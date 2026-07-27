@@ -507,6 +507,15 @@ def _auto_settle_conditions(report) -> str | None:
         return f"review unavailable: {report.review.error}"
     if not report.review.approved:
         return "review REJECTED the proposal"
+    if getattr(report.review, "advisory", False):
+        # The heuristic reviewer counts files and bytes; no model read the
+        # diff. Its approval says the change is SMALL, not that it is right,
+        # and auto-settle writes to the worktree without asking. grok has no
+        # reviewer CLI, so `--provider grok --auto-settle` landed here.
+        return (
+            "the review was advisory only (heuristic: no model read the diff) — "
+            "settle it yourself, or use a provider with a reviewer"
+        )
     return None
 
 

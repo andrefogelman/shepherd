@@ -215,10 +215,13 @@ def heuristic_review(entries: dict[str, bytes], feature: str) -> ReviewVerdict:
     """Deterministic lightweight review when no LLM review is requested/available.
 
     Flags empty proposals and oversized diffs; otherwise a weak advisory signal
-    — auto-settle still requires a real reviewing provider.
+    — auto-settle still requires a real reviewing provider. Every verdict here
+    carries advisory=True, which is what makes that sentence true rather than
+    merely stated: nothing reads the diff, so an approval is a statement about
+    its size and nothing more.
     """
     if not entries:
-        return ReviewVerdict(False, "no files in proposal", ["empty proposal"])
+        return ReviewVerdict(False, "no files in proposal", ["empty proposal"], advisory=True)
     n = len(entries)
     size = sum(len(v) for v in entries.values())
     issues: list[str] = []
@@ -234,6 +237,7 @@ def heuristic_review(entries: dict[str, bytes], feature: str) -> ReviewVerdict:
             + ("looks bounded" if ok else "needs human attention")
         ),
         issues=issues,
+        advisory=True,
     )
 
 
