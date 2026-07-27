@@ -32,7 +32,7 @@ from . import config, history, memory as repo_memory
 from .contextpack import build_pack
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
-from .staging import PROPOSALS_DIR
+from .staging import PROPOSALS_DIR, is_proposal_id
 from .supervisor import (
     child_python_env,
     develop,
@@ -406,6 +406,12 @@ def _interactive_settle_run(repo_root: Path, run_ref: str) -> int:
 
 def _interactive_settle_proposal(repo_root: Path, proposal_id: str) -> int:
     """Prompt accept/reject/diff for a staged (run2/best-of) proposal; act inline."""
+    # This id comes from a report rather than from the user, so it is not the
+    # traversal surface settle_proposal is. Checked anyway: the diff branch
+    # below walks and prints whatever the path names.
+    if not is_proposal_id(proposal_id):
+        print(f"error: not a proposal id: {proposal_id!r}", file=sys.stderr)
+        return 2
     files_dir = repo_root / PROPOSALS_DIR / proposal_id / "files"
     while True:
         choice = _ask_decision("\nAceitar (a), rejeitar (r) ou ver o diff (d)? [a/r/d]: ")
@@ -1211,6 +1217,19 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
 def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bool = False) -> tuple[int, list[str]]:
     """Core settlement for a staged run2/best-of proposal. Returns (exit_code, written)."""
     import shutil
+
+    # Validate BEFORE building the path. The id names a directory, so an
+    # unvalidated one names any directory: `../tests` reached the repo's own
+    # tests and `../../outside` reached outside the repo, and both ended at
+    # shutil.rmtree below. Holding a `files/` subdirectory was the only check,
+    # which is a shape an ordinary directory can have by accident.
+    if not is_proposal_id(proposal_id):
+        print(
+            f"error: not a proposal id: {proposal_id!r} — expected the form "
+            f"YYYYmmdd-HHMMSS-xxxxxx as printed when the proposal was staged",
+            file=sys.stderr,
+        )
+        return 2, []
 
     staging = repo_root / PROPOSALS_DIR / proposal_id
     files_dir = staging / "files"

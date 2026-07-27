@@ -75,12 +75,15 @@ class SettleProposalSymlink(unittest.TestCase):
         root = Path(mkdtemp())
         secret = Path(mkdtemp()) / "secret.txt"
         secret.write_text("TOPSECRET")
-        files = root / ".shepherd-proposals" / "p1" / "files"
+        # A real id shape: settle refuses anything its generator could not have
+        # produced, since the id names a directory (see test_settle_traversal).
+        pid = "20260727-120000-abc123"
+        files = root / ".shepherd-proposals" / pid / "files"
         files.mkdir(parents=True)
         (files / "real.py").write_text("x = 1\n")
         os.symlink(secret, files / "leak.txt")  # a symlink pointing OUTSIDE the repo
 
-        code, written = settle_proposal(root, "p1", reject=False)
+        code, written = settle_proposal(root, pid, reject=False)
         self.assertEqual(code, 0)
         self.assertIn("real.py", written)
         self.assertNotIn("leak.txt", written)           # symlink skipped

@@ -216,7 +216,14 @@ def _call_tool(name: str, arguments: dict) -> dict:
         return {"content": [{"type": "text", "text": f"unknown tool: {name}"}], "isError": True}
     # Human-only settlement (#4): accepting via MCP writes files, so the protocol
     # itself requires an explicit confirm=true — a client can't silently apply a
-    # proposal. Rejecting (discarding) is safe and needs no confirmation.
+    # proposal.
+    #
+    # Rejecting needs no confirmation because it discards a staged proposal and
+    # nothing else. That held only once the id was validated: while settle
+    # joined an arbitrary id onto the repo root, `reject=true` was an
+    # unconfirmed delete of any directory a client could name. The guarantee
+    # lives in staging.is_proposal_id, not here — do not restate it as a
+    # property of rejection itself.
     if name in ("shepherd_settle", "shepherd_settle_par") and not arguments.get("reject"):
         if arguments.get("confirm") is not True:
             ref = arguments.get("run_ref") or arguments.get("proposal_id") or "the proposal"
