@@ -164,6 +164,23 @@ def _propose(model: str) -> Candidate | None:
     return Candidate(key=key, text=text, rationale=str(data.get("rationale", "")))
 
 
+#: Gate budget pinned into the replayed `run`. Pinned rather than inherited so
+#: the parent's own timeout below is computed from the same number (#7).
+REPLAY_GATE_TIMEOUT = 600
+
+#: Planning, repo scans, workspace init, teardown — everything a replayed `run`
+#: spends outside the worker and the gate.
+REPLAY_STARTUP_SLACK = 300
+
+
+def _replay_timeout(worker_budget: int) -> int:
+    """How long a replayed `run` may take: its worker, its whole gate, and the
+    startup around both. The old `worker_budget + 300` did not cover even the
+    gate's default 600s, so a replay was SIGKILLed mid-suite and the candidate
+    it was validating scored as a failure (#7)."""
+    return worker_budget + REPLAY_GATE_TIMEOUT + REPLAY_STARTUP_SLACK
+
+
 def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) -> bool:
     """Re-run one case at its pinned SHA in a subprocess; True = gate passed.
 
@@ -200,12 +217,25 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
                     "--repo", str(wt), "--test-cmd", case.test_cmd,
                     "--mode", case.mode, "--no-review", "--max-attempts", "1",
                     "--worker-budget", str(worker_budget),
+                    "--gate-timeout", str(REPLAY_GATE_TIMEOUT),
                 ],
-                capture_output=True, text=True, env=env, timeout=worker_budget + 300,
+                capture_output=True, text=True, env=env,
+                timeout=_replay_timeout(worker_budget),
             )
             # `run` exits 0 iff the gate passed (report.succeeded); use the exit
             # code, not a stdout substring, so replay isn't fragile to formatting (#16).
             return proc.returncode == 0
+        except subprocess.TimeoutExpired:
+            # Loud: a replay reaped by the harness is NOT evidence against the
+            # candidate, and silently folding it into "failed" biases the whole
+            # optimize verdict toward rejecting good prompts.
+            print(
+                f"replay timed out after {_replay_timeout(worker_budget)}s "
+                f"({case.feature[:60]!r}) — scored as a failure, but this is a "
+                f"harness limit, not a candidate verdict",
+                file=sys.stderr,
+            )
+            return False
         except Exception:
             return False
         finally:
