@@ -39,13 +39,24 @@ def find_grok_bin(explicit: str | None = None) -> str | None:
 class FakeGrokExecutor:
     """Test/offline executor: applies a fixed set of file writes to the clone."""
 
-    def __init__(self, files: dict[str, bytes] | None = None, fail: bool = False, error: str = "fake fail"):
+    def __init__(
+        self,
+        files: dict[str, bytes] | None = None,
+        fail: bool = False,
+        error: str = "fake fail",
+        on_run=None,
+    ):
         self.files = files or {}
         self.fail = fail
         self.error = error
+        #: Called with the clone once the "worker" starts — lets a test act on
+        #: the real repo while the run is in flight (see #3).
+        self.on_run = on_run
 
     def run(self, clone: Path, prompt: str, *, budget_seconds: int) -> ExecResult:
         started = time.monotonic()
+        if self.on_run is not None:
+            self.on_run(clone)
         if self.fail:
             return ExecResult(False, self.error, round(time.monotonic() - started, 1))
         for rel, content in self.files.items():

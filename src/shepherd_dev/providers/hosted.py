@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
-from ..diffcollect import DEFAULT_IGNORE_DIRS, collect_changed_entries
+from ..diffcollect import DEFAULT_IGNORE_DIRS, collect_changed_entries, snapshot_tree
 from ..policy import ChangesetPolicy, check_paths
 from ..staging import PROPOSALS_DIR, stage_proposal
 from ..supervisor import (
@@ -228,6 +228,11 @@ def develop_hosted(
         clone: Path | None = None
         try:
             clone = clone_repo(repo_root, prefix=f"shepherd-{provider}-")
+            # The base the proposal is diffed against, pinned BEFORE the worker
+            # runs. Diffing against the live repo instead would let an edit the
+            # human makes mid-run enter the changeset with the worker's stale
+            # copy, and settling would revert that edit in silence (#3).
+            base_snapshot = snapshot_tree(clone)
             prompt = worker_prompt(feature, guidance=guidance, context_pack=context_pack, mode=mode)
             result: ExecResult = executor.run(clone, prompt, budget_seconds=worker_budget)
             if not result.ok:
@@ -244,7 +249,7 @@ def develop_hosted(
                 )
                 continue
 
-            entries = collect_changed_entries(repo_root, clone)
+            entries = collect_changed_entries(repo_root, clone, baseline=base_snapshot)
             changed = list(entries)
             reporter.note(f"worker: {len(changed)} file(s)" + (f": {', '.join(changed[:8])}" if changed else ""))
 
@@ -311,6 +316,11 @@ def develop_hosted(
                     "backend": backend,
                     "feature": feature,
                     "mode": mode,
+                    # settle-par re-runs the suite against the CURRENT worktree
+                    # before writing. Hosted proposals used to omit this, so the
+                    # one check that catches a base that moved under them was
+                    # skipped for exactly the path that races the human (#3).
+                    "regate_cmd": test_cmd,
                     "gate": (
                         None
                         if gate is None

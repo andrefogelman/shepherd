@@ -38,6 +38,34 @@ class GrokHostLoop(unittest.TestCase):
             (root / ".shepherd-proposals" / report.proposal_id / "manifest.json").read_text()
         )
         self.assertEqual(manifest.get("provider"), "grok")
+        # #3: settle-par's re-gate is the only settle-time check that a moved
+        # base invalidates the proposal — hosted must carry the command too.
+        self.assertEqual(manifest.get("regate_cmd"), "true")
+
+    def test_human_edit_during_the_run_is_not_reverted(self):
+        """#3: a file the human edits mid-run, untouched by the worker, must
+        stay out of the proposal — otherwise settling rewrites it with the
+        stale copy the clone was made from."""
+        root = Path(tempfile.mkdtemp())
+        (root / "seed.txt").write_text("seed\n")
+        (root / "human.py").write_text("original\n")
+
+        def edit_during_run(clone: Path):
+            (root / "human.py").write_text("HUMAN EDITED MID-RUN\n")
+
+        report = develop_grok(
+            root,
+            "add hello module",
+            test_cmd="true",
+            max_attempts=1,
+            executor=FakeGrokExecutor(
+                {"hello.py": b"print('hi')\n"}, on_run=edit_during_run
+            ),
+            do_review=False,
+        )
+        self.assertTrue(report.succeeded)
+        self.assertNotIn("human.py", report.entries or {})
+        self.assertEqual(list(report.entries or {}), ["hello.py"])
 
     def test_policy_rejects_escape(self):
         root = Path(tempfile.mkdtemp())
