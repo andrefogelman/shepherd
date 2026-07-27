@@ -49,6 +49,32 @@ class AllowedPrefix(unittest.TestCase):
         self.assertTrue(check_paths(["lib/x.py"], pol).violations)
         self.assertEqual(check_paths(["src/x.py"], pol).violations, [])
 
+    def test_a_prefix_names_a_directory_not_a_string_prefix(self):
+        """`--allowed-prefix src` reads as "inside src/". String matching also
+        admits every sibling whose name STARTS with src — srcx/, src-old/,
+        srcbackup/ — so the confinement a user asked for was wider than the
+        words they used, silently."""
+        pol = ChangesetPolicy(allowed_prefixes=("src",))
+        for outside in ("srcx/evil.py", "src-old/x.py", "srcbackup/y.py", "srcs.py"):
+            with self.subTest(path=outside):
+                self.assertTrue(
+                    check_paths([outside], pol).violations, f"{outside} slipped through"
+                )
+        for inside in ("src/x.py", "src/deep/y.py"):
+            with self.subTest(path=inside):
+                self.assertEqual(check_paths([inside], pol).violations, [])
+
+    def test_a_trailing_slash_behaves_the_same_way(self):
+        pol = ChangesetPolicy(allowed_prefixes=("src/",))
+        self.assertTrue(check_paths(["srcx/evil.py"], pol).violations)
+        self.assertEqual(check_paths(["src/x.py"], pol).violations, [])
+
+    def test_a_file_prefix_still_matches_that_exact_file(self):
+        """A prefix need not name a directory: `--allowed-prefix setup.py`."""
+        pol = ChangesetPolicy(allowed_prefixes=("setup.py",))
+        self.assertEqual(check_paths(["setup.py"], pol).violations, [])
+        self.assertTrue(check_paths(["setup.python.py"], pol).violations)
+
 
 class RemoteOverlayGuard(unittest.TestCase):
     def test_is_safe_rel(self):

@@ -44,6 +44,22 @@ def _escapes_repo(path: str) -> bool:
     return p.is_absolute() or ".." in p.parts
 
 
+def _within_prefix(path: str, prefix: str) -> bool:
+    """True when `path` is `prefix` itself or lies under it.
+
+    A path boundary, not a string one. `path.startswith("src")` also admits
+    every sibling whose NAME starts with src — srcx/, src-old/, srcbackup/ —
+    so `--allowed-prefix src` confined the worker to more than the words the
+    user wrote, and said nothing about it. Compared segment by segment so the
+    boundary is a directory separator, however the prefix was spelled.
+    """
+    prefix = prefix.strip("/")
+    if not prefix:
+        return True  # an empty prefix confines nothing
+    p, q = PurePosixPath(path).parts, PurePosixPath(prefix).parts
+    return p[: len(q)] == q
+
+
 def _is_forbidden(path: str, forbidden_paths: tuple[str, ...]) -> bool:
     """Match forbidden entries against ANY path segment, not just the prefix.
 
@@ -76,7 +92,7 @@ def check_paths(paths: list[str], policy: ChangesetPolicy) -> PolicyVerdict:
         if _is_forbidden(path, policy.forbidden_paths):
             violations.append(f"touched forbidden path: {path}")
         if policy.allowed_prefixes and not any(
-            path.startswith(prefix) for prefix in policy.allowed_prefixes
+            _within_prefix(path, prefix) for prefix in policy.allowed_prefixes
         ):
             violations.append(f"touched path outside allowed prefixes: {path}")
 
