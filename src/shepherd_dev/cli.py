@@ -1369,7 +1369,10 @@ def cmd_runN(args) -> int:
     # is collected per feature and printed in order — N interleaved progress
     # lines would be unreadable.
     packs: list[str | None] = [None] * len(features)
-    planned_by_feature: list[set[str]] = [set()] * len(features)
+    # A comprehension, not [set()] * n — that binds N names to ONE set, and the
+    # next person to mutate one in place would move all of them.
+    planned_by_feature: list[set[str]] = [set() for _ in features]
+    pack_failures: list[int] = []
     shared_scan = None
     if not (getattr(args, "no_context_pack", False) or args.provider == "static"):
         from .contextpack import scan_repo
@@ -1384,11 +1387,16 @@ def cmd_runN(args) -> int:
     with ThreadPoolExecutor(max_workers=len(features)) as pool:
         lanes = [pool.submit(_pack_lane, i) for i in range(len(features))]
         collected: dict[int, list[str]] = {}
-        for fut in lanes:
+        for idx, fut in enumerate(lanes):
             try:
                 i, pack, planned, lines = fut.result()
             except Exception as exc:  # a pack lane must not sink the run
-                print(f"context pack failed for a feature: {exc}", file=sys.stderr)
+                pack_failures.append(idx)
+                print(
+                    f"context pack failed for feature {idx + 1} "
+                    f"({features[idx]!r}): {exc}",
+                    file=sys.stderr,
+                )
                 continue
             packs[i] = pack
             planned_by_feature[i] = planned
@@ -1407,6 +1415,19 @@ def cmd_runN(args) -> int:
             print(f"  {path}: features {idxs}", file=sys.stderr)
         print("  these features look COUPLED — run2 coordinates coupled work; "
               "proceeding, but expect conflicts at settle.", file=sys.stderr)
+    if pack_failures:
+        # The guardrail compares PLANNED targets across features, so a feature
+        # whose planning never produced any contributes nothing and cannot be
+        # found to overlap. Silence from it is absence of evidence. Say so —
+        # "no overlap predicted" otherwise reads as a clean bill of health.
+        names = ", ".join(f"{i + 1} ({features[i]!r})" for i in pack_failures)
+        print(
+            f"⚠ the overlap check is INCOMPLETE: planning failed for feature(s) "
+            f"{names}, so their targets were not compared against the others. "
+            f"Absence of a warning above is not evidence these features are "
+            f"independent.",
+            file=sys.stderr,
+        )
 
     error = _refresh_substrate(repo_root, fresh=getattr(args, "fresh_adopt", False))
     if error:

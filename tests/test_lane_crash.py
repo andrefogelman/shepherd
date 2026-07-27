@@ -568,3 +568,179 @@ class Run2SpeculativeReview(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class ReviewFailureDoesNotEraseTheGate(unittest.TestCase):
+    """best-of treated a review that RAISED differently from one that came back
+    unavailable: the first erased the candidate's gate result, the second did
+    not. With every review raising, best-of then reported "no candidate passed
+    the gate" about candidates that had all passed it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-revfail-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+
+    def _run(self, review):
+        import threading
+
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import DevReport, GateResult
+
+        seq, lock = {"n": 0}, threading.Lock()
+
+        def worker(clone, feature, note, **_kw):
+            with lock:
+                seq["n"] += 1
+                mine = seq["n"]
+            r = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            r.entries = {f"src/c{mine}.py": b"C = 1\n"}
+            r.final_run_ref = f"run-{mine}"
+            return r
+
+        class _Workspace:
+            def git_repo(self):
+                return None
+
+        class _FakeSp:
+            @staticmethod
+            def open(path):
+                class _Ctx:
+                    def __enter__(self):
+                        return _Workspace()
+
+                    def __exit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many,
+               P._run_gate, P.run_review, P.sp)
+        P._run_worker = worker
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
+        P._run_gate = lambda *a, **kw: GateResult(True, 0, "ok")
+        P.run_review = review
+        P.sp = _FakeSp()
+        try:
+            return P.develop_best_of(
+                self.repo, "feat", k=3, test_cmd="true", provider="static",
+                review_task=object(),
+            )
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many,
+             P._run_gate, P.run_review, P.sp) = old
+
+    def test_a_raising_review_keeps_the_candidate_viable(self):
+        def boom(*a, **kw):
+            raise _Boom("reviewer exploded")
+
+        report = self._run(boom)
+        self.assertTrue(report.succeeded, report.error)
+        self.assertIsNone(report.error)
+        self.assertEqual(len(report.candidates), 3)
+        for c in report.candidates:
+            self.assertTrue(c.gate_passed, "the gate result must survive")
+            self.assertIsNotNone(c.review)
+            self.assertIn("_Boom", c.review.error or "")
+
+    def test_it_matches_how_an_unavailable_review_is_treated(self):
+        from shepherd_dev.supervisor import ReviewVerdict
+
+        def unavailable(*a, **kw):
+            return ReviewVerdict(approved=False, summary="", error="reviewer down")
+
+        raised = self._run(lambda *a, **kw: (_ for _ in ()).throw(_Boom("x")))
+        reported = self._run(unavailable)
+        self.assertEqual(
+            [c.gate_passed for c in raised.candidates],
+            [c.gate_passed for c in reported.candidates],
+        )
+        self.assertEqual(raised.succeeded, reported.succeeded)
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class SpecThreadReapedOnException(unittest.TestCase):
+    """run2's spec reviewer holds clones[0], and the finally deletes exactly
+    that tree. It was reaped only on the exits that knew about it, so an
+    exception out of the gate left the thread reading a directory being
+    removed underneath it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-specexc-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("A = 1\n")
+
+    def test_a_gate_exception_still_reaps_the_reviewer(self):
+        import threading
+        import time
+
+        from shepherd_dev import parallel as P
+        from shepherd_dev.supervisor import DevReport, ReviewVerdict
+
+        release = threading.Event()
+        seq, lock = {"n": 0}, threading.Lock()
+
+        def worker(clone, feature, note, **_kw):
+            with lock:
+                seq["n"] += 1
+                mine = seq["n"]
+            r = DevReport(feature=feature, succeeded=True, repo=str(clone))
+            r.entries = {f"src/w{mine}.py": b"W = 1\n"}
+            r.final_run_ref = f"run-{mine}"
+            return r
+
+        def slow_review(*a, **kw):
+            release.wait(10)
+            return ReviewVerdict(approved=True, summary="ok")
+
+        def exploding_gate(*a, **kw):
+            release.set()          # let the reviewer finish
+            time.sleep(0.05)
+            raise _Boom("gate exploded")
+
+        class _Workspace:
+            def git_repo(self):
+                return None
+
+        class _FakeSp:
+            @staticmethod
+            def open(path):
+                class _Ctx:
+                    def __enter__(self):
+                        return _Workspace()
+
+                    def __exit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        old = (P._run_worker, P._clone_workspace, P._clone_many,
+               P._run_gate, P.run_review, P.sp)
+        P._run_worker = worker
+        P._clone_workspace = clone_stub(self.repo)
+        P._clone_many = clone_many_stub(self.repo)
+        P._run_gate = exploding_gate
+        P.run_review = slow_review
+        P.sp = _FakeSp()
+        try:
+            with self.assertRaises(_Boom):
+                P.develop_parallel(
+                    self.repo, ["a", "b"], test_cmd="true", provider="static",
+                    review_task=object(), speculative_review=True,
+                )
+        finally:
+            (P._run_worker, P._clone_workspace, P._clone_many,
+             P._run_gate, P.run_review, P.sp) = old
+            release.set()
+
+        self.assertFalse(
+            any(t.name == "shepherd-spec-review" and t.is_alive()
+                for t in threading.enumerate()),
+            "the reviewer outlived the run whose clones were just deleted",
+        )

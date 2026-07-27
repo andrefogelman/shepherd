@@ -221,6 +221,8 @@ def develop_parallel(
     clones: list[Path] = []
 
     gate_stage = None
+    #: Bound before the try so the finally can reap it however we leave.
+    spec_thread: threading.Thread | None = None
     try:
         clones = _clone_many(repo_root, 2)
         # A3: one pristine base, built in the background while both workers run,
@@ -359,10 +361,19 @@ def develop_parallel(
         # snapshot is `combined` AS IT STANDS NOW: a repair round changes it,
         # which invalidates the verdict (checked at the review point below).
         spec_result: dict = {}
-        spec_thread = None
         spec_basis = dict(combined)
         if review_task is not None and speculative_review:
             def _speculate():
+                # Verbose mode routes a thread's launches to a log by thread
+                # identity, and this thread had never registered — so the
+                # speculative reviewer's stream landed in whichever log the
+                # transport happened to hold, or none. It reviews the COMBINED
+                # proposal, so the main narrative is where it belongs.
+                if stream_hook is not None:
+                    try:
+                        stream_hook.bind(main_log)
+                    except Exception:
+                        pass
                 try:
                     with sp.open(clones[0]) as workspace:
                         spec_result["verdict"] = run_review(
@@ -490,6 +501,14 @@ def develop_parallel(
         report.succeeded = True
         return report
     finally:
+        # Reap the speculative reviewer HERE, not only on the exits that know
+        # about it: it holds clones[0], and the loop below deletes exactly that
+        # tree. The explicit calls on the normal paths stay — joining a
+        # finished thread is free — but an exception out of the gate, a repair
+        # round or the staging step used to leave the thread reading a
+        # directory being removed underneath it.
+        if spec_thread is not None:
+            spec_thread.join()
         if gate_stage is not None:
             gate_stage.close()  # this call owned the shared base (keep_stage)
         for clone in clones:
@@ -926,15 +945,29 @@ def develop_best_of(
                     pass
             review = None
             if gate.passed and review_task is not None:
-                with sp.open(clones[i]) as workspace:
-                    review = run_review(
-                        workspace,
-                        review_task,
-                        feature=feature,
-                        diff_text=_entries_diff_text(w.entries),
-                        provider=provider,
-                        placement=placement,
-                        context_pack=context_pack,
+                # A review that RAISES must not erase a gate result that was
+                # obtained. It used to: the exception left _judge, the candidate
+                # became "crashed" with gate_passed=False, and with every review
+                # failing best-of reported "no candidate passed the gate" — of
+                # candidates that had all passed it. Reviews that merely come
+                # back unavailable were already treated this way (rank_key reads
+                # `review.error` and sorts them last); a raised one is the same
+                # event with a louder shape.
+                try:
+                    with sp.open(clones[i]) as workspace:
+                        review = run_review(
+                            workspace,
+                            review_task,
+                            feature=feature,
+                            diff_text=_entries_diff_text(w.entries),
+                            provider=provider,
+                            placement=placement,
+                            context_pack=context_pack,
+                        )
+                except Exception as exc:
+                    review = ReviewVerdict(
+                        approved=False, summary="review failed",
+                        error=f"{type(exc).__name__}: {exc}",
                     )
             return BestOfCandidate(
                 i,

@@ -359,6 +359,53 @@ class RunNPackPipelining(unittest.TestCase):
         self.assertLess(pack_phase, len(features) * delay * 0.8,
                         f"{pack_phase:.2f}s vs serial {len(features) * delay:.2f}s")
 
+    def test_a_failed_pack_lane_says_the_overlap_check_is_incomplete(self):
+        """The guardrail compares PLANNED targets across features. A feature
+        whose planning failed contributes none, so it cannot be found to
+        overlap — and silence from it read as 'independent'."""
+        import contextlib
+        import io
+
+        from shepherd_dev import cli as C
+
+        calls = {"n": 0}
+
+        def flaky_planning(args, repo_root, feature_text, scan=None, out=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("planner unavailable")
+            return (), ""
+
+        err = io.StringIO()
+        old = (C._run_planning, C._resolve_repo, C._resolve_gate)
+        C._run_planning = flaky_planning
+        C._resolve_repo = lambda repo: self.repo
+        C._resolve_gate = lambda root, cmd, provider: ("true", None, True)
+
+        from shepherd_dev import parallel as P
+
+        old_many = P.develop_many
+
+        def fake_many(repo_root, features_, **kw):
+            from shepherd_dev.parallel import ManyReport
+
+            r = ManyReport(features=list(features_))
+            r.succeeded = True
+            return r
+
+        P.develop_many = fake_many
+        try:
+            with contextlib.redirect_stderr(err):
+                C.cmd_runN(self._args(["alpha thing", "beta thing", "gamma thing"]))
+        finally:
+            C._run_planning, C._resolve_repo, C._resolve_gate = old
+            P.develop_many = old_many
+
+        text = err.getvalue()
+        self.assertIn("INCOMPLETE", text)
+        self.assertIn("not evidence", text)   # names what silence does NOT mean
+        self.assertIn("planning failed for feature", text)
+
     def test_every_feature_still_gets_its_own_pack_in_order(self):
         _marks, _phase, captured = self._run(["alpha module", "beta module"])
         packs = captured["packs"]
