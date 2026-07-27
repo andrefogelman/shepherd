@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -71,6 +73,47 @@ class BaselineSnapshot(unittest.TestCase):
         (mod / "untouched.py").write_text("v=1\n")
         (base / "untouched.py").write_text("v=2  # human edit\n")
         self.assertIn("untouched.py", collect_changed_entries(base, mod))
+
+    def test_untouched_files_are_dismissed_without_being_read(self):
+        """The stat pair (size, mtime) settles an untouched file, so the diff
+        stops re-reading the whole tree on every attempt."""
+        base = Path(tempfile.mkdtemp())
+        mod = Path(tempfile.mkdtemp())
+        for i in range(3):
+            (mod / f"f{i}.py").write_text(f"F = {i}\n")
+        snap = snapshot_tree(mod)
+        time.sleep(0.02)  # clear the snapshot instant (racily-clean guard)
+        (mod / "f1.py").write_text("F = 99\n")
+
+        reads: list[str] = []
+        real_read = Path.read_bytes
+
+        def counting(self):
+            reads.append(self.name)
+            return real_read(self)
+
+        Path.read_bytes = counting
+        try:
+            entries = collect_changed_entries(base, mod, baseline=snap)
+        finally:
+            Path.read_bytes = real_read
+
+        self.assertEqual(list(entries), ["f1.py"])
+        self.assertEqual(reads, ["f1.py"], "only the touched file may be read")
+
+    def test_a_file_stamped_inside_the_snapshot_window_is_still_hashed(self):
+        """Filesystem timestamp granularity means a write during the snapshot
+        can land on the recorded mtime. Those must not be trusted on stat."""
+        base = Path(tempfile.mkdtemp())
+        mod = Path(tempfile.mkdtemp())
+        target = mod / "racy.py"
+        target.write_text("V = 1\n")
+        snap = snapshot_tree(mod)
+        # same size, and an mtime backdated INTO the snapshot instant
+        target.write_text("V = 2\n")
+        os.utime(target, ns=(snap.taken_ns, snap.taken_ns))
+        entries = collect_changed_entries(base, mod, baseline=snap)
+        self.assertEqual(entries, {"racy.py": b"V = 2\n"})
 
     def test_snapshot_covers_new_files_and_ignores_noise(self):
         mod = Path(tempfile.mkdtemp())

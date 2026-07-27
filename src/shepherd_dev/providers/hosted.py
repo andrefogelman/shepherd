@@ -27,6 +27,8 @@ from ..supervisor import (
     _format_guidance,
     _prior_attempt_guidance,
     _run_gate,
+    fast_copytree,
+    start_local_gate_stage,
 )
 
 
@@ -121,15 +123,14 @@ class HostedReport:
 
 
 def clone_repo(repo_root: Path, *, prefix: str = "shepherd-hosted-") -> Path:
+    # fast_copytree, not shutil.copytree: the hosted path inherited none of the
+    # accelerators the run path uses, and this is a full tree copy per attempt.
+    # It takes the filesystem's cheap copy where one exists (clonefile on APFS)
+    # and falls back to shutil per entry.
     dest = Path(tempfile.mkdtemp(prefix=prefix))
     clone = dest / "repo"
     ignore = set(IGNORED_DIRS) | DEFAULT_IGNORE_DIRS | {".git"}
-    shutil.copytree(
-        repo_root,
-        clone,
-        ignore=shutil.ignore_patterns(*ignore),
-        symlinks=True,
-    )
+    fast_copytree(repo_root, clone, ignored=ignore)
     return clone
 
 
@@ -222,128 +223,140 @@ def develop_hosted(
         backend=backend, provider=provider,
     )
     guidance = ""
+    # One pristine base for every attempt's gate, built in the background while
+    # the first worker runs. Without it each attempt's gate paid a full
+    # materialize of the repo — the run path has had this for a while; the
+    # hosted path inherited none of it.
+    gate_stage = start_local_gate_stage(repo_root, test_cmd)
 
-    for number in range(1, max_attempts + 1):
-        reporter.step(f"attempt {number}/{max_attempts} · {provider} worker ({backend})")
-        clone: Path | None = None
-        try:
-            clone = clone_repo(repo_root, prefix=f"shepherd-{provider}-")
-            # The base the proposal is diffed against, pinned BEFORE the worker
-            # runs. Diffing against the live repo instead would let an edit the
-            # human makes mid-run enter the changeset with the worker's stale
-            # copy, and settling would revert that edit in silence (#3).
-            base_snapshot = snapshot_tree(clone)
-            prompt = worker_prompt(feature, guidance=guidance, context_pack=context_pack, mode=mode)
-            result: ExecResult = executor.run(clone, prompt, budget_seconds=worker_budget)
-            if not result.ok:
-                reporter.fail(result.error or f"{provider} worker failed")
-                report.attempts.append(
-                    Attempt(
-                        number, f"{provider}-{number}", [], [], None, "run_failed",
-                        error=result.error, duration_s=result.duration_s,
-                    )
-                )
-                guidance = (
-                    "PREVIOUS ATTEMPT: the worker run failed "
-                    f"({result.error}). Be more direct; make the minimal change."
-                )
-                continue
-
-            entries = collect_changed_entries(repo_root, clone, baseline=base_snapshot)
-            changed = list(entries)
-            reporter.note(f"worker: {len(changed)} file(s)" + (f": {', '.join(changed[:8])}" if changed else ""))
-
-            if not changed:
-                reporter.fail("no file changes")
-                report.attempts.append(
-                    Attempt(number, f"{provider}-{number}", [], [], None, "no_change", duration_s=result.duration_s)
-                )
-                guidance = (
-                    "PREVIOUS ATTEMPT: you produced no file changes. Implement the feature "
-                    "by writing files into the repository now."
-                )
-                continue
-
-            verdict = check_paths(changed, policy)
-            if not verdict.ok:
-                reporter.fail(f"policy: {len(verdict.violations)} violation(s)")
-                report.attempts.append(
-                    Attempt(
-                        number, f"{provider}-{number}", changed, verdict.violations, None,
-                        "policy_rejected", duration_s=result.duration_s,
-                    )
-                )
-                guidance = _prior_attempt_guidance(entries) + _format_guidance(
-                    "policy", violations=verdict.violations
-                )
-                continue
-
-            gate: GateResult | None = None
-            if test_cmd is not None:
-                reporter.step(f"attempt {number} · gate")
-                gate = _run_gate(repo_root, entries, test_cmd, gate_timeout)
-                if gate.infra_error:
-                    reporter.fail(f"gate infra: {gate.infra_error[:80]}")
+    try:
+        for number in range(1, max_attempts + 1):
+            reporter.step(f"attempt {number}/{max_attempts} · {provider} worker ({backend})")
+            clone: Path | None = None
+            try:
+                clone = clone_repo(repo_root, prefix=f"shepherd-{provider}-")
+                # The base the proposal is diffed against, pinned BEFORE the worker
+                # runs. Diffing against the live repo instead would let an edit the
+                # human makes mid-run enter the changeset with the worker's stale
+                # copy, and settling would revert that edit in silence (#3).
+                base_snapshot = snapshot_tree(clone)
+                prompt = worker_prompt(feature, guidance=guidance, context_pack=context_pack, mode=mode)
+                result: ExecResult = executor.run(clone, prompt, budget_seconds=worker_budget)
+                if not result.ok:
+                    reporter.fail(result.error or f"{provider} worker failed")
                     report.attempts.append(
-                        Attempt(number, f"{provider}-{number}", changed, [], gate, "tests_failed", duration_s=result.duration_s)
+                        Attempt(
+                            number, f"{provider}-{number}", [], [], None, "run_failed",
+                            error=result.error, duration_s=result.duration_s,
+                        )
                     )
-                    report.error = gate.infra_error
-                    return report
-                if not gate.passed:
-                    reporter.fail(f"gate failed (exit {gate.exit_code})")
-                    report.attempts.append(
-                        Attempt(number, f"{provider}-{number}", changed, [], gate, "tests_failed", duration_s=result.duration_s)
+                    guidance = (
+                        "PREVIOUS ATTEMPT: the worker run failed "
+                        f"({result.error}). Be more direct; make the minimal change."
                     )
-                    guidance = _prior_attempt_guidance(entries) + _format_guidance("gate", gate=gate)
                     continue
 
-            report.attempts.append(
-                Attempt(number, f"{provider}-{number}", changed, [], gate, "passed", duration_s=result.duration_s)
-            )
-            report.entries = entries
-            if do_review:
-                reporter.step(f"attempt {number} · review")
-                if review_fn is not None:
-                    report.review = review_fn(clone, entries, feature)
-                else:
-                    report.review = heuristic_review(entries, feature)
+                entries = collect_changed_entries(repo_root, clone, baseline=base_snapshot)
+                changed = list(entries)
+                reporter.note(f"worker: {len(changed)} file(s)" + (f": {', '.join(changed[:8])}" if changed else ""))
 
-            report.proposal_id, report.staged_paths = stage_proposal(
-                repo_root,
-                entries,
-                {
-                    "provider": provider,
-                    "backend": backend,
-                    "feature": feature,
-                    "mode": mode,
-                    # settle-par re-runs the suite against the CURRENT worktree
-                    # before writing. Hosted proposals used to omit this, so the
-                    # one check that catches a base that moved under them was
-                    # skipped for exactly the path that races the human (#3).
-                    "regate_cmd": test_cmd,
-                    "gate": (
-                        None
-                        if gate is None
-                        else {"passed": gate.passed, "exit_code": gate.exit_code}
-                    ),
-                    "review": (
-                        None
-                        if report.review is None
-                        else {
-                            "approved": report.review.approved,
-                            "summary": report.review.summary,
-                            "issues": report.review.issues,
-                            "error": report.review.error,
-                        }
-                    ),
-                },
-            )
-            report.succeeded = True
-            return report
-        finally:
-            if clone is not None:
-                shutil.rmtree(clone.parent, ignore_errors=True)
+                if not changed:
+                    reporter.fail("no file changes")
+                    report.attempts.append(
+                        Attempt(number, f"{provider}-{number}", [], [], None, "no_change", duration_s=result.duration_s)
+                    )
+                    guidance = (
+                        "PREVIOUS ATTEMPT: you produced no file changes. Implement the feature "
+                        "by writing files into the repository now."
+                    )
+                    continue
 
+                verdict = check_paths(changed, policy)
+                if not verdict.ok:
+                    reporter.fail(f"policy: {len(verdict.violations)} violation(s)")
+                    report.attempts.append(
+                        Attempt(
+                            number, f"{provider}-{number}", changed, verdict.violations, None,
+                            "policy_rejected", duration_s=result.duration_s,
+                        )
+                    )
+                    guidance = _prior_attempt_guidance(entries) + _format_guidance(
+                        "policy", violations=verdict.violations
+                    )
+                    continue
+
+                gate: GateResult | None = None
+                if test_cmd is not None:
+                    reporter.step(f"attempt {number} · gate")
+                    gate = _run_gate(
+                    repo_root, entries, test_cmd, gate_timeout,
+                    stage=gate_stage, keep_stage=True,
+                )
+                    if gate.infra_error:
+                        reporter.fail(f"gate infra: {gate.infra_error[:80]}")
+                        report.attempts.append(
+                            Attempt(number, f"{provider}-{number}", changed, [], gate, "tests_failed", duration_s=result.duration_s)
+                        )
+                        report.error = gate.infra_error
+                        return report
+                    if not gate.passed:
+                        reporter.fail(f"gate failed (exit {gate.exit_code})")
+                        report.attempts.append(
+                            Attempt(number, f"{provider}-{number}", changed, [], gate, "tests_failed", duration_s=result.duration_s)
+                        )
+                        guidance = _prior_attempt_guidance(entries) + _format_guidance("gate", gate=gate)
+                        continue
+
+                report.attempts.append(
+                    Attempt(number, f"{provider}-{number}", changed, [], gate, "passed", duration_s=result.duration_s)
+                )
+                report.entries = entries
+                if do_review:
+                    reporter.step(f"attempt {number} · review")
+                    if review_fn is not None:
+                        report.review = review_fn(clone, entries, feature)
+                    else:
+                        report.review = heuristic_review(entries, feature)
+
+                report.proposal_id, report.staged_paths = stage_proposal(
+                    repo_root,
+                    entries,
+                    {
+                        "provider": provider,
+                        "backend": backend,
+                        "feature": feature,
+                        "mode": mode,
+                        # settle-par re-runs the suite against the CURRENT worktree
+                        # before writing. Hosted proposals used to omit this, so the
+                        # one check that catches a base that moved under them was
+                        # skipped for exactly the path that races the human (#3).
+                        "regate_cmd": test_cmd,
+                        "gate": (
+                            None
+                            if gate is None
+                            else {"passed": gate.passed, "exit_code": gate.exit_code}
+                        ),
+                        "review": (
+                            None
+                            if report.review is None
+                            else {
+                                "approved": report.review.approved,
+                                "summary": report.review.summary,
+                                "issues": report.review.issues,
+                                "error": report.review.error,
+                            }
+                        ),
+                    },
+                )
+                report.succeeded = True
+                return report
+            finally:
+                if clone is not None:
+                    shutil.rmtree(clone.parent, ignore_errors=True)
+
+    finally:
+        if gate_stage is not None:
+            gate_stage.close()  # shared across attempts (keep_stage)
     if not report.succeeded and not report.error:
         report.error = "all attempts exhausted without a passing proposal"
     return report

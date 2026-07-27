@@ -107,6 +107,21 @@ def _kill_subtree(pids: set[int], grace: float = 3.0) -> int:
     return len(live)
 
 
+#: Seconds past the budget before the backstop escalates.
+#:
+#: The launch perl's SIGALRM fires exactly AT the budget and kills the worker's
+#: process group; this watchdog only exists for the case where that kill did not
+#: happen (setsid blocked, killpg denied, the perl seam moved under a framework
+#: upgrade). The grace covers the orderly teardown after a successful kill —
+#: milliseconds of stream drain and transport shutdown, not tens of seconds.
+#:
+#: So a shorter grace cannot punish a worker the alarm already reaped: by then
+#: find_worker_pids finds nothing and the watchdog is a no-op. It only shortens
+#: the wait in exactly the case the backstop is FOR — up to 45s per overrun
+#: attempt, and an attempt that overruns is one the run is already paying for.
+DEFAULT_GRACE = 15
+
+
 class WorkerWatchdog:
     """Backstop that hard-kills the worker subtree `grace` seconds past the budget.
 
@@ -114,7 +129,9 @@ class WorkerWatchdog:
     it, so a worker that finishes in time is never touched. fired tells whether a
     kill happened, so the caller can record the attempt as timed-out."""
 
-    def __init__(self, budget_seconds: int, grace: int = 60, own_pid: int | None = None):
+    def __init__(
+        self, budget_seconds: int, grace: int = DEFAULT_GRACE, own_pid: int | None = None
+    ):
         self.after = max(1, budget_seconds) + max(0, grace)
         self.grace = grace
         self._own_pid = own_pid or os.getpid()
