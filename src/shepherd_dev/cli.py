@@ -33,7 +33,13 @@ from .contextpack import build_pack
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .staging import PROPOSALS_DIR
-from .supervisor import develop, materialize_into, read_changeset_entries, set_worker_budget
+from .supervisor import (
+    child_python_env,
+    develop,
+    materialize_into,
+    read_changeset_entries,
+    set_worker_budget,
+)
 from .tasks import implement, review, write_tests
 
 
@@ -324,7 +330,8 @@ def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
 
         shepherd_bin = Path(sys.executable).parent / "shepherd"
         proc = subprocess.run(
-            [str(shepherd_bin), "init"], cwd=repo_root, capture_output=True, text=True
+            [str(shepherd_bin), "init"], cwd=repo_root, capture_output=True, text=True,
+            env=child_python_env(),  # `shepherd` is a python entry point too
         )
         if proc.returncode != 0:
             return f"shepherd init failed: {proc.stderr.strip() or proc.stdout.strip()}"
@@ -1493,7 +1500,10 @@ def cmd_init(args) -> int:
         print(f"error: repo not found: {repo_root}", file=sys.stderr)
         return 2
     shepherd_bin = Path(sys.executable).parent / "shepherd"
-    proc = subprocess.run([str(shepherd_bin), "init"], cwd=repo_root)
+    proc = subprocess.run(
+        [str(shepherd_bin), "init"], cwd=repo_root,
+        env=child_python_env(),  # `shepherd` is a python entry point too
+    )
     if proc.returncode != 0:
         return proc.returncode
 

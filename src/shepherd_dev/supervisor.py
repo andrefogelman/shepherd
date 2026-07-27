@@ -201,6 +201,29 @@ GATE_ENV_STRIP = frozenset({
     "__PYVENV_LAUNCHER__",
 })
 
+#: Environment no child interpreter of OURS may inherit.
+#:
+#: PYTHONHOME names a stdlib prefix; a wrong one stops the interpreter booting
+#: at all, before any of our code runs. Every place shepherd spawns its own
+#: interpreter — the staged-tree remover, the CRO replay, `shepherd init` in a
+#: clone — therefore fails for a reason that has nothing to do with the work,
+#: and _remove_tree's `check=False` made that failure invisible entirely.
+#: __PYVENV_LAUNCHER__ can redirect which interpreter runs, with the same effect.
+#:
+#: Deliberately NOT PYTHONPATH. That one is load-bearing: `-m shepherd_dev.cli`
+#: needs the package importable, and anyone running from a source checkout gets
+#: that from PYTHONPATH. Stripping it would trade a rare breakage for a common
+#: one. Only children that import nothing but the stdlib (the tree remover) can
+#: afford the wider gate_env scrub.
+CHILD_PYTHON_ENV_STRIP = frozenset({"PYTHONHOME", "__PYVENV_LAUNCHER__"})
+
+
+def child_python_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment for spawning one of our own interpreters."""
+    src = dict(os.environ if base is None else base)
+    return {k: v for k, v in src.items() if k not in CHILD_PYTHON_ENV_STRIP}
+
+
 #: Comma-separated overrides for the list above, for a gate that genuinely needs
 #: an inherited PYTHONPATH (KEEP) or a project whose own variables must not
 #: cross into the sandbox (STRIP).

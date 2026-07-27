@@ -98,6 +98,51 @@ class GateEnvIsolation(unittest.TestCase):
         after = set(Path(_tf.gettempdir()).glob("shepherd-gate-*"))
         self.assertEqual(after - before, set(), "the gate's staged tree leaked")
 
+    def test_child_python_env_drops_only_what_stops_an_interpreter(self):
+        """Every place shepherd spawns its OWN interpreter passes this. It must
+        drop PYTHONHOME, which stops the child booting before any of our code
+        runs — and must NOT drop PYTHONPATH, which is how a source checkout
+        makes `-m shepherd_dev.cli` importable at all."""
+        from shepherd_dev.supervisor import child_python_env
+
+        base = {
+            "PYTHONHOME": "/nonexistent",
+            "__PYVENV_LAUNCHER__": "/elsewhere/python",
+            "PYTHONPATH": "/src",
+            "PATH": "/bin",
+            "DATABASE_URL": "postgres://x",
+        }
+        out = child_python_env(base)
+        self.assertNotIn("PYTHONHOME", out)
+        self.assertNotIn("__PYVENV_LAUNCHER__", out)
+        self.assertEqual(out["PYTHONPATH"], "/src")  # load-bearing: keep it
+        self.assertEqual(out["PATH"], "/bin")
+        self.assertEqual(out["DATABASE_URL"], "postgres://x")
+
+    def test_a_broken_pythonhome_does_not_stop_a_clone_being_initialised(self):
+        """The same class as the staged-tree leak: `shepherd init` is a python
+        entry point, so it dies on a poisoned PYTHONHOME too — visibly here,
+        but for a reason that has nothing to do with the repo."""
+        import subprocess as real_sub
+        import sys as _sys
+
+        from shepherd_dev.supervisor import child_python_env
+
+        old = os.environ.get("PYTHONHOME")
+        os.environ["PYTHONHOME"] = "/nonexistent/interpreter"
+        try:
+            proc = real_sub.run(
+                [_sys.executable, "-c", "print('booted')"],
+                capture_output=True, text=True, env=child_python_env(),
+            )
+        finally:
+            if old is None:
+                os.environ.pop("PYTHONHOME", None)
+            else:
+                os.environ["PYTHONHOME"] = old
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("booted", proc.stdout)
+
     def test_strip_list_is_configurable_in_both_directions(self):
         from shepherd_dev.supervisor import gate_env
 

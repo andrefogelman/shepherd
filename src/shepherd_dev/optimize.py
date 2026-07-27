@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import history
+from .supervisor import child_python_env
 from .tasks import DEFAULT_PROMPTS, load_overrides, save_overrides
 
 EDITABLE_KEYS = (
@@ -199,7 +200,10 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
         if add.returncode != 0:
             return False
         try:
-            env = dict(os.environ)
+            # Scrubbed base: a PYTHONHOME aimed elsewhere stops the replayed
+            # interpreter booting, and the candidate is then scored on a
+            # failure of the harness rather than of the prompt.
+            env = child_python_env()
             if overrides_path:
                 env["SHEPHERD_DEV_PROMPTS_OVERRIDES"] = overrides_path
             # history off during replay so validation runs don't pollute the store

@@ -31,6 +31,7 @@ from .supervisor import (
     GateResult,
     ReviewVerdict,
     _run_gate,
+    child_python_env,
     develop,
     materialize_into,
     run_review,
@@ -102,7 +103,10 @@ def _clone_workspace(repo_root: Path, overlay: dict[str, bytes] | None = None) -
     if overlay:
         materialize_into(clone, overlay)
     shepherd_bin = Path(sys.executable).parent / "shepherd"
-    proc = subprocess.run([str(shepherd_bin), "init"], cwd=clone, capture_output=True, text=True)
+    proc = subprocess.run(
+        [str(shepherd_bin), "init"], cwd=clone, capture_output=True, text=True,
+        env=child_python_env(),  # `shepherd` is a python entry point too
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"shepherd init failed in clone: {proc.stderr.strip()}")
     return clone
