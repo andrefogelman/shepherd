@@ -241,7 +241,27 @@ def develop_parallel(
                 )
                 for i in range(2)
             ]
-            report.workers = [f.result() for f in futures]
+            # A worker that RAISES must come back as a report, not as a raise:
+            # `[f.result() for f in futures]` propagated the first exception out
+            # of develop_parallel, so the caller got no ParallelReport at all and
+            # the surviving worker's result was dropped on the floor. develop_many
+            # has contained this since it was written; run2 never did.
+            crashes: list[str] = []
+            for i, f in enumerate(futures):
+                try:
+                    report.workers.append(f.result())
+                except Exception as exc:
+                    crashes.append(
+                        f"worker {i + 1} ({features[i]!r}) crashed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        if crashes:
+            # run2's two workers are coupled (leader/follower handoff), so unlike
+            # runN's independent lanes there is nothing to salvage — but the
+            # failure is still reported, not thrown.
+            report.error = "; ".join(crashes)
+            return report
 
         if not all(w.succeeded and w.entries for w in report.workers):
             report.error = "one or both workers produced no accepted proposal"
@@ -754,10 +774,24 @@ def develop_best_of(
                 )
                 for i in range(k)
             ]
-            workers = [f.result() for f in futures]
+            # Candidates are independent, so one that raises must cost exactly
+            # one candidate — a bare `[f.result() ...]` threw the other K-1
+            # away with it. Keep the slot so index i still maps to clones/logs.
+            workers: list = []
+            for f in futures:
+                try:
+                    workers.append(f.result())
+                except Exception as exc:
+                    workers.append(exc)
 
         entries_by_idx: dict[int, dict[str, bytes]] = {}
         for i, w in enumerate(workers):
+            if isinstance(w, Exception):
+                report.candidates.append(BestOfCandidate(
+                    i, False, None, 0, 0, False, None,
+                    f"crashed: {type(w).__name__}: {w}",
+                ))
+                continue
             if not (w.succeeded and w.entries):
                 verdict = w.attempts[-1].verdict if w.attempts else "did not run"
                 report.candidates.append(
