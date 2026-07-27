@@ -13,6 +13,9 @@ substitution helpers. Runnable with: python -m unittest tests.test_remotegate_ss
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -189,6 +192,54 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertEqual(res.exit_code, 124)
         self.assertIsNone(res.infra_error, "an immediate 124 is the suite's own verdict")
 
+    def test_preflight_warns_when_the_remote_has_no_timeout(self):
+        """Not fatal — the gate runs the suite bare — but the budget is then
+        enforced only by the local ssh deadline, which the user should hear.
+
+        Driven by what the remote REPORTS rather than by editing PATH: the
+        probe runs on the remote, and stripping the local PATH only breaks the
+        harness's own `bash -lc`."""
+        warm = Path(tempfile.mkdtemp())
+        cfg = parse_remote_config(
+            {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None
+        )
+        assert cfg is not None
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = "SHEPHERD_NO_REMOTE_TIMEOUT\n"
+
+        sent = {}
+
+        def fake_remote(cfg_, script, timeout_):
+            sent["script"] = script
+            return _Proc()
+
+        old = RG._remote
+        RG._remote = fake_remote
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(RG.preflight(cfg))  # a warning, never a failure
+        finally:
+            RG._remote = old
+
+        self.assertIn("command -v timeout", sent["script"])  # the probe is sent
+        self.assertIn("gtimeout", sent["script"])
+        self.assertIn("no timeout(1)", err.getvalue())
+
+    def test_preflight_stays_quiet_when_the_remote_has_timeout(self):
+        warm = Path(tempfile.mkdtemp())
+        cfg = parse_remote_config(
+            {"ssh": "root@host", "repo_dir": str(warm), "test_cmd": "true"}, None
+        )
+        assert cfg is not None
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(RG.preflight(cfg))
+        self.assertNotIn("no timeout(1)", err.getvalue())
+
     def test_a_real_remote_timeout_is_still_infra(self):
         warm = Path(tempfile.mkdtemp())
         (warm / "src").mkdir()
@@ -199,7 +250,24 @@ class RemoteGateSSHQuoting(unittest.TestCase):
             "workdir_base": str(Path(tempfile.mkdtemp())),
         }, "python")
         assert cfg is not None
-        res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=1)
+        # This asserts the REMOTE kill, so the remote needs a timeout(1) to do
+        # it with. macOS has none, and without one `sleep 30` simply finishes
+        # inside the local deadline and the gate passes — correct behaviour,
+        # but not what this test is about. Put a shim first on PATH.
+        shim = Path(tempfile.mkdtemp())
+        (shim / "timeout").write_text(
+            '#!/bin/sh\nlimit=$1; shift\n"$@" & pid=$!\n'
+            '( sleep "$limit"; kill -9 $pid 2>/dev/null ) & watcher=$!\n'
+            'wait $pid; rc=$?\nkill $watcher 2>/dev/null\n'
+            '[ $rc -ge 128 ] && exit 124\nexit $rc\n'
+        )
+        (shim / "timeout").chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{shim}{os.pathsep}{old_path}"
+        try:
+            res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=1)
+        finally:
+            os.environ["PATH"] = old_path
         self.assertFalse(res.passed)
         self.assertIsNotNone(res.infra_error)
         self.assertIn("timed out", res.infra_error or "")

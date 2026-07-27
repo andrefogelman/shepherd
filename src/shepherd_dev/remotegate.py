@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -156,6 +157,11 @@ def preflight(cfg: RemoteGateConfig, timeout: int = 20) -> str | None:
     binary = _command_word(cfg.test_cmd)
     checks = [
         f"test -d {shlex.quote(cfg.repo_dir)} || {{ echo 'repo_dir missing: {cfg.repo_dir}' >&2; exit 3; }}",
+        # Not fatal: the gate falls back to running the suite bare. But say so —
+        # without a remote `timeout` the budget is enforced only by the local
+        # ssh deadline, so a hung suite is reaped later and from this side.
+        "command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || "
+        "echo 'SHEPHERD_NO_REMOTE_TIMEOUT' >&2",
     ]
     if binary and "/" not in binary and "{" not in binary:
         checks.append(
@@ -171,6 +177,13 @@ def preflight(cfg: RemoteGateConfig, timeout: int = 20) -> str | None:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[-300:]
         return f"remote preflight failed (ssh {cfg.ssh}): {detail or f'exit {proc.returncode}'}"
+    if "SHEPHERD_NO_REMOTE_TIMEOUT" in (proc.stderr or ""):
+        print(
+            f"remote gate: no timeout(1) on {cfg.ssh} — the suite will run without "
+            f"a remote kill, so a hung one is reaped by the local ssh deadline "
+            f"instead (later, and from this side). Install coreutils to tighten it.",
+            file=sys.stderr,
+        )
     return None
 
 
