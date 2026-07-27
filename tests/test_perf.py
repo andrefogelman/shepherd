@@ -5,6 +5,7 @@ speculative review overlap. Runnable with: python -m unittest tests.test_perf
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import threading
@@ -179,6 +180,73 @@ class AdoptionKeyTests(unittest.TestCase):
         (pkg / "mod.py").write_text("M = 1\n")
         k0 = self._key()
         (pkg / "mod.py").write_text("M = 2\n")  # in-place edit, dir mtime unmoved
+        self.assertNotEqual(k0, self._key())
+
+    def test_a_same_size_rewrite_on_the_same_mtime_moves_the_key(self):
+        """The key decides whether the worker may build on the CACHED adoption.
+        Keying a dirty file on (mtime, size) is the evidence the diff fast-path
+        was removed for: on a coarse-timestamp filesystem a same-size rewrite
+        can land on the recorded mtime, and the stale adoption is then reused
+        with nothing said. Forced with utime, so it is not a race with the
+        clock and holds on every filesystem."""
+        target = self.repo / "a.py"
+        target.write_text("A = 2\n")  # dirty, so it appears in git status
+        st = target.stat()
+        k0 = self._key()
+
+        target.write_text("A = 3\n")  # same size, different content
+        os.utime(target, ns=(st.st_mtime_ns, st.st_mtime_ns))
+        self.assertEqual(target.stat().st_size, st.st_size)
+        self.assertEqual(target.stat().st_mtime_ns, st.st_mtime_ns)
+
+        self.assertNotEqual(k0, self._key())
+
+    def test_same_content_touched_to_a_new_mtime_keeps_the_key(self):
+        """The converse: content is what the adoption depends on, so a bare
+        touch must NOT force a multi-second re-adoption."""
+        target = self.repo / "a.py"
+        target.write_text("A = 2\n")
+        k0 = self._key()
+        os.utime(target, ns=(0, 0))
+        self.assertEqual(k0, self._key())
+
+    def test_a_retargeted_symlink_moves_the_key(self):
+        """A dirty path need not be a regular file. The symlink branch was a
+        latent NameError before `os` was imported here, and nothing reached it."""
+        (self.repo / "target_a.py").write_text("A\n")
+        (self.repo / "target_b.py").write_text("B\n")
+        link = self.repo / "link.py"
+        link.symlink_to("target_a.py")
+        k0 = self._key()
+        link.unlink()
+        link.symlink_to("target_b.py")
+        self.assertNotEqual(k0, self._key())
+
+    def test_an_unreadable_dirty_file_does_not_freeze_the_key(self):
+        target = self.repo / "secret.py"
+        target.write_text("S = 1\n")
+        self.assertIsNotNone(self._key())
+        target.chmod(0o000)
+        self.addCleanup(target.chmod, 0o644)
+        if os.access(target, os.R_OK):
+            self.skipTest("running as root: permissions do not bite")
+        # unreadable is not evidence of unchanged — the key must still resolve
+        self.assertIsNotNone(self._key())
+
+    def test_a_huge_dirty_file_is_streamed_not_slurped(self):
+        big = self.repo / "big.bin"
+        big.write_bytes(b"\0" * (3 * (1 << 20)))  # 3 chunks
+        k0 = self._key()
+        with big.open("r+b") as fh:  # flip one byte in the last chunk
+            fh.seek(3 * (1 << 20) - 1)
+            fh.write(b"\1")
+        self.assertNotEqual(k0, self._key())
+
+    def test_a_dirty_file_that_disappears_moves_the_key(self):
+        target = self.repo / "a.py"
+        target.write_text("A = 2\n")
+        k0 = self._key()
+        target.unlink()
         self.assertNotEqual(k0, self._key())
 
     def test_new_file_in_an_untracked_directory_moves_the_key(self):

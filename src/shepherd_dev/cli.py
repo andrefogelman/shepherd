@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -139,9 +140,43 @@ def _resolve_gate(repo_root: Path, explicit_test_cmd: str | None, provider: str)
 _ADOPT_KEY_FILE = ".shepherd-adopt-key"
 
 
+#: Read in chunks so a huge dirty file costs time, not memory.
+_DIGEST_CHUNK = 1 << 20
+
+
+def _digest_dirty_path(digest, repo_root: Path, rel: str) -> None:
+    """Fold one dirty/untracked path into the adoption fingerprint.
+
+    A regular file contributes its bytes. Anything else — a symlink, a
+    submodule, a path git listed and then lost — contributes a marker naming
+    what it was, so a change of KIND still moves the key.
+    """
+    path = repo_root / rel
+    try:
+        if path.is_symlink():
+            digest.update(f"{rel}:symlink:{os.readlink(path)}".encode())
+            return
+        if path.is_dir():
+            # -uall lists files, so a directory here is a submodule or a
+            # git-tracked oddity: name it rather than walking an unbounded tree.
+            digest.update(f"{rel}:dir".encode())
+            return
+        if not path.exists():
+            digest.update(f"{rel}:gone".encode())
+            return
+        digest.update(f"{rel}:file:".encode())
+        with open(path, "rb") as fh:
+            while chunk := fh.read(_DIGEST_CHUNK):
+                digest.update(chunk)
+    except OSError:
+        # Unreadable is not "unchanged": mark it so the key keeps moving while
+        # the condition lasts rather than freezing on the last good value.
+        digest.update(f"{rel}:unreadable".encode())
+
+
 def _adoption_key(repo_root: Path) -> str | None:
     """Fingerprint of the worktree state the adoption depends on: HEAD sha +
-    `git status --porcelain` + (mtime,size) of every dirty/untracked path.
+    `git status --porcelain` + the CONTENT of every dirty/untracked path.
     None = no usable git state → never cache (always re-adopt).
 
     `-uall` is load-bearing (#5): the default `-unormal` collapses an untracked
@@ -149,6 +184,16 @@ def _adoption_key(repo_root: Path) -> str | None:
     move when a file inside it is rewritten in place — so an edit under an
     untracked directory left the fingerprint unchanged and the worker silently
     built on a stale base.
+
+    Content, not `(mtime, size)`. This key decides whether a worker may build on
+    the CACHED adoption, and mtime is not evidence a file is unchanged: Linux
+    stamps it from a coarse clock, so a same-size rewrite inside one tick keeps
+    the pair identical and the stale adoption is reused with nothing said — the
+    defect that made the diff fast-path unsound, in the one place it survived.
+    Content also stops a bare `touch` forcing a multi-second re-adoption.
+
+    Only DIRTY paths are read, which is normally a handful, and each is streamed
+    so one enormous file costs time rather than memory.
     """
     import hashlib
     import subprocess
@@ -170,12 +215,7 @@ def _adoption_key(repo_root: Path) -> str | None:
         digest.update(status.stdout.encode())
         for entry in status.stdout.split("\0"):
             if len(entry) > 3:
-                rel = entry[3:]
-                try:
-                    st = (repo_root / rel).stat()
-                    digest.update(f"{rel}:{st.st_mtime_ns}:{st.st_size}".encode())
-                except OSError:
-                    digest.update(f"{rel}:gone".encode())
+                _digest_dirty_path(digest, repo_root, entry[3:])
         return digest.hexdigest()
     except Exception:
         return None
