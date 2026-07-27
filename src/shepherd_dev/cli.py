@@ -138,7 +138,14 @@ _ADOPT_KEY_FILE = ".shepherd-adopt-key"
 def _adoption_key(repo_root: Path) -> str | None:
     """Fingerprint of the worktree state the adoption depends on: HEAD sha +
     `git status --porcelain` + (mtime,size) of every dirty/untracked path.
-    None = no usable git state → never cache (always re-adopt)."""
+    None = no usable git state → never cache (always re-adopt).
+
+    `-uall` is load-bearing (#5): the default `-unormal` collapses an untracked
+    directory into a single `?? dir/` entry, and stat() of a DIRECTORY does not
+    move when a file inside it is rewritten in place — so an edit under an
+    untracked directory left the fingerprint unchanged and the worker silently
+    built on a stale base.
+    """
     import hashlib
     import subprocess
 
@@ -149,7 +156,7 @@ def _adoption_key(repo_root: Path) -> str | None:
         if head.returncode != 0:
             return None
         status = subprocess.run(
-            ["git", "status", "--porcelain", "-z"],
+            ["git", "status", "--porcelain", "-uall", "-z"],
             cwd=repo_root, capture_output=True, text=True, timeout=30,
         )
         if status.returncode != 0:

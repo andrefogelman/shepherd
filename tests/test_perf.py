@@ -169,6 +169,26 @@ class AdoptionKeyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as plain:
             self.assertIsNone(_adoption_key(Path(plain)))  # no cache without git
 
+    def test_edit_inside_an_untracked_directory_moves_the_key(self):
+        """#5: `git status --porcelain` collapses an untracked directory to one
+        `?? dir/` entry, and stat() of a DIRECTORY does not move when a file
+        inside it is rewritten in place. The fingerprint therefore matched
+        across a real edit and the worker built on a stale base."""
+        pkg = self.repo / "untracked_pkg"
+        pkg.mkdir()
+        (pkg / "mod.py").write_text("M = 1\n")
+        k0 = self._key()
+        (pkg / "mod.py").write_text("M = 2\n")  # in-place edit, dir mtime unmoved
+        self.assertNotEqual(k0, self._key())
+
+    def test_new_file_in_an_untracked_directory_moves_the_key(self):
+        pkg = self.repo / "untracked_pkg"
+        pkg.mkdir()
+        (pkg / "mod.py").write_text("M = 1\n")
+        k0 = self._key()
+        (pkg / "other.py").write_text("O = 1\n")
+        self.assertNotEqual(k0, self._key())
+
 
 class SpeculativeReviewTests(unittest.TestCase):
     """develop() overlaps the reviewer with the gate when speculative_review
