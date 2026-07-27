@@ -6,7 +6,30 @@ the mechanism is the part worth remembering.
 
 ## Open
 
-None.
+### The adoption fingerprint still trusts mtime for dirty files
+
+`_adoption_key` hashes HEAD plus `(mtime, size)` of every dirty path. That is
+the same evidence the diff fast-path was removed for: on a coarse-timestamp
+filesystem a same-size rewrite can land on the recorded mtime and read as
+unchanged, so a stale adoption would be reused.
+
+Materially safer than the diff case and left open deliberately. There, the
+snapshot and the worker's write were milliseconds apart by construction; here
+the two key computations are whole runs apart, so a collision needs two edits
+in the same jiffy in different runs. Closing it means hashing the content of
+the dirty files — usually a handful, so the cost is small if it ever bites.
+
+### The watchdog can signal a reused pid
+
+`_read_proctable` takes a snapshot; `_kill_subtree` signals afterwards, with
+three seconds between SIGTERM and SIGKILL. A pid freed in that window and
+reissued would be signalled instead of the intended process.
+
+Bounded rather than fixed: only descendants of shepherd's own pid are ever
+selected, so the blast radius is this process's own tree. A real fix needs
+`pidfd_open` (Linux-only), which costs the portability the watchdog is written
+for. Recorded because the reasoning, not the risk, is what would otherwise be
+re-litigated.
 
 ## Fixed
 
@@ -199,3 +222,210 @@ by `tasks.PROMPT_KEYS` and drops anything else without a word, so even a fixed
 the polite docstring was standing in for: the two copies must agree key for key
 and byte for byte, and every key `optimize` offers to edit must be both readable
 from `DEFAULT_PROMPTS` and survivable through `save_overrides`.
+
+### A hosted proposal reverted the human's edits
+
+**Was:** editing a file while a `--provider grok` / `--provider codex` run was
+in flight, then settling, silently restored the file to what it had been before
+the edit. No conflict, no warning: the worker had never touched that file.
+
+`collect_changed_entries(repo_root, clone)` compared the worker's clone to the
+repo AS IT IS WHEN THE WORKER FINISHES. So the base moved under the comparison:
+a file the human edited mid-run now differs from the clone's untouched copy,
+which reads as "the worker changed this" and pulls it into the proposal
+carrying the PRE-RUN content. Settling then writes that over the edit.
+
+Hosted proposals also carried no `regate_cmd`, so `settle-par` skipped the
+settle-time re-gate — the one check that catches a base that moved was missing
+from exactly the path that races the human.
+
+**Fix:** `snapshot_tree(clone)` pins the base before the worker starts, and the
+diff is taken against that snapshot, so only files the worker actually wrote
+can enter the changeset. `regate_cmd` is emitted. Pinned by
+`tests/test_grok_host.py`, whose `FakeGrokExecutor.on_run` hook edits the real
+repo mid-run; without the fix the edited file appears in the changeset with its
+stale bytes.
+
+### The remote gate adopted a warmup that was still staging
+
+**Was:** with a stateful remote `setup_cmd` (a DB, containers), a run could
+bring the same per-run state up twice at once, and overlay a proposal onto a
+half-copied tree.
+
+`GateWarmup.join()` waited `self.timeout`, but `_stage` makes up to TWO remote
+calls bounded by that same timeout — real worst case is 2x. When the join gave
+up early the thread was still copying, and `error` was still `None` because
+nothing had failed YET. The caller read `error is None` as "staged and
+healthy". `did_setup` was likewise still `False`, so `run_remote_gate` ran
+`setup_cmd` alongside the warmup's own still-running one.
+
+The lesson generalises past this call site: **the absence of an error is not
+evidence of completion.** Anything that reports progress by mutating fields
+from a thread needs a separate "finished" signal.
+
+**Fix:** `_stage` sets a `_done` Event in a `finally`, `join()` waits against a
+deadline covering the true staging budget and RETURNS whether staging finished,
+and `_adoptable()` is the single predicate the gate consults. `teardown()` no
+longer joins inline — removing a workdir ssh is still writing into is the other
+half of the same race. Pinned by `tests/test_remotegate_warmup.py`
+(`WarmupStillStagingIsNotAdopted`).
+
+### The gate judged the proposal under shepherd's own environment
+
+**Was:** the suite passed or failed depending on who ran it. Same commit, same
+machine: green with a clean shell, two failures with a `PYTHONPATH` pointing
+elsewhere.
+
+`run_streaming` spawned the test command with no `env=`, so the gate inherited
+`os.environ` verbatim. The gate exists to judge the PROPOSAL's materialized
+tree, but `PYTHONPATH` puts shepherd's own source on the suite's `sys.path`,
+`VIRTUAL_ENV`/`PYTHONHOME` redirect the interpreter at our checkout, and
+`PYTEST_CURRENT_TEST`/`PYTEST_ADDOPTS` leak the state of whatever pytest run
+launched us into the child's.
+
+**Fix:** `gate_env()` removes that interpreter and harness state and nothing
+else. The strip list is deliberately narrow — a blanket scrub would take
+`PATH`, `HOME` and the project's own configuration with it, which is what every
+real gate needs. `SHEPHERD_DEV_GATE_ENV_KEEP` re-admits an entry;
+`SHEPHERD_DEV_GATE_ENV_STRIP` drops more. Pinned by
+`tests/test_gatestream.py` (`GateEnvIsolation`), which asserts both halves: the
+interpreter state is gone AND an ordinary variable still arrives.
+
+### A diff optimization made the worker's edit disappear
+
+**Was:** `tests/test_diffcollect.py` failed intermittently on Linux and never on
+macOS. Underneath the flake: a worker's change could be dropped from the
+changeset in silence.
+
+A `(size, mtime)` fast-path dismissed a file as untouched without reading it.
+But Linux stamps mtime from a coarse clock — one jiffy, 1-4ms — so a same-size
+rewrite landing in the tick the snapshot was taken in carries a byte-identical
+`(size, mtime)` pair. APFS timestamps are fine-grained enough that it never
+reproduced on the machine it was written on.
+
+Two things are worth keeping from this. First, it is the same
+disappearing-work failure the hosted-diff entry above exists to prevent,
+reintroduced as a performance tweak. Second, **a racy-window margin cannot
+rescue it**: a freshly made clone's files are milliseconds old at snapshot time
+— measured at 4.6ms — so every one of them falls inside any sound margin and
+gets hashed anyway. The optimization is worth nothing once it is correct.
+
+**Fix:** removed; comparison is by content hash only. Pinned by
+`test_a_rewrite_of_the_same_size_on_the_same_mtime_is_still_detected`, which
+forces the collision with `os.utime` rather than racing the clock, so it is
+deterministic on every filesystem.
+
+### The suite had never run anywhere but a laptop
+
+**Was:** the defect above reached `main` because nothing else could have caught
+it. The only workflow was `release.yml`, gated on `v*` tags, and the single tag
+in the repo predates it — so no CI had ever run. 443 tests existed and were
+executed only by whoever last touched the code, on whatever filesystem they
+happened to have.
+
+**Fix:** `.github/workflows/ci.yml` on every push and pull request, across
+ubuntu (coarse mtime, GNU coreutils) and macos (nanosecond APFS, BSD userland),
+on the 3.11 floor and a current interpreter. The matrix is the point, not
+decoration. A second job re-runs the timing-sensitive modules ten times, which
+is the cheap version of the loop that actually found the flake.
+
+### Hosted workers orphaned their CLI's subprocesses
+
+**Was:** a `grok` or `codex` worker that overran its budget left node processes
+and MCP servers running — holding CPU, memory and API sessions with nothing
+left to reap them.
+
+`subprocess.run(timeout=...)` kills only the DIRECT child. The claude path had
+solved this twice over — the launch perl puts the runner in its own session and
+kills the process GROUP at the budget (#A), with the watchdog as a second layer
+(#B) — and the hosted path, extracted later, inherited neither.
+
+**Fix:** `run_cli_worker` routes both executors through
+`procstream.run_streaming`, which already does `start_new_session` + `killpg`.
+It lives in `hosted.py`, the provider-agnostic layer, so a provider added later
+gets the guarantee instead of repeating the bug. Pinned by
+`tests/test_hosted_killtree.py`, whose stand-in CLI spawns a detached
+grandchild and reports its pid.
+
+### Two commands on one repo could delete each other's workspace store
+
+**Was:** unreproducible failures when a `run` and a `settle` overlapped, or two
+runs started together.
+
+`_refresh_substrate` rmtree's `.vcscore` and re-inits it, taking no lock. Any
+concurrent reader — a settle listing runs, another run deciding whether it may
+reuse the adoption — could find the directory disappearing under it, and two
+runs could rmtree each other's fresh adoption.
+
+**Fix:** `substrate_lock`, an advisory flock held across the whole sequence, so
+reading the pending state, deciding on the key, the rmtree and the re-init are
+one transaction. `settle_run` takes it too: locking only the writer leaves the
+race intact, since the reader consumes from exactly the store the writer wipes.
+The lock file lives BESIDE `.vcscore` — the file that survives the rmtree is the
+only one that can guard it — and is gitignored by `init`. Best effort by
+design: no `fcntl`, an unwritable repo, or a lock held past the timeout all
+proceed anyway, degrading to the old behaviour rather than to a hang. Pinned by
+`tests/test_substrate_lock.py`.
+
+### `alarm` was armed before its handler, and a zero budget disabled it
+
+**Was:** two defects in the launch perl, both around the same line.
+
+The group-kill handler was installed only after `fork`/`pipe`, leaving a window
+in which the timer was armed and `SIGALRM` still carried its DEFAULT
+disposition: the process dies bare, with no group kill and no exit 124.
+
+Separately, `--worker-budget 0` did not, as it reads, kill the worker at once.
+Perl's `alarm 0` CANCELS the timer. The budget was silently NOT enforced, and
+since the watchdog keys off the same number, nothing was left supervising the
+run's wall clock.
+
+**Fix:** arming before `pipe`/`fork` is load-bearing — the timer survives
+`exec`, so the degenerate fallbacks still die at the budget — so the handler
+moved ahead of the arming rather than the arming moving back. `$pid` is
+declared up front and the closure checks definedness. A non-positive budget is
+refused at the CLI and in `set_worker_budget`. Pinned by
+`tests/test_teepump.py`, which asserts BOTH orderings: handler before arm, arm
+before pipe/fork.
+
+### Smaller defects fixed in the same pass
+
+Each of these had a short mechanism and a test; recorded together because none
+of them repays a section of its own.
+
+- **A crashing worker escaped as a raw exception.** `run2` and `best-of`
+  collected futures with a bare `[f.result() ...]`, which re-raises out of the
+  call: no report, and the results of the workers that DID finish discarded
+  with it. `develop_many` had contained this since it was written. Later
+  clones — the conflict handoff and each repair round — had the same hole and
+  were closed with it.
+- **The speculative reviewer was never joined on the gate-failure paths.** The
+  join sat only on the review path, which both gate failures jump over, so a
+  daemon thread stayed inside `run_review` holding the workspace — racing
+  `output.discard()` and overlapping the NEXT attempt's `workspace.run`.
+- **`settle-par` had no recovery for a partial write.** An `OSError` partway
+  through `materialize_into` propagated out with the worktree half-written and
+  nothing said. It now keeps the stage (so nothing is lost, the content being
+  still on disk) and reports which files landed.
+- **Auto-commit deleted the accepted files from the worktree.** Committing them
+  onto `shepherd/<slug>` and checking the original branch back out removes
+  them, since that is where they now exclusively live — contradicting the
+  message telling the user to review them.
+- **The adoption fingerprint missed edits inside untracked directories.**
+  `git status --porcelain` collapses one to `?? dir/`, and a DIRECTORY's mtime
+  does not move when a file inside is rewritten in place. `-uall` lists the
+  files themselves.
+- **The CRO replay was killed partway through its gate.** The parent timeout
+  was `worker_budget + 300`, which does not cover even the gate's default 600s,
+  and the bare `except` folded the `TimeoutExpired` into a candidate failure it
+  never had.
+- **Remote preflight rejected `MIX_ENV=test mix test`.** `shlex.split(...)[0]`
+  is the assignment, not the binary, so preflight demanded a command named
+  `MIX_ENV=test`.
+- **Every remote exit 124 was read as a timeout.** `timeout` propagates the
+  command's own status verbatim, so a suite exiting 124 became an
+  `infra_error` that aborts the run instead of a retryable gate failure.
+  Elapsed time separates the two.
+- **`run2` stopped emitting `review.verdict`.** A restructuring left the
+  emission under `else:` (no review task), where the verdict is always `None` —
+  dead code, and the verbose log silently lost the reviewer's outcome.
