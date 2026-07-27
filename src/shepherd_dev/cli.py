@@ -17,9 +17,11 @@ into your working tree, keeping both in sync; committing to git stays with you.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -179,6 +181,63 @@ def _adoption_key(repo_root: Path) -> str | None:
         return None
 
 
+#: Advisory lock guarding the workspace store. Lives BESIDE .vcscore, not
+#: inside it — the file that survives the rmtree is the only one that can guard
+#: it. Gitignored by init.
+_SUBSTRATE_LOCK_FILE = ".shepherd.lock"
+
+
+@contextlib.contextmanager
+def substrate_lock(repo_root: Path, timeout: float = 300.0):
+    """Serialize commands that touch this repo's workspace store.
+
+    _refresh_substrate rmtree's .vcscore and re-inits it. Anything else reading
+    that store at the same moment — a settle listing runs, another run deciding
+    whether it may reuse the adoption — can find the directory disappearing
+    under it. Two runs racing can even rmtree each other's fresh adoption.
+
+    Advisory and best effort: a platform without fcntl, or an unwritable repo,
+    yields anyway rather than blocking work, leaving today's behaviour. The
+    lock is released by the OS if the holder dies, so a crashed run cannot
+    wedge the repo.
+    """
+    try:
+        import fcntl
+    except ImportError:  # not POSIX: nothing to take, proceed as before
+        yield False
+        return
+
+    path = repo_root / _SUBSTRATE_LOCK_FILE
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        yield False  # read-only repo: the lock is not worth failing the run over
+        return
+
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    # Held too long to be a live command: proceed unlocked
+                    # rather than fail. Degrades to the old race, never a hang.
+                    yield False
+                    return
+                time.sleep(0.05)
+        try:
+            yield True
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        handle.close()
+
+
 def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
     """Recreate .vcscore so the run basis equals the current worktree.
 
@@ -195,42 +254,46 @@ def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
     import shutil
     import subprocess
 
-    vcscore = repo_root / ".vcscore"
-    key = None if fresh else _adoption_key(repo_root)
-    key_file = vcscore / _ADOPT_KEY_FILE
-    if vcscore.exists():
-        with sp.open(repo_root) as workspace:
-            pending = []
-            for record in workspace.runs.list():
-                for output in workspace.runs.outputs(run_ref=record.run_ref):
-                    if output.state == "unconsumed":
-                        pending.append(record.run_ref)
-        if pending:
-            return (
-                "pending unconsumed proposal(s): "
-                + ", ".join(sorted(set(pending)))
-                + " — settle them first (shepherd-dev settle <ref> [--reject])"
-            )
+    # Under the lock end to end: reading the pending state, deciding on the key,
+    # the rmtree and the re-init are ONE transaction. Splitting them would let a
+    # concurrent command act on a store that is about to vanish.
+    with substrate_lock(repo_root):
+        vcscore = repo_root / ".vcscore"
+        key = None if fresh else _adoption_key(repo_root)
+        key_file = vcscore / _ADOPT_KEY_FILE
+        if vcscore.exists():
+            with sp.open(repo_root) as workspace:
+                pending = []
+                for record in workspace.runs.list():
+                    for output in workspace.runs.outputs(run_ref=record.run_ref):
+                        if output.state == "unconsumed":
+                            pending.append(record.run_ref)
+            if pending:
+                return (
+                    "pending unconsumed proposal(s): "
+                    + ", ".join(sorted(set(pending)))
+                    + " — settle them first (shepherd-dev settle <ref> [--reject])"
+                )
+            if key is not None:
+                try:
+                    if key_file.is_file() and key_file.read_text(encoding="utf-8").strip() == key:
+                        return None  # worktree unchanged since the last adoption
+                except Exception:
+                    pass  # unreadable key: fall through to a fresh adoption
+            shutil.rmtree(vcscore)
+
+        shepherd_bin = Path(sys.executable).parent / "shepherd"
+        proc = subprocess.run(
+            [str(shepherd_bin), "init"], cwd=repo_root, capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            return f"shepherd init failed: {proc.stderr.strip() or proc.stdout.strip()}"
         if key is not None:
             try:
-                if key_file.is_file() and key_file.read_text(encoding="utf-8").strip() == key:
-                    return None  # worktree unchanged since the last adoption
+                (repo_root / ".vcscore" / _ADOPT_KEY_FILE).write_text(key, encoding="utf-8")
             except Exception:
-                pass  # unreadable key: fall through to a fresh adoption
-        shutil.rmtree(vcscore)
-
-    shepherd_bin = Path(sys.executable).parent / "shepherd"
-    proc = subprocess.run(
-        [str(shepherd_bin), "init"], cwd=repo_root, capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        return f"shepherd init failed: {proc.stderr.strip() or proc.stdout.strip()}"
-    if key is not None:
-        try:
-            (repo_root / ".vcscore" / _ADOPT_KEY_FILE).write_text(key, encoding="utf-8")
-        except Exception:
-            pass  # no key persisted → next run re-adopts (safe)
-    return None
+                pass  # no key persisted → next run re-adopts (safe)
+        return None
 
 
 DIFF_PREVIEW_LINES = 60
@@ -1349,7 +1412,9 @@ def cmd_settle_par(args) -> int:
     return code
 
 
-GITIGNORE_ENTRIES = (".vcscore/", "REVIEW.json", ".shepherd-proposals/")
+GITIGNORE_ENTRIES = (
+    ".vcscore/", "REVIEW.json", ".shepherd-proposals/", _SUBSTRATE_LOCK_FILE,
+)
 
 
 def _ensure_gitignore(repo_root: Path) -> list[str]:
@@ -1435,8 +1500,12 @@ def cmd_init(args) -> int:
 
 
 def settle_run(repo_root: Path, run_ref: str, *, reject: bool, auto: bool = False) -> tuple[int, list[str]]:
-    """Core settlement for a retained run output. Returns (exit_code, written_paths)."""
-    with sp.open(repo_root) as workspace:
+    """Core settlement for a retained run output. Returns (exit_code, written_paths).
+
+    Under the substrate lock: this reads and CONSUMES from the same store a
+    concurrent `run` rmtree's when it re-adopts. Locking only the writer would
+    leave the race intact — the reader has to take it too."""
+    with substrate_lock(repo_root), sp.open(repo_root) as workspace:
         outputs = [
             o for o in workspace.runs.outputs(run_ref=run_ref) if o.output_name == "workspace"
         ]
