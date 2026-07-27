@@ -132,6 +132,39 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         assert cfg is not None
         self.assertIsNone(RG.preflight(cfg))  # nothing to resolve, do not invent one
 
+    def test_suite_exiting_124_quickly_is_a_gate_failure_not_a_timeout(self):
+        """#10: exit 124 was read as "timeout(1) killed it" unconditionally, so
+        a suite that exits 124 on its own became an infra_error — which aborts
+        the whole run instead of counting as a retryable gate failure."""
+        warm = Path(tempfile.mkdtemp())
+        (warm / "src").mkdir()
+        cfg = parse_remote_config({
+            "ssh": "root@host", "repo_dir": str(warm),
+            "copy_cmd": "cp -R {repo} {workdir}",
+            "test_cmd": "sh -c 'exit 124'",
+            "workdir_base": str(Path(tempfile.mkdtemp())),
+        }, "python")
+        assert cfg is not None
+        res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=30)
+        self.assertFalse(res.passed)
+        self.assertEqual(res.exit_code, 124)
+        self.assertIsNone(res.infra_error, "an immediate 124 is the suite's own verdict")
+
+    def test_a_real_remote_timeout_is_still_infra(self):
+        warm = Path(tempfile.mkdtemp())
+        (warm / "src").mkdir()
+        cfg = parse_remote_config({
+            "ssh": "root@host", "repo_dir": str(warm),
+            "copy_cmd": "cp -R {repo} {workdir}",
+            "test_cmd": "sleep 30",
+            "workdir_base": str(Path(tempfile.mkdtemp())),
+        }, "python")
+        assert cfg is not None
+        res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=1)
+        self.assertFalse(res.passed)
+        self.assertIsNotNone(res.infra_error)
+        self.assertIn("timed out", res.infra_error or "")
+
     def test_full_gate_with_spaces_and_operators(self):
         warm = Path(tempfile.mkdtemp())
         (warm / "src").mkdir()

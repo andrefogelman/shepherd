@@ -434,16 +434,24 @@ def run_remote_gate(
             test_line = f"cd {wd} && {envp}timeout {timeout} {_sub(cfg.test_cmd, run_id, workdir)}"
             from .procstream import run_streaming
 
+            started = time.monotonic()
             try:
                 res = run_streaming(_remote_argv(cfg, test_line), timeout=timeout + 60, on_line=on_line)
             except OSError as exc:
                 return GateResult(False, None, "", infra_error=f"could not run ssh: {exc}")
+            elapsed = time.monotonic() - started
             if res.timed_out:
                 return GateResult(False, None, "",
                     infra_error=f"remote test suite timed out after {timeout}s")
             tail = res.output[-4000:]
-            # timeout(1) exits 124 on kill
-            if res.returncode == 124:
+            # timeout(1) exits 124 on kill — but so does a suite that simply
+            # exits 124 (a runner reporting a failure count, say), and timeout
+            # propagates the command's own status verbatim, so the code alone
+            # cannot tell them apart. Elapsed time can: a killed command ran the
+            # whole budget, an early 124 is the suite's own verdict. Reading
+            # every 124 as a timeout turned an ordinary, RETRYABLE gate failure
+            # into an infra_error that aborts the entire run (#10).
+            if res.returncode == 124 and elapsed >= timeout * 0.95:
                 return GateResult(False, 124, tail, infra_error=f"remote test timed out after {timeout}s")
             return GateResult(passed=res.returncode == 0, exit_code=res.returncode, output_tail=tail)
         finally:
