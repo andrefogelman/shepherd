@@ -252,7 +252,12 @@ class BestOfPipelining(unittest.TestCase):
         self.assertGreater(counters["reviews_max"], 1, "reviews must overlap")
 
     def test_wall_clock_beats_the_serial_sum(self):
-        k, review_delay, gate_delay = 3, 0.4, 0.2
+        # Shared CI runners (macOS especially) add ~0.5s of scheduling and copy
+        # overhead to a run; with 0.4/0.2 delays the noise budget was 0.53s and
+        # the test went red twice in a row on macos-3.13. Doubling the delays
+        # doubles the budget (~1.0s) without changing what is being proven:
+        # pipelined reviews beat K x (gate + review) in series.
+        k, review_delay, gate_delay = 3, 0.8, 0.4
         _report, _counters, elapsed = self._run(k, review_delay, gate_delay)
         serial = k * (review_delay + gate_delay)
         self.assertLess(elapsed, serial * 0.85, f"{elapsed:.2f}s vs serial {serial:.2f}s")
