@@ -346,7 +346,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "shepherd-ai", specifier = ">=0.3.0" }]
+requires-dist = [{ name = "shepherd-ai", specifier = ">=0.3.0,<0.4" }]
 
 [[package]]
 name = "tomli-w"

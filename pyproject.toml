@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Andre Fogelman" }]
 dependencies = [
-    "shepherd-ai>=0.3.0",
+    "shepherd-ai>=0.3.0,<0.4",
 ]
 
 [project.scripts]
