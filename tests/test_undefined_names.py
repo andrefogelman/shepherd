@@ -25,10 +25,14 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
 #: Names the analysis cannot see. `__file__` and friends are injected by the
-#: import machinery rather than bound in the source.
+#: import machinery rather than bound in the source. Python 3.14 (PEP 649/749)
+#: adds `__conditional_annotations__`: the compiler reads it wherever
+#: annotations live under a conditional block, and binds it implicitly — it
+#: never appears in the source, so it must not count as an unbound global.
 _MODULE_DUNDERS = {
     "__file__", "__name__", "__doc__", "__package__", "__spec__",
     "__loader__", "__builtins__", "__path__", "__debug__",
+    "__conditional_annotations__",
 }
 
 
