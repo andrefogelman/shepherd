@@ -43,16 +43,23 @@ class WorkerCrashContainment(unittest.TestCase):
         (self.repo / "src" / "a.py").write_text("A = 1\n")
 
     def _patch(self, fake_worker):
-        """Stub the worker + clone so no substrate run happens."""
+        """Stub the worker + clone so no substrate run happens.
+
+        Saves/restores every parallel.py attribute this class rebinds —
+        including _run_gate, which individual tests override AFTER _patch()
+        returns. The gate lambda must not outlive its test: a leaked
+        GateResult(False, ...) makes a later test's combined gate "fail", and
+        the repair path then opens a REAL workspace on a stub clone.
+        """
         from shepherd_dev import parallel as P
 
-        old = (P._run_worker, P._clone_workspace, P._clone_many)
+        old = (P._run_worker, P._clone_workspace, P._clone_many, P._run_gate)
         P._run_worker = fake_worker
         P._clone_workspace = clone_stub(self.repo)
         P._clone_many = clone_many_stub(self.repo)
 
         def _restore():
-            P._run_worker, P._clone_workspace, P._clone_many = old
+            P._run_worker, P._clone_workspace, P._clone_many, P._run_gate = old
 
         self.addCleanup(_restore)
         return P
