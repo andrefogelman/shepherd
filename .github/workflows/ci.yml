@@ -46,6 +46,18 @@ jobs:
       - name: Run the suite
         run: env -u PYTHONPATH python -m unittest discover -s tests -v
 
+  # uv.lock once sat 14 versions behind pyproject (0.1.13 vs 0.1.27): the
+  # version-bump ritual touched pyproject/__init__/plugin.json and never the
+  # lock, so every local `uv run` re-dirtied the tree with the sync. No release
+  # doc exists to add the step to — and a doc line nobody reads is not a
+  # ritual. A check that fails is.
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The lockfile matches pyproject
+        run: pip install uv && uv lock --check
+
   # Timing-sensitive tests pass by luck once. This is the cheap version of the
   # loop that found the flake: the fast, isolated modules, repeated.
   repeat:
