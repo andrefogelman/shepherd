@@ -7,6 +7,9 @@
 # jiffy) and GNU coreutils; macos gives nanosecond APFS timestamps and BSD
 # userland. The 3.11 floor from pyproject runs alongside a current interpreter,
 # because the floor is what catches syntax a newer one would have accepted.
+# 3.14 is in the matrix because it is not a superset of 3.13: PEP 649/749
+# changed what names the compiler injects (__conditional_annotations__),
+# which a static check over symtable sees and 3.13 never emitted.
 name: ci
 
 on:
@@ -26,7 +29,7 @@ jobs:
       fail-fast: false # one platform failing must not hide the other's result
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
