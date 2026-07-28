@@ -29,7 +29,7 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 def _memory_path(repo_root: Path) -> Path:
     resolved = str(Path(repo_root).resolve())
-    digest = hashlib.sha1(resolved.encode()).hexdigest()[:8]
+    digest = hashlib.sha256(resolved.encode()).hexdigest()[:8]
     return MEMORY_DIR / f"{Path(resolved).name}-{digest}.json"
 
 
