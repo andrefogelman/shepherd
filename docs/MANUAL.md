@@ -14,6 +14,13 @@ Worker (implementa) → Política (guarda) → Portão (testa) → Revisor (audi
 Um resultado que passa fica **retido** com uma referência (`run-…`). Só vira
 arquivo no worktree quando você roda `settle`. O commit no git continua seu.
 
+**Fronteira de confiança.** O jail isola o *worker*; o portão roda **fora**
+dele — local e remoto — e executa código controlado pelo repo: a própria suíte
+(`conftest.py`, scripts de build) e o `test_cmd`, que pode vir do
+`.shepherd-dev.json` do repo (a origem é impressa no início do run:
+`test gate (from .shepherd-dev.json): …`). Rode shepherd-dev só em repos em
+cuja suíte de testes você rodaria na mão.
+
 ## Duas formas de usar
 
 **1. Dentro do Claude Code (recomendado).** Instale o plugin uma vez e fale com o

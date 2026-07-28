@@ -17,6 +17,13 @@ A passing result stays **retained** under a reference (`run-…`). It only
 becomes files in your worktree when you run `settle`. The git commit remains
 yours.
 
+**Trust boundary.** The jail isolates the *worker*; the gate runs **outside**
+it — locally and over SSH — and executes repo-controlled code: the test suite
+itself (`conftest.py`, build scripts) and the `test_cmd`, which may come from
+the repo's `.shepherd-dev.json` (the source is printed at run start:
+`test gate (from .shepherd-dev.json): …`). Only run shepherd-dev against
+repos whose test suite you would run by hand.
+
 ## Two ways to use it
 
 **1. Inside Claude Code (recommended).** Install the plugin once and talk to
