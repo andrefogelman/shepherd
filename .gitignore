@@ -3,6 +3,7 @@
 .vcscore/
 .claude/
 __pycache__/
+.env*
 # regenerable shepherd demos (shepherd demo write <name>)
 quickstart_demo.py
 agent_task.py
