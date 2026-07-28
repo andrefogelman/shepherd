@@ -1,0 +1,11 @@
+# The workflows pin actions to commit SHAs (a tag ref is mutable — see the
+# tj-actions/changed-files incident, Mar 2025). A pin without an update
+# mechanism rots, so dependabot is what keeps the pins current: it opens a PR
+# when checkout/setup-python move, and the version comment next to each SHA
+# keeps the diff human-readable.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
