@@ -523,3 +523,27 @@ rules rather than by an approximation of them.
 Three cases pin that the check can still fail, one of them the exact `cli.py`
 defect: run against the file as it was, it reports
 `cli.py._digest_dirty_path: os`. A check that cannot fail proves nothing.
+
+### A worker's chmod +x never reached the gate, the tar, or the settle
+
+**Was:** the changeset read carried git's filemode (`read_file` yields
+`(bytes, mode)`), and `read_changeset_entries` kept only the bytes. From
+there the proposal flowed as `dict[str, bytes]` through the whole pipeline,
+so the two write points had nothing to re-apply: `materialize_into` wrote
+with the filesystem default and the remote gate's tar never set
+`TarInfo.mode`. A worker whose fix included `chmod +x deploy.sh` saw the
+gate fail `./deploy.sh` BEFORE the proposal was judged, and an accepted
+proposal landed on the real repo as 0o644.
+
+**Fix:** the bytes stay a plain dict — every reader (diff text, policy,
+review) keeps working — and the exec bit rides alongside in an `Entries`
+subclass (`diffcollect.py`). Both producers fill it: the git lane from the
+filemode, the hosted lane from a `(hash, exec-bit)` snapshot, which also
+makes a mode-ONLY change visible as a change (content comparison alone
+cannot see one). Both writers re-apply: `materialize_into` chmods 0o755,
+`_tar_entries` sets the member mode. Copies are the danger point —
+`dict(...)` / `{**a, **b}` strip the attribute — so every merge goes through
+`as_entries`, and settle-par re-reads the bit from the staged files
+themselves (the stage wrote them with the bit already on). Pinned by
+`tests/test_diffcollect.py` (`ExecBitTracked`), `tests/test_supervisor.py`
+(`ExecBitSurvives`) and `tests/test_remotegate_ssh.py` (`TarCarriesModes`).

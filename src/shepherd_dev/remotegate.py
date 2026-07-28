@@ -211,13 +211,21 @@ def _build_test_line(wd: str, envp: str, remote_cmd: str, timeout: int) -> str:
 
 
 def _tar_entries(entries: dict[str, bytes]) -> bytes:
-    """Pack the proposal's changed files into a tar stream (for overlay)."""
+    """Pack the proposal's changed files into a tar stream (for overlay).
+
+    Member modes come from the entries' `.executable` set: the remote side
+    untars and runs test_cmd against the result, so an exec bit dropped here
+    fails `./script.sh` gates BEFORE the proposal is ever judged — the same
+    loss materialize_into's chmod prevents locally.
+    """
+    executable = getattr(entries, "executable", frozenset())
     buf = BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for rel, content in entries.items():
             info = tarfile.TarInfo(name=rel)
             info.size = len(content)
             info.mtime = int(time.time())
+            info.mode = 0o755 if rel in executable else 0o644
             tar.addfile(info, BytesIO(content))
     return buf.getvalue()
 

@@ -28,9 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev import remotegate as RG  # noqa: E402
+from shepherd_dev.diffcollect import Entries  # noqa: E402
 from shepherd_dev.remotegate import (  # noqa: E402
     _build_test_line,
     _remote_argv,
+    _tar_entries,
     parse_remote_config,
     run_remote_gate,
 )
@@ -318,6 +320,32 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertTrue(res.passed, f"gate should pass; exit={res.exit_code} tail={res.output_tail!r}")
         self.assertEqual(res.exit_code, 0)
         self.assertFalse(any(db.iterdir()), "teardown must remove the per-{id} state")
+
+
+class TarCarriesModes(unittest.TestCase):
+    """The remote gate untars the proposal and runs test_cmd against it: a
+    member without the exec bit makes `./script.sh` fail BEFORE the proposal
+    is ever judged. The tar is the second write point, after materialize_into."""
+
+    def _modes(self, entries) -> dict[str, int]:
+        import tarfile
+
+        buf = io.BytesIO(_tar_entries(entries))
+        with tarfile.open(fileobj=buf, mode="r") as tar:
+            return {m.name: m.mode for m in tar.getmembers()}
+
+    def test_executable_member_is_0755(self):
+        entries = Entries(
+            {"deploy.sh": b"#!/bin/sh\n", "a.py": b"a=1\n"},
+            executable={"deploy.sh"},
+        )
+        self.assertEqual(
+            self._modes(entries),
+            {"deploy.sh": 0o755, "a.py": 0o644},
+        )
+
+    def test_plain_dict_members_are_0644(self):
+        self.assertEqual(self._modes({"run.sh": b"#!/bin/sh\n"}), {"run.sh": 0o644})
 
 
 if __name__ == "__main__":

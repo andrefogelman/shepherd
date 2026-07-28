@@ -20,8 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tmpdirs import mkdtemp  # noqa: E402
 
+from shepherd_dev.diffcollect import Entries  # noqa: E402
 from shepherd_dev.progress import ProgressReporter  # noqa: E402
-from shepherd_dev.supervisor import _prior_attempt_guidance, develop  # noqa: E402
+from shepherd_dev.supervisor import (  # noqa: E402
+    _prior_attempt_guidance,
+    develop,
+    materialize_into,
+    read_changeset_entries,
+)
 
 
 class PriorGuidanceHelper(unittest.TestCase):
@@ -40,8 +46,9 @@ class PriorGuidanceHelper(unittest.TestCase):
 
 # --- minimal fake workspace ---------------------------------------------------
 class _Changeset:
-    def __init__(self, files: dict[str, bytes]):
+    def __init__(self, files: dict[str, bytes], modes: dict[str, int] | None = None):
         self._files = files
+        self._modes = modes or {}
 
     @property
     def changed_paths(self):
@@ -49,7 +56,7 @@ class _Changeset:
 
     def read_file(self, rel):
         b = self._files.get(rel)
-        return (b, 0o644) if b is not None else None
+        return (b, self._modes.get(rel, 0o100644)) if b is not None else None
 
 
 class _Output:
@@ -136,6 +143,38 @@ class ProgressWiring(unittest.TestCase):
         # became unreadable in the first place.
         self.assertIn("attempt 1/2 · gate", out)
         self.assertIn("✗", out)                             # gate 'false' fails
+
+
+class ExecBitSurvives(unittest.TestCase):
+    """The changeset read carries git's filemode; the write must re-apply it.
+    Without this, `chmod +x deploy.sh` inside a proposal lands as 0o644 in the
+    gate tree and — if accepted — in the real repo after settle."""
+
+    def test_read_changeset_entries_marks_git_executable_mode(self):
+        cs = _Changeset(
+            {"deploy.sh": b"#!/bin/sh\n", "a.py": b"a=1\n"},
+            modes={"deploy.sh": 0o100755},
+        )
+        entries = read_changeset_entries(cs)
+        self.assertIsInstance(entries, Entries)
+        self.assertEqual(entries.executable, frozenset({"deploy.sh"}))
+
+    def test_materialize_into_applies_the_exec_bit(self):
+        root = Path(mkdtemp())
+        entries = Entries(
+            {"deploy.sh": b"#!/bin/sh\necho hi\n", "a.py": b"a=1\n"},
+            executable={"deploy.sh"},
+        )
+        materialize_into(root, entries)
+        self.assertTrue((root / "deploy.sh").stat().st_mode & 0o111)
+        self.assertFalse((root / "a.py").stat().st_mode & 0o111)
+
+    def test_plain_dict_writes_with_the_default_mode(self):
+        """No exec information (any plain dict, e.g. built by hand in a test)
+        means today's behavior: the filesystem default, no chmod."""
+        root = Path(mkdtemp())
+        materialize_into(root, {"run.sh": b"#!/bin/sh\n"})
+        self.assertFalse((root / "run.sh").stat().st_mode & 0o111)
 
 
 if __name__ == "__main__":

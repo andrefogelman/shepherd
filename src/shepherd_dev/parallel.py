@@ -23,6 +23,7 @@ from pathlib import Path
 
 import shepherd as sp
 
+from .diffcollect import as_entries
 from .policy import ChangesetPolicy
 from .staging import PROPOSALS_DIR, stage_proposal
 from .supervisor import (
@@ -284,8 +285,8 @@ def develop_parallel(
             report.error = "one or both workers produced no accepted proposal"
             return report
 
-        entries_a = dict(report.workers[0].entries or {})
-        entries_b = dict(report.workers[1].entries or {})
+        entries_a = as_entries(report.workers[0].entries)
+        entries_b = as_entries(report.workers[1].entries)
 
         # Conflict coordination: leader = worker 1; follower reworks on top of
         # the leader's proposal (paper's handoff).
@@ -338,9 +339,13 @@ def develop_parallel(
             if not (follower.succeeded and follower.entries):
                 report.error = "handoff rework failed"
                 return report
-            entries_b = dict(follower.entries)
+            entries_b = as_entries(follower.entries)
 
-        combined = {**entries_a, **entries_b}
+        # Entries-aware merge: a plain {**a, **b} would strip the executable
+        # set even when both lanes produced +x files.
+        combined = as_entries(entries_a)
+        combined.update(entries_b)
+        combined.executable = combined.executable | entries_b.executable
 
         # Combined gate with bounded repair rounds on a clone seeded with the
         # merged proposal.
@@ -447,6 +452,9 @@ def develop_parallel(
             if not (repair.succeeded and repair.entries):
                 break
             combined.update(repair.entries)
+            combined.executable = combined.executable | getattr(
+                repair.entries, "executable", frozenset()
+            )
             gate = _run_gate(repo_root, combined, test_cmd, gate_timeout,
                          on_line=gate_on_line, stage=gate_stage, keep_stage=True)
             _emit_gate(gate)

@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.diffcollect import (  # noqa: E402
+    Entries,
+    as_entries,
     collect_changed_entries,
     snapshot_tree,
 )
@@ -111,6 +113,55 @@ class BaselineSnapshot(unittest.TestCase):
         (mod / "b.py").write_text("b=1\n")  # created by the worker
         entries = collect_changed_entries(mod, mod, baseline=snap)
         self.assertEqual(list(entries), ["b.py"])
+
+
+class ExecBitTracked(unittest.TestCase):
+    """A worker's `chmod +x deploy.sh` is part of the proposal. The entries
+    dict carries plain bytes (every reader keeps working), and the executable
+    set rides on the Entries instance for the two writers that need it."""
+
+    def test_changed_file_carries_its_exec_bit(self):
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
+        script = mod / "deploy.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+        (mod / "a.py").write_text("a=1\n")
+        entries = collect_changed_entries(base, mod)
+        self.assertIsInstance(entries, Entries)
+        self.assertEqual(entries.executable, frozenset({"deploy.sh"}))
+
+    def test_mode_only_change_enters_the_proposal(self):
+        """chmod without a content edit is still a change: the snapshot pinned
+        (hash, exec-bit), so flipping the bit alone must surface the file —
+        otherwise a worker whose whole fix is `chmod +x` proposes nothing."""
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
+        script = mod / "deploy.sh"
+        script.write_text("#!/bin/sh\necho hi\n")  # 0o644 at snapshot time
+        snap = snapshot_tree(mod)
+        script.chmod(0o755)
+        entries = collect_changed_entries(base, mod, baseline=snap)
+        self.assertEqual(entries["deploy.sh"], b"#!/bin/sh\necho hi\n")
+        self.assertEqual(entries.executable, frozenset({"deploy.sh"}))
+
+    def test_exec_bit_removed_also_enters_the_proposal(self):
+        base = Path(mkdtemp())
+        mod = Path(mkdtemp())
+        script = mod / "old.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        snap = snapshot_tree(mod)
+        script.chmod(0o644)
+        entries = collect_changed_entries(base, mod, baseline=snap)
+        self.assertIn("old.sh", entries)
+        self.assertEqual(entries.executable, frozenset())
+
+    def test_as_entries_carries_the_set_across_a_copy(self):
+        src = Entries({"deploy.sh": b"x\n"}, executable={"deploy.sh"})
+        self.assertEqual(as_entries(src).executable, frozenset({"deploy.sh"}))
+        self.assertEqual(as_entries(None), {})
+        self.assertEqual(as_entries({"a.py": b"a\n"}).executable, frozenset())
 
 
 if __name__ == "__main__":

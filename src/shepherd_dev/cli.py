@@ -30,6 +30,7 @@ import shepherd as sp
 
 from . import config, history, memory as repo_memory
 from .contextpack import build_pack
+from .diffcollect import Entries
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .staging import PROPOSALS_DIR, is_proposal_id
@@ -1260,11 +1261,19 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
     # materialize_into still guards the destination against `..` escapes.
     # Sorted, not rglob order: a partial write (#6) must report the same
     # prefix of files every time, or "what landed" is unreproducible.
-    entries = {
-        str(path.relative_to(files_dir)): path.read_bytes()
-        for path in sorted(files_dir.rglob("*"))
-        if path.is_file() and not path.is_symlink()
-    }
+    # The stage was written by materialize_into, so each file's exec bit is
+    # already on this disk — re-read it into the entries, or this last mile
+    # (settle → real repo) drops +x after every earlier step preserved it.
+    entries: Entries = Entries()
+    executable: set[str] = set()
+    for path in sorted(files_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = str(path.relative_to(files_dir))
+        entries[rel] = path.read_bytes()
+        if path.stat().st_mode & 0o111:
+            executable.add(rel)
+    entries.executable = frozenset(executable)
 
     # Settle-time re-gate (runN methodology guardrail): the proposal passed its
     # gate against the base it was BUILT on; the worktree may have drifted since

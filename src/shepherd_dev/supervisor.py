@@ -19,6 +19,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .diffcollect import Entries
 from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
 
@@ -157,8 +158,15 @@ def materialize_into(
     `progress` is given it receives each path as it lands, so a caller that has
     to report a PARTIAL write still knows what reached the disk (the return
     value is lost when this raises).
+
+    Paths in the entries' `.executable` set (an Entries attribute; see
+    diffcollect) are chmod'd 0o755 after the write — the exec bit a worker set
+    with chmod +x must survive onto the gate tree and, after settle, onto the
+    real repo. A plain dict carries no such set and gets the filesystem
+    default, exactly the behavior before modes were tracked.
     """
     written: list[str] = progress if progress is not None else []
+    executable = getattr(entries, "executable", frozenset())
     resolved_root = root.resolve()
     for rel, content in entries.items():
         target = (root / rel).resolve()
@@ -166,11 +174,13 @@ def materialize_into(
             raise ValueError(f"changeset path escapes repo root: {rel}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+        if rel in executable:
+            target.chmod(0o755)
         written.append(rel)
     return written
 
 
-def read_changeset_entries(changeset) -> dict[str, bytes]:
+def read_changeset_entries(changeset) -> Entries:
     """Snapshot a retained changeset's content entries into memory.
 
     v0.3.0 lane reality (verified on 3 workspaces): runs fork from the
@@ -180,12 +190,23 @@ def read_changeset_entries(changeset) -> dict[str, bytes]:
     git worktree is our source of truth, so they are skipped. Consequence:
     genuine worker deletions cannot be expressed in this lane (documented
     limitation; effect-stream support in F3).
+
+    read_file yields (bytes, git filemode); the mode's exec bits (0o100755
+    for a blob the worker chmod'd +x, or any plain mode with an x bit) are
+    kept in the result's `.executable` set so the writers downstream can
+    re-apply them — discarding them here is how +x proposals used to land
+    as 0o644.
     """
-    entries: dict[str, bytes] = {}
+    entries: Entries = Entries()
+    executable: set[str] = set()
     for rel in changeset.changed_paths:
         entry = changeset.read_file(rel)  # (bytes, mode) | None
         if entry is not None:
-            entries[rel] = entry[0]
+            content, mode = entry
+            entries[rel] = content
+            if mode & 0o111:
+                executable.add(rel)
+    entries.executable = frozenset(executable)
     return entries
 
 
