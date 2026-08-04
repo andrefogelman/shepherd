@@ -10,6 +10,16 @@ dependencies = [
     "shepherd-ai>=0.3.0,<0.4",
 ]
 
+# Patched build of shepherd-ai: build_tree/insert_tree_entry crashed with
+# pygit2.GitError whenever a workspace's own .git (root, or nested from a
+# git-sourced dependency) surfaced as a change to snapshot — corrupting
+# .vcscore and forcing a manual reset before the next run. Fixed upstream
+# at andrefogelman/shepherd-ai@205f668 (fork of shepherd-agents/shepherd,
+# not yet reported/merged upstream). Remove this override once upstream
+# ships the fix and shepherd-ai's PyPI version picks it up.
+[tool.uv.sources]
+shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.1-dotgit-fix/shepherd_ai-0.3.1-py3-none-any.whl" }
+
 [project.scripts]
 shepherd-dev = "shepherd_dev.cli:entry"
 

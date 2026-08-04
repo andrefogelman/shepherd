@@ -324,18 +324,31 @@ wheels = [
 
 [[package]]
 name = "shepherd-ai"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.1"
+source = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.1-dotgit-fix/shepherd_ai-0.3.1-py3-none-any.whl" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
     { name = "pygit2" },
     { name = "tomli-w" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6b/ee/b5cf5f08f5ad6fbbe238f05754ff887b973b8743a91412f1c9a4dcdbe949/shepherd_ai-0.3.0.tar.gz", hash = "sha256:25e74bad1e8ac27e2c4bda383732d3dc95e17c473dc3417964b4c8f1587dee31", size = 1517748, upload-time = "2026-07-08T16:23:10.784Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/82/7d92cc2b2fa2926e74fbdb6e0ad73aa93d12785f9366f2fc9eb5da964846/shepherd_ai-0.3.0-py3-none-any.whl", hash = "sha256:7bebe11777c0fe8d4d704c32d83c67c2ce16a1df9f824ac7d2d47d5ac80bfda8", size = 1859024, upload-time = "2026-07-08T16:23:08.331Z" },
+    { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.1-dotgit-fix/shepherd_ai-0.3.1-py3-none-any.whl", hash = "sha256:c233744adea964575a6225bc2cc55f621d6a629f9b4c7402e7f70034abc98326" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = ">=0.1.0" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
+    { name = "click", specifier = ">=8.0" },
+    { name = "openai", marker = "extra == 'all'", specifier = ">=1.66" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.66" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pygit2", specifier = ">=1.13.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
+    { name = "tomli-w", specifier = ">=1.0" },
+]
+provides-extras = ["all", "claude", "openai"]
 
 [[package]]
 name = "shepherd-dev"
@@ -346,7 +359,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "shepherd-ai", specifier = ">=0.3.0,<0.4" }]
+requires-dist = [{ name = "shepherd-ai", url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.1-dotgit-fix/shepherd_ai-0.3.1-py3-none-any.whl" }]
 
 [[package]]
 name = "tomli-w"
