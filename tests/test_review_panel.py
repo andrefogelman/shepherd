@@ -250,5 +250,55 @@ class DevelopReviewPanelWiringTests(unittest.TestCase):
         self.assertEqual(inspect.signature(sup.develop).parameters["review_panel"].default, 1)
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class ReviewPanelCliTests(unittest.TestCase):
+    def test_flag_defaults_to_none_not_one(self):
+        # None, not 1: this is how _resolve_review_panel tells "not passed"
+        # apart from "explicitly passed 1" — same trick --test-cmd already
+        # uses (cli.py's p_run.add_argument("--test-cmd", default=None, ...)).
+        from shepherd_dev.cli import build_parser
+
+        args = build_parser().parse_args(["run", "add X"])
+        self.assertIsNone(args.review_panel)
+
+    def test_flag_is_accepted_up_to_the_cap(self):
+        from shepherd_dev.cli import MAX_REVIEW_PANEL, build_parser
+
+        self.assertEqual(MAX_REVIEW_PANEL, 5)
+        args = build_parser().parse_args(["run", "add X", "--review-panel", "5"])
+        self.assertEqual(args.review_panel, 5)
+
+    def test_above_the_cap_is_refused(self):
+        from shepherd_dev.cli import _validate_review_panel
+
+        self.assertIsNotNone(_validate_review_panel(6, no_review=False, provider="claude"))
+        self.assertIsNone(_validate_review_panel(5, no_review=False, provider="claude"))
+
+    def test_below_one_is_refused(self):
+        from shepherd_dev.cli import _validate_review_panel
+
+        self.assertIsNotNone(_validate_review_panel(0, no_review=False, provider="claude"))
+
+    def test_panel_without_a_reviewer_is_refused(self):
+        from shepherd_dev.cli import _validate_review_panel
+
+        self.assertIsNotNone(_validate_review_panel(2, no_review=True, provider="claude"))
+        self.assertIsNotNone(_validate_review_panel(2, no_review=False, provider="static"))
+        # one reviewer is the status quo — must stay legal everywhere
+        self.assertIsNone(_validate_review_panel(1, no_review=True, provider="static"))
+
+    def test_resolve_prefers_explicit_over_saved_over_default(self):
+        import tempfile
+
+        from shepherd_dev import config
+        from shepherd_dev.cli import _resolve_review_panel
+
+        repo = Path(tempfile.mkdtemp(prefix="shepherd-panel-resolve-"))
+        self.assertEqual(_resolve_review_panel(repo, None), 1)  # no config, no flag
+        config.save_config(repo, {"review_panel": 3})
+        self.assertEqual(_resolve_review_panel(repo, None), 3)  # saved config wins over default
+        self.assertEqual(_resolve_review_panel(repo, 2), 2)  # explicit flag wins over saved config
+
+
 if __name__ == "__main__":
     unittest.main()

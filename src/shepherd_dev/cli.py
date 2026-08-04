@@ -49,6 +49,10 @@ from .tasks import implement, review, write_tests
 #: loop against a fixed pass criterion is just more chances to game it.
 MAX_REVIEW_ROUNDS = 5
 
+#: Same reasoning as MAX_REVIEW_ROUNDS: a bounded, pre-approved allowance,
+#: not an open-ended amplifier.
+MAX_REVIEW_PANEL = 5
+
 
 def _validate_review_rounds(
     rounds: int, *, no_review: bool, provider: str, best_of: int = 1
@@ -67,6 +71,29 @@ def _validate_review_rounds(
     if rounds > 1 and provider == "static":
         return "--review-rounds > 1 needs a reviewing provider (not static)"
     return None
+
+
+def _validate_review_panel(size: int, *, no_review: bool, provider: str) -> str | None:
+    """None = usable; otherwise the reason to refuse, ready to print."""
+    if size < 1:
+        return "--review-panel must be at least 1"
+    if size > MAX_REVIEW_PANEL:
+        return f"--review-panel is capped at {MAX_REVIEW_PANEL} (got {size})"
+    if size > 1 and no_review:
+        return "--review-panel > 1 needs the reviewer (drop --no-review)"
+    if size > 1 and provider == "static":
+        return "--review-panel > 1 needs a reviewing provider (not static)"
+    return None
+
+
+def _resolve_review_panel(repo_root: Path, explicit: int | None) -> int:
+    """Explicit --review-panel wins; else the repo's saved init-time choice
+    (config.py's `review_panel` key); else 1 — today's single-reviewer
+    behavior, unchanged."""
+    if explicit is not None:
+        return explicit
+    saved = config.load_config(repo_root).get("review_panel")
+    return saved if isinstance(saved, int) and saved >= 1 else 1
 
 
 def _resolve_repo(raw: str | None) -> Path | None:
@@ -807,6 +834,14 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"error: {bad_rounds}", file=sys.stderr)
         return 2
 
+    args.review_panel = _resolve_review_panel(repo_root, args.review_panel)
+    bad_panel = _validate_review_panel(
+        args.review_panel, no_review=args.no_review, provider=args.provider,
+    )
+    if bad_panel:
+        print(f"error: {bad_panel}", file=sys.stderr)
+        return 2
+
     if args.best_of > 1 and args.no_review and args.provider not in ("static",):
         # best-of ranking needs review for non-static; grok/codex best-of not supported yet
         if args.provider not in ("grok", "codex"):
@@ -905,6 +940,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             placement=placement,
             max_attempts=args.max_attempts,
             review_rounds=args.review_rounds,
+            review_panel=args.review_panel,
             gate_timeout=args.gate_timeout,
             policy=policy,
             review_task=reviewer,
@@ -1919,6 +1955,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-rounds", type=int, default=1,
         help=f"extra passes to spend on a REJECTED-but-passing proposal "
              f"(1 = hand it to the human as today; max {MAX_REVIEW_ROUNDS})",
+    )
+    p_run.add_argument(
+        "--review-panel", type=int, default=None,
+        help=f"K independent reviewers instead of 1 — approval needs unanimity "
+             f"(default: the repo's saved init-time choice, else 1; max {MAX_REVIEW_PANEL})",
     )
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
     p_run.add_argument(

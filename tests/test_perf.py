@@ -356,7 +356,7 @@ class StartupOverlapTests(unittest.TestCase):
             feature="a feature", repo=str(self.repo), test_cmd=None,
             provider="static", allowed_prefix=[], no_context_pack=False,
             no_plan=False, best_of=1, no_review=True, auto_settle=False,
-            review_rounds=1, mode="feature", quiet=True, verbose=False,
+            review_rounds=1, review_panel=None, mode="feature", quiet=True, verbose=False,
             json=False, fresh_adopt=False,
         )
 
