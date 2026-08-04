@@ -472,6 +472,14 @@ shepherd-dev run "add pagination" --repo ~/projects/my-app --review-rounds 3
 The trace shows the rounds: `↻ rework round 2/3 — 4 open findings`, and
 `⏹ rework stopped: <reason>` when the loop gives up.
 
+**`--review-panel K`** replaces the single reviewer with K independent ones,
+each in its own clone, run in parallel — approval requires all K to agree.
+A real problem only one of them catches still blocks the proposal. Default
+is 1 (today's single-reviewer behavior) unless the repo was `init`ed with a
+different choice, or `--review-panel` is passed explicitly. Cost is K× the
+review tokens per round; wall-clock stays close to a single review since
+the K reviewers run concurrently.
+
 **An identical proposal ends the loop.** If an attempt hands back exactly the
 files of the previous one, the feedback did not land: re-judging would spend the
 rest of the budget to reach the same verdict, and the run would report

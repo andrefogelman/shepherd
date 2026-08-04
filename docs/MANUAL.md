@@ -466,6 +466,14 @@ shepherd-dev run "add pagination" --repo ~/projetos/meu-app --review-rounds 3
 O trace mostra as rodadas: `↻ rework round 2/3 — 4 open findings`, e
 `⏹ rework stopped: <razão>` quando o loop desiste.
 
+**`--review-panel K`** substitui o revisor único por K revisores independentes,
+cada um em seu próprio clone, executados em paralelo — aprovação requer que
+todos os K concordem. Um problema real que apenas um deles encontra ainda bloqueia
+a proposta. Padrão é 1 (comportamento do revisor único de hoje) a menos que o
+repositório tenha sido `init`ado com uma escolha diferente ou `--review-panel`
+seja passado explicitamente. Custo é K× os tokens de revisão por rodada; wall-clock
+fica perto de uma única revisão já que os K revisores executam concorrentemente.
+
 **Proposta idêntica encerra o loop.** Se uma tentativa devolve exatamente os
 mesmos arquivos da anterior, o feedback não pegou: re-julgar gastaria o resto
 do orçamento para chegar ao mesmo veredito, e o run reportaria "tentativas
