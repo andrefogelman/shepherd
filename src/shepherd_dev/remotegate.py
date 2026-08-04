@@ -303,12 +303,19 @@ def _teardown_workdir(cfg: RemoteGateConfig, run_id: str, workdir: str, did_setu
 class GateWarmup:
     """Speculatively pre-stages a remote gate workdir while the worker runs (#2).
 
-    In a background thread it makes the ephemeral copy of the warm checkout and,
-    for {id}-isolated configs only, runs setup (bringing up the per-run DB /
-    container). Non-isolated setup touches SHARED external state and stays under
-    run_remote_gate's serialization lock, so the warmup pre-copies but does not
-    pre-setup it. When the worker finishes, run_remote_gate adopts this workdir
-    and only overlays + tests, overlapping the copy/setup latency with worker time.
+    In a background thread it makes the ephemeral copy of the warm checkout —
+    that alone, never setup_cmd, regardless of {id}-isolation. The workdir is
+    always uniquely named (sg-<run_id>), so the copy can never collide with
+    anything else on the remote host. setup_cmd is a different matter: it is
+    arbitrary, user-supplied, and typically provisions a NAMED resource (a
+    container, a compose project) in the same namespace the worker's own task
+    instructions may independently touch on that same remote host, for the
+    whole duration of the worker's run — shepherd's sandbox confines the
+    worker's local writes, not its network reach. Running setup_cmd here,
+    concurrently with an actor shepherd does not control, is exactly the
+    window a same-named-resource race needs; run_remote_gate runs it instead,
+    strictly after the worker has returned. When the worker finishes,
+    run_remote_gate adopts this workdir and overlays + sets up + tests.
 
     Always teardown-safe: teardown() waits for the staging thread before tearing
     its state down, so a warmup that is never consumed (worker produced nothing)
@@ -350,14 +357,7 @@ class GateWarmup:
             if copy.returncode != 0:
                 self.error = f"warmup copy failed: {(copy.stderr or copy.stdout).strip()[-200:]}"
                 return
-            if self.cfg.setup_cmd and self.cfg.is_id_isolated:
-                envp = _env_prefix(self.cfg, self.run_id, self.workdir)
-                wd = shlex.quote(self.workdir)
-                setup = _remote(self.cfg, f"cd {wd} && {envp}{_sub(self.cfg.setup_cmd, self.run_id, self.workdir)}", self.timeout)
-                if setup.returncode != 0:
-                    self.error = f"warmup setup failed: {((setup.stdout or '') + (setup.stderr or '')).strip()[-200:]}"
-                    return
-                self.did_setup = True
+            # setup_cmd deliberately does NOT run here — see the class docstring.
         except Exception as exc:  # never let a background failure escape
             self.error = f"warmup: {exc}"
         finally:

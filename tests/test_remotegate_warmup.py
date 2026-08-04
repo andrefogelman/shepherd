@@ -1,10 +1,11 @@
 """Tests for #2: speculative remote-gate warmup.
 
 Reuses the faithful fake-ssh (join args after host, run via sh -c on the real FS)
-so the background copy/setup actually happen against temp dirs. Covers: staging
-copy + per-{id} setup for isolated configs, copy-only for non-isolated, gate
-consuming a warmup, fallback on a failed warmup, and orphan-free teardown of an
-unconsumed warmup. Runnable with: python -m unittest tests.test_remotegate_warmup
+so the background copy actually happens against temp dirs. Covers: staging
+copy-only (setup deferred even for {id}-isolated configs, copy-only for
+non-isolated), gate consuming a warmup, fallback on a failed warmup, and
+orphan-free teardown of an unconsumed warmup. Runnable with:
+python -m unittest tests.test_remotegate_warmup
 """
 
 from __future__ import annotations
@@ -92,16 +93,20 @@ class RemoteGateWarmup(unittest.TestCase):
         assert cfg is not None
         return cfg
 
-    def test_isolated_warmup_stages_copy_and_setup(self):
+    def test_isolated_warmup_stages_copy_but_defers_setup(self):
+        """Even for an {id}-isolated config, setup_cmd must NOT run during
+        staging: the worker is still running at this point, on the same
+        remote host, outside shepherd's control — deferring setup to
+        run_remote_gate (strictly after the worker returns) is what keeps
+        shepherd's own remote mutation from racing the worker's."""
         cfg = self._cfg(isolated=True)
         w = GateWarmup(cfg, timeout=30).start()
         w.join()
         self.assertIsNone(w.error, w.error)
-        self.assertTrue(w.did_setup)                       # {id}-isolated => setup ran
+        self.assertFalse(w.did_setup)                       # setup deferred, not skipped
         self.assertTrue((Path(w.workdir) / "src" / "a.py").exists())  # copy done
-        self.assertTrue((self.db / f"d_{w.run_id}" / "s").exists())   # per-{id} state
+        self.assertFalse((self.db / f"d_{w.run_id}").exists())        # NOT pre-run
         w.teardown()
-        self.assertFalse((self.db / f"d_{w.run_id}").exists())        # setup torn down
         self.assertFalse(Path(w.workdir).exists())                    # workdir removed
 
     def test_non_isolated_warmup_copies_but_skips_setup(self):
