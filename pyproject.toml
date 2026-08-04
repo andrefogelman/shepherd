@@ -17,6 +17,14 @@ dependencies = [
 # at andrefogelman/shepherd-ai@205f668 (fork of shepherd-agents/shepherd,
 # not yet reported/merged upstream). Remove this override once upstream
 # ships the fix and shepherd-ai's PyPI version picks it up.
+#
+# Supply-chain note: uv has no pyproject.toml-level hash field for a `url`
+# source — the sha256 pin lives in the committed uv.lock, checked on every
+# `uv sync`. That pin is only as good as the release asset being immutable,
+# so v0.3.1-dotgit-fix's assets on andrefogelman/shepherd-ai must NEVER be
+# replaced/re-uploaded. Any future change to this wheel — even a trivial
+# one — gets a NEW tag (e.g. v0.3.2-...) and a corresponding uv.lock update,
+# never an overwrite of this one.
 [tool.uv.sources]
 shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.1-dotgit-fix/shepherd_ai-0.3.1-py3-none-any.whl" }
 
