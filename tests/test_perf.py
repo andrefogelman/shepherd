@@ -85,6 +85,27 @@ class FastCopytreeTests(unittest.TestCase):
         fast_copytree(self.src, dst, ignored=set())
         self.assertTrue((dst / "pkg" / "a.py").is_file())
 
+    def test_skips_nested_git_under_a_copied_subtree(self):
+        """A git-sourced dependency (Elixir's `mix.exs` {:git, ...} deps are
+        the common case) plants its own .git several levels under a
+        directory that isn't itself ignored — `cp -R` copies that whole
+        subtree in one shot, so the top-level-only filter used to miss it."""
+        from shepherd_dev.supervisor import fast_copytree
+
+        deps_git = self.src / "deps" / "some_pkg" / ".git"
+        deps_git.mkdir(parents=True)
+        (deps_git / "config").write_text("nested\n")
+        (self.src / "deps" / "some_pkg" / "mix.exs").write_text("defmodule; end\n")
+
+        dst = Path(self.tmp.name) / "dst"
+        fast_copytree(self.src, dst, ignored={".git", "node_modules"})
+
+        self.assertFalse((dst / ".git").exists())
+        self.assertFalse((dst / "deps" / "some_pkg" / ".git").exists())
+        self.assertEqual(
+            (dst / "deps" / "some_pkg" / "mix.exs").read_text(), "defmodule; end\n"
+        )
+
 
 class LocalGateStageTests(unittest.TestCase):
     def setUp(self):

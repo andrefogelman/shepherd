@@ -276,12 +276,32 @@ def gate_env(
     return {k: v for k, v in src.items() if k not in dropped}
 
 
+def _prune_ignored(root: Path, ignored: set[str]) -> None:
+    """Remove entries named in ``ignored`` at any depth under an
+    already-copied tree. `cp -R`/shutil.copytree copy a top-level entry's
+    subtree wholesale once started, blind to names below that entry — a
+    nested `.git` (an Elixir `mix.exs` git dependency under deps/<pkg>/.git
+    is the common case) rides along uncaught otherwise."""
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        keep = []
+        for name in dirnames:
+            if name in ignored:
+                shutil.rmtree(Path(dirpath) / name, ignore_errors=True)
+            else:
+                keep.append(name)
+        dirnames[:] = keep
+        for name in filenames:
+            if name in ignored:
+                (Path(dirpath) / name).unlink(missing_ok=True)
+
+
 def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> None:
     """Tree copy tuned for the gate/clone hot path: per top-level entry, try
     the filesystem's cheap copy (`cp -c` clonefile on APFS, `cp -R` elsewhere
     — measured 3.5× faster than shutil.copytree on a 1500-file tree) and fall
     back to shutil.copytree per entry. ``ignored`` names are skipped at the
-    top level (where .git/.venv/node_modules live)."""
+    top level (where .git/.venv/node_modules live) AND pruned afterward at
+    every nested level, since a copied subtree can itself contain them."""
     import subprocess
 
     ignored = ignored or set()
@@ -304,6 +324,8 @@ def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> Non
                 shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
             else:
                 shutil.copy2(entry, target, follow_symlinks=False)
+        if ignored and target.is_dir() and not target.is_symlink():
+            _prune_ignored(target, ignored)
 
 
 #: Dependency dirs the gate's staged copy NEEDS but must not duplicate: they
