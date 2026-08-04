@@ -300,5 +300,82 @@ class ReviewPanelCliTests(unittest.TestCase):
         self.assertEqual(_resolve_review_panel(repo, 2), 2)  # explicit flag wins over saved config
 
 
+class AskReviewPanelTests(unittest.TestCase):
+    """No substrate needed — this is a pure input()-wrapping function."""
+
+    def test_empty_answer_keeps_the_default(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(_ask_review_panel(default=1), 1)
+
+    def test_eof_keeps_the_default(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertEqual(_ask_review_panel(default=1), 1)
+
+    def test_a_valid_number_is_used(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        with patch("builtins.input", return_value="3"):
+            self.assertEqual(_ask_review_panel(default=1), 3)
+
+    def test_garbage_input_keeps_the_default(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        with patch("builtins.input", return_value="banana"):
+            self.assertEqual(_ask_review_panel(default=1), 1)
+
+    def test_out_of_range_keeps_the_default(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        with patch("builtins.input", return_value="99"):
+            self.assertEqual(_ask_review_panel(default=1), 1)
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class InitPersistsReviewPanelTests(unittest.TestCase):
+    def test_explicit_flag_skips_the_prompt_and_saves(self):
+        import subprocess
+        import tempfile
+
+        from shepherd_dev import config
+
+        repo = Path(tempfile.mkdtemp(prefix="shepherd-init-panel-"))
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(repo), "--review-panel", "3"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.load_config(repo).get("review_panel"), 3)
+
+    def test_no_flag_and_no_stdin_saves_the_default(self):
+        import subprocess
+        import tempfile
+
+        from shepherd_dev import config
+
+        repo = Path(tempfile.mkdtemp(prefix="shepherd-init-panel-"))
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(repo)],
+            input="", capture_output=True, text=True,  # empty stdin => EOF on input()
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.load_config(repo).get("review_panel"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

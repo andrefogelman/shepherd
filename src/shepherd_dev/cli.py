@@ -413,6 +413,29 @@ def _ask_decision(prompt: str) -> str:
     return "keep"
 
 
+def _ask_review_panel(default: int = 1) -> int:
+    """Ask how many independent reviewers judge each proposal at init time.
+    Empty answer, EOF (non-interactive stdin), or anything unparsable/out of
+    range keeps `default` — today's single-reviewer behavior."""
+    try:
+        ans = input(
+            f"\nReview panel size — independent reviewers per proposal, "
+            f"unanimous approval required [{default}, max {MAX_REVIEW_PANEL}]: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    if not ans:
+        return default
+    try:
+        n = int(ans)
+    except ValueError:
+        return default
+    if n < 1 or n > MAX_REVIEW_PANEL:
+        return default
+    return n
+
+
 def _interactive_settle_run(repo_root: Path, run_ref: str) -> int:
     """Prompt accept/reject/diff for a single run; act inline."""
     while True:
@@ -1640,6 +1663,20 @@ def cmd_init(args) -> int:
             print(f"test gate: no suite found — `run` will use the native runner ({cmd}) and write tests itself")
         else:
             print("no test command — pass --test-cmd on run, or re-init with --test-cmd \"…\"")
+
+    if args.review_panel is not None:
+        bad = _validate_review_panel(args.review_panel, no_review=False, provider="claude")
+        if bad:
+            print(f"error: {bad}", file=sys.stderr)
+            return 2
+        panel = args.review_panel
+    else:
+        panel = _ask_review_panel(default=1)
+    config.save_config(repo_root, {"review_panel": panel})
+    if panel == 1:
+        print(f"review panel: 1 (single reviewer)  →  {config.CONFIG_NAME}")
+    else:
+        print(f"review panel: {panel} independent reviewers, unanimous approval  →  {config.CONFIG_NAME}")
     return 0
 
 
@@ -2094,6 +2131,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--repo", default=".", help="path to the target repo (default: cwd)")
     p_init.add_argument("--test-cmd", default=None, help="save this gate command (else auto-detect and save)")
     p_init.add_argument("--no-gitignore", action="store_true", help="do not touch .gitignore")
+    p_init.add_argument(
+        "--review-panel", type=int, default=None,
+        help=f"save this many independent reviewers without asking interactively "
+             f"(max {MAX_REVIEW_PANEL}); omit to be asked",
+    )
     p_init.set_defaults(func=cmd_init)
 
     p_opt = sub.add_parser("optimize", help="CRO-lite: mine run history, propose a prompt edit, validate by replay")

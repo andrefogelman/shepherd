@@ -2,7 +2,7 @@
 `shepherd-dev run "<feature>"` from inside the repo.
 
 Config lives at <repo>/.shepherd-dev.json (committed by default — it is project
-metadata, not local state). Only `test_cmd` is stored today.
+metadata, not local state). Stores `test_cmd` and `review_panel` today.
 """
 
 from __future__ import annotations
