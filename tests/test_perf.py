@@ -146,6 +146,65 @@ class LocalGateStageTests(unittest.TestCase):
             stage.close()
         self.assertTrue(res.passed, res.output_tail)
 
+    def test_stage_never_carries_the_repos_own_git_dir(self):
+        """The real repo's root .git must not ride into the stage: a tree
+        containing a literally-named `.git` entry is exactly what breaks the
+        substrate's vcs_core when it later builds a tree object from it."""
+        from shepherd_dev.supervisor import LocalGateStage
+
+        (self.repo / ".git").mkdir()
+        (self.repo / ".git" / "config").write_text("x\n")
+
+        stage = LocalGateStage(self.repo).start()
+        try:
+            work = stage.stage({})  # blocks until the base build finishes
+            assert stage.base is not None
+            assert work is not None
+            self.assertFalse((stage.base / ".git").exists())
+            self.assertFalse((work / ".git").exists())
+        finally:
+            stage.close()
+
+    def test_a_speculative_stage_is_torn_down_when_the_gate_turns_out_remote(self):
+        """start_local_gate_stage never hands out a SHARED stage for a
+        remote-gated repo, so any LocalGateStage reaching _run_gate's remote
+        branch is the single-use, speculative kind — leaving it unclosed
+        leaks its base/.git-bearing tree and background thread forever."""
+        from shepherd_dev import config as _config
+        from shepherd_dev import remotegate as RG
+        from shepherd_dev.remotegate import parse_remote_config
+        from shepherd_dev.supervisor import GateResult, LocalGateStage, _run_gate
+
+        (self.repo / ".git").mkdir()
+        (self.repo / ".git" / "config").write_text("x\n")
+
+        stage = LocalGateStage(self.repo).start()
+        stage.stage({})  # blocks until the base build finishes
+        stage_root = stage._root
+        self.assertTrue(stage_root.exists())
+
+        cfg = parse_remote_config({
+            "ssh": "root@host",
+            "repo_dir": str(self.tmp.name),
+            "copy_cmd": "true",
+            "test_cmd": "true",
+            "workdir_base": str(self.tmp.name),
+        }, "python")
+        self.assertIsNotNone(cfg)
+        fake_result = GateResult(passed=True, exit_code=0, output_tail="")
+
+        old_remote_gate, old_run_remote_gate = _config.remote_gate, RG.run_remote_gate
+        _config.remote_gate = lambda repo_root: cfg
+        RG.run_remote_gate = lambda *a, **k: fake_result
+        try:
+            res = _run_gate(self.repo, {}, "true", timeout=5, warmup=stage)
+        finally:
+            _config.remote_gate = old_remote_gate
+            RG.run_remote_gate = old_run_remote_gate
+
+        self.assertIs(res, fake_result)
+        self.assertFalse(stage_root.exists())
+
 
 class AdoptionKeyTests(unittest.TestCase):
     def setUp(self):

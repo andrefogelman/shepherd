@@ -385,7 +385,7 @@ def _remove_tree(path: Path) -> None:
 
 def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None:
     """Copy the repo and overlay the proposal's content entries on top."""
-    fast_copytree(Path(repo_root), dest, ignored=set(IGNORED_DIRS))
+    fast_copytree(Path(repo_root), dest, ignored=set(IGNORED_DIRS) | {".git"})
     _link_dep_dirs(repo_root, dest)
     materialize_into(dest, entries)
 
@@ -415,7 +415,7 @@ class LocalGateStage:
     def _build(self) -> None:
         try:
             base = self._root / "base"
-            fast_copytree(self.repo_root, base, ignored=set(IGNORED_DIRS))
+            fast_copytree(self.repo_root, base, ignored=set(IGNORED_DIRS) | {".git"})
             self.base = base
         except Exception as exc:
             self.error = f"gate stage: {exc}"
@@ -966,6 +966,15 @@ def _run_gate(
     remote_cfg = _config.remote_gate(repo_root)
     if remote_cfg is not None:
         from .remotegate import run_remote_gate
+
+        # A speculatively-warmed LocalGateStage is dead weight here: the
+        # remote gate never reads it, and start_local_gate_stage never hands
+        # out a SHARED one for a remote-gated repo, so this is always the
+        # single-use kind — leaving it torn down leaks its base/.git-bearing
+        # tree (and background thread) for the life of the process otherwise.
+        if stage is not None and not keep_stage:
+            stage.teardown()
+            stage = None
 
         # Resolve native placeholders in the REMOTE test_cmd too (#11): a no-op for
         # ordinary user configs (no placeholder), but if a remote test_cmd uses
