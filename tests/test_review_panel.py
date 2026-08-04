@@ -147,5 +147,108 @@ class RunReviewPanelTests(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class DevelopReviewPanelWiringTests(unittest.TestCase):
+    """develop() driven by fakes — same harness style as
+    test_review_rounds.py's DevelopReworkLoopTests._run, extended with a
+    review_panel arg and a fake for run_review_panel specifically (so these
+    tests check ROUTING, not the panel's own clone/aggregate mechanics —
+    those are Task 1/2's job)."""
+
+    def _run(self, *, review_panel, panel_verdict=None, gate_passes=None):
+        from shepherd_dev import supervisor as sup
+
+        calls = {"worker": 0, "review": 0, "panel": 0, "panel_size": None, "gates": []}
+
+        class _Output:
+            def changeset(self):
+                return {"file.py": b"v1\n"}
+
+            def discard(self):
+                pass
+
+        class _Run:
+            run_ref = "run-1"
+
+            def output(self):
+                return _Output()
+
+        class _Tasks:
+            def register(self, task):
+                pass
+
+        class _Workspace:
+            tasks = _Tasks()
+
+            def run(self, task, **kw):
+                calls["worker"] += 1
+                return _Run()
+
+        def _read_entries(changeset):
+            return dict(changeset)
+
+        def _gate(repo_root, entries, test_cmd, timeout, **kw):
+            i = len(calls["gates"])
+            passed = True if gate_passes is None else gate_passes[i]
+            calls["gates"].append(passed)
+            return sup.GateResult(passed, 0 if passed else 1, "gate output")
+
+        def _review(workspace, review_task, **kw):
+            calls["review"] += 1
+            return sup.ReviewVerdict(approved=True, summary="s", issues=[], resolved=[])
+
+        def _review_panel(repo_root, review_task, size, **kw):
+            calls["panel"] += 1
+            calls["panel_size"] = size
+            return panel_verdict or sup.ReviewVerdict(approved=True, summary="p", issues=[], resolved=[])
+
+        orig = (
+            sup.read_changeset_entries, sup._run_gate, sup.run_review,
+            sup.run_review_panel, sup._start_gate_warmup,
+        )
+        sup.read_changeset_entries = _read_entries
+        sup._run_gate = _gate
+        sup.run_review = _review
+        sup.run_review_panel = _review_panel
+        sup._start_gate_warmup = lambda *a, **k: None
+        try:
+            report = sup.develop(
+                _Workspace(), object(), repo=object(), repo_root=Path("/r"),
+                feature="add X", test_cmd="pytest -q", review_task=object(),
+                max_attempts=1, review_panel=review_panel,
+            )
+        finally:
+            (
+                sup.read_changeset_entries, sup._run_gate, sup.run_review,
+                sup.run_review_panel, sup._start_gate_warmup,
+            ) = orig
+        return report, calls
+
+    def test_panel_size_one_calls_run_review_not_the_panel(self):
+        _, calls = self._run(review_panel=1)
+        self.assertEqual(calls["review"], 1)
+        self.assertEqual(calls["panel"], 0)
+
+    def test_panel_size_above_one_calls_the_panel_not_run_review(self):
+        _, calls = self._run(review_panel=3)
+        self.assertEqual(calls["review"], 0)
+        self.assertEqual(calls["panel"], 1)
+        self.assertEqual(calls["panel_size"], 3)
+
+    def test_the_panels_verdict_is_the_reports_verdict(self):
+        from shepherd_dev import supervisor as sup
+
+        v = sup.ReviewVerdict(approved=False, summary="p", issues=["x"], resolved=[])
+        report, _ = self._run(review_panel=2, panel_verdict=v)
+        self.assertIs(report.review, v)
+
+    def test_default_review_panel_is_one(self):
+        import inspect
+
+        from shepherd_dev import supervisor as sup
+
+        self.assertEqual(inspect.signature(sup.develop).parameters["review_panel"].default, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

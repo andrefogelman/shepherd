@@ -1159,6 +1159,7 @@ def develop(
     placement: str = "jail",
     max_attempts: int = 3,
     review_rounds: int = 1,
+    review_panel: int = 1,
     gate_timeout: int = 600,
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
@@ -1188,6 +1189,10 @@ def develop(
     ledger's open findings become the next pass's guidance. Rework runs on its
     own budget — a gate failure never eats the rework allowance, and a rework
     never eats the attempts reserved for failures.
+    review_panel > 1 replaces the single reviewer with that many independent
+    ones (separate clones, run in parallel) — approval requires all of them
+    to agree; a real problem only one catches still blocks. 1 (default)
+    takes the exact path today's single-reviewer runs already take.
     """
     import time as _time
 
@@ -1360,7 +1365,7 @@ def develop(
         # away (tokens spent on a proposal that died; hence opt-in).
         spec_result: dict = {}
         spec_thread = None
-        if test_cmd is not None and review_task is not None and speculative_review:
+        if test_cmd is not None and review_task is not None and speculative_review and review_panel <= 1:
             def _speculate():
                 try:
                     spec_result["verdict"] = run_review(
@@ -1449,16 +1454,29 @@ def develop(
         # still on the report, and reusing it would skip this round's review.
         verdict = _reap_spec()  # already ran overlapped with the gate
         if verdict is None:
-            verdict = run_review(
-                workspace,
-                review_task,
-                feature=feature,
-                changeset=changeset,
-                provider=provider,
-                placement=placement,
-                context_pack=context_pack,
-                findings=ledger.guidance() if ledger is not None else "",
-            )
+            if review_panel > 1:
+                verdict = run_review_panel(
+                    repo_root,
+                    review_task,
+                    review_panel,
+                    feature=feature,
+                    changeset=changeset,
+                    provider=provider,
+                    placement=placement,
+                    context_pack=context_pack,
+                    findings=ledger.guidance() if ledger is not None else "",
+                )
+            else:
+                verdict = run_review(
+                    workspace,
+                    review_task,
+                    feature=feature,
+                    changeset=changeset,
+                    provider=provider,
+                    placement=placement,
+                    context_pack=context_pack,
+                    findings=ledger.guidance() if ledger is not None else "",
+                )
         report.review = verdict
         if verdict is not None:
             _emit("review.verdict", {"approved": verdict.approved}, attempt=number)
