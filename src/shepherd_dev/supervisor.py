@@ -839,6 +839,50 @@ def run_review(
     )
 
 
+def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
+    """Combine K independent reviewers' verdicts into one.
+
+    Unanimous approval: a panel exists so that a real problem only ONE lens
+    catches still blocks — outvoting it would defeat the point. Issues and
+    resolved ids are unioned (order-preserving, deduped by exact text/id;
+    the same normalize-and-hash dedup the Ledger does later handles two
+    reviewers phrasing the same problem differently). Any reviewer error
+    (an infra failure, a malformed REVIEW.json) makes the whole panel an
+    error, same as a single reviewer's error already does today.
+    """
+    if not verdicts:
+        return ReviewVerdict(approved=False, summary="", error="review panel produced no verdicts")
+    errors = [v.error for v in verdicts if v.error]
+    if errors:
+        return ReviewVerdict(approved=False, summary="", error="; ".join(errors))
+
+    issues: list[str] = []
+    seen_issues: set[str] = set()
+    for v in verdicts:
+        for issue in v.issues:
+            if issue not in seen_issues:
+                seen_issues.add(issue)
+                issues.append(issue)
+
+    resolved: list[str] = []
+    seen_resolved: set[str] = set()
+    for v in verdicts:
+        for fid in v.resolved:
+            if fid not in seen_resolved:
+                seen_resolved.add(fid)
+                resolved.append(fid)
+
+    summaries = [
+        f"[reviewer {i + 1}/{len(verdicts)}] {v.summary}" for i, v in enumerate(verdicts) if v.summary
+    ]
+    return ReviewVerdict(
+        approved=all(v.approved for v in verdicts),
+        summary="\n".join(summaries),
+        issues=issues,
+        resolved=resolved,
+    )
+
+
 _TEST_FILE_RE = re.compile(
     r"(_test\.(py|exs|go)$"                       # foo_test.py / _test.exs / _test.go
     r"|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$"   # foo.test.ts / foo.spec.js
