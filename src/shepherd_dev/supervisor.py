@@ -883,6 +883,62 @@ def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
     )
 
 
+def run_review_panel(
+    repo_root: Path,
+    review_task,
+    size: int,
+    *,
+    feature: str,
+    changeset=None,
+    diff_text: str | None = None,
+    provider: str = "claude",
+    placement: str = "jail",
+    context_pack: str | None = None,
+    findings: str = "",
+) -> ReviewVerdict:
+    """Run `size` independent reviewers in separate clones, aggregate into
+    one verdict via _aggregate_review_verdicts.
+
+    run_review's own docstring explains why a single reviewer runs in the
+    caller's existing workspace lane: v0.2 lane limits require disjoint
+    roots for concurrent workspace.run calls. A panel of `size` concurrent
+    reviewers needs `size` disjoint roots, so each gets its own clone — the
+    exact machinery parallel.py already uses to isolate concurrent workers
+    (_clone_many), reused here rather than reinvented.
+    """
+    import shutil
+    from concurrent.futures import ThreadPoolExecutor
+
+    import shepherd as sp
+
+    from .parallel import _clone_many
+
+    if diff_text is None:
+        diff_text = build_diff_text(changeset) if changeset is not None else ""
+
+    clones = _clone_many(repo_root, size)
+    try:
+        def _one(clone: Path) -> ReviewVerdict:
+            with sp.open(clone) as ws:
+                return run_review(
+                    ws,
+                    review_task,
+                    feature=feature,
+                    diff_text=diff_text,
+                    provider=provider,
+                    placement=placement,
+                    context_pack=context_pack,
+                    findings=findings,
+                )
+
+        with ThreadPoolExecutor(max_workers=size) as pool:
+            verdicts = list(pool.map(_one, clones))
+    finally:
+        for clone in clones:
+            shutil.rmtree(clone.parent, ignore_errors=True)
+    return _aggregate_review_verdicts(verdicts)
+
+
 _TEST_FILE_RE = re.compile(
     r"(_test\.(py|exs|go)$"                       # foo_test.py / _test.exs / _test.go
     r"|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$"   # foo.test.ts / foo.spec.js
