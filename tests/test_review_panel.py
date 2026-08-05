@@ -64,6 +64,20 @@ class AggregateReviewVerdictsTests(unittest.TestCase):
         self.assertIn("looks fine", v.summary)
         self.assertIn("also fine", v.summary)
 
+    def test_advisory_is_true_if_any_reviewer_is_advisory(self):
+        v = _aggregate_review_verdicts([
+            ReviewVerdict(approved=True, summary="a", issues=[], resolved=[], advisory=False),
+            ReviewVerdict(approved=True, summary="b", issues=[], resolved=[], advisory=True),
+        ])
+        self.assertTrue(v.advisory)
+
+    def test_advisory_stays_false_if_no_reviewer_is_advisory(self):
+        v = _aggregate_review_verdicts([
+            ReviewVerdict(approved=True, summary="a", issues=[], resolved=[], advisory=False),
+            ReviewVerdict(approved=True, summary="b", issues=[], resolved=[], advisory=False),
+        ])
+        self.assertFalse(v.advisory)
+
 
 try:
     import shepherd as _sp  # noqa: F401
@@ -145,6 +159,17 @@ class RunReviewPanelTests(unittest.TestCase):
         S.run_review_panel(self.repo, object(), 2, feature="add X")
         after = set(Path(_tempfile.gettempdir()).glob("shepherd-par-*"))
         self.assertEqual(before, after)
+
+    def test_clone_creation_failure_returns_an_error_verdict_not_a_raised_exception(self):
+        from unittest.mock import patch
+
+        from shepherd_dev import supervisor as S
+
+        with patch("shepherd_dev.parallel._clone_many", side_effect=RuntimeError("boom")):
+            verdict = S.run_review_panel(self.repo, object(), 2, feature="add X")
+        self.assertFalse(verdict.approved)
+        self.assertIsNotNone(verdict.error)
+        self.assertIn("boom", verdict.error)
 
 
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
@@ -299,6 +324,52 @@ class ReviewPanelCliTests(unittest.TestCase):
         self.assertEqual(_resolve_review_panel(repo, None), 3)  # saved config wins over default
         self.assertEqual(_resolve_review_panel(repo, 2), 2)  # explicit flag wins over saved config
 
+    def test_explicit_panel_with_best_of_is_refused(self):
+        from shepherd_dev.cli import _validate_review_panel_best_of
+
+        self.assertIsNotNone(_validate_review_panel_best_of(3, 2))
+
+    def test_no_explicit_panel_with_best_of_is_not_refused(self):
+        # a saved config value (explicit_panel=None) must not hard-block --best-of
+        from shepherd_dev.cli import _validate_review_panel_best_of
+
+        self.assertIsNone(_validate_review_panel_best_of(None, 2))
+
+    def test_explicit_panel_of_one_with_best_of_is_not_refused(self):
+        from shepherd_dev.cli import _validate_review_panel_best_of
+
+        self.assertIsNone(_validate_review_panel_best_of(1, 2))
+
+    def test_explicit_panel_without_best_of_is_not_refused(self):
+        from shepherd_dev.cli import _validate_review_panel_best_of
+
+        self.assertIsNone(_validate_review_panel_best_of(3, 1))
+
+    def test_saved_review_panel_does_not_block_best_of(self):
+        # A repo with a SAVED review_panel > 1 (no explicit --review-panel flag)
+        # combined with --best-of must not be refused — it should just not
+        # apply the panel. This is the explicit-vs-saved distinction that
+        # makes the fix correct rather than a blanket refusal.
+        import subprocess
+        import tempfile
+
+        from shepherd_dev import config
+
+        repo = Path(tempfile.mkdtemp(prefix="shepherd-panel-bestof-"))
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(repo)],
+            input="", capture_output=True, text=True,
+        )
+        config.save_config(repo, {"review_panel": 3})
+
+        from shepherd_dev.cli import _resolve_review_panel, _validate_review_panel_best_of
+
+        explicit_panel = None  # no --review-panel flag passed on this run
+        resolved = _resolve_review_panel(repo, explicit_panel)
+        self.assertEqual(resolved, 3)  # saved value resolves as normal
+        self.assertIsNone(_validate_review_panel_best_of(explicit_panel, best_of=2))
+
 
 class AskReviewPanelTests(unittest.TestCase):
     """No substrate needed — this is a pure input()-wrapping function."""
@@ -375,6 +446,28 @@ class InitPersistsReviewPanelTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(config.load_config(repo).get("review_panel"), 1)
+
+    def test_reinit_with_no_stdin_keeps_the_saved_value_not_the_hardcoded_default(self):
+        import subprocess
+        import tempfile
+
+        from shepherd_dev import config
+
+        repo = Path(tempfile.mkdtemp(prefix="shepherd-init-panel-reinit-"))
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        first = subprocess.run(
+            [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(repo), "--review-panel", "3"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(config.load_config(repo).get("review_panel"), 3)
+
+        second = subprocess.run(
+            [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(repo)],
+            input="", capture_output=True, text=True,  # empty stdin => EOF on input()
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(config.load_config(repo).get("review_panel"), 3)
 
 
 if __name__ == "__main__":

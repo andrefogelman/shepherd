@@ -880,6 +880,7 @@ def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
         summary="\n".join(summaries),
         issues=issues,
         resolved=resolved,
+        advisory=any(v.advisory for v in verdicts),
     )
 
 
@@ -916,7 +917,10 @@ def run_review_panel(
     if diff_text is None:
         diff_text = build_diff_text(changeset) if changeset is not None else ""
 
-    clones = _clone_many(repo_root, size)
+    try:
+        clones = _clone_many(repo_root, size)
+    except Exception as exc:
+        return ReviewVerdict(approved=False, summary="", error=f"review panel could not create clones: {exc}")
     try:
         def _one(clone: Path) -> ReviewVerdict:
             with sp.open(clone) as ws:

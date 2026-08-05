@@ -86,6 +86,20 @@ def _validate_review_panel(size: int, *, no_review: bool, provider: str) -> str 
     return None
 
 
+def _validate_review_panel_best_of(explicit_panel: int | None, best_of: int) -> str | None:
+    """None = usable; otherwise the reason to refuse, ready to print.
+
+    Only an EXPLICIT --review-panel combined with --best-of is a hard
+    refusal (best-of samples candidates from one state and ranks them; a
+    panel iterates one candidate — accepting both would silently honour
+    neither, same reasoning as _validate_review_rounds's best-of check). A
+    repo's saved (non-explicit) review_panel value does NOT trigger this —
+    it just doesn't apply to a best-of run, see _cmd_run_inner."""
+    if best_of > 1 and explicit_panel is not None and explicit_panel > 1:
+        return "--review-panel > 1 does not combine with --best-of"
+    return None
+
+
 def _resolve_review_panel(repo_root: Path, explicit: int | None) -> int:
     """Explicit --review-panel wins; else the repo's saved init-time choice
     (config.py's `review_panel` key); else 1 — today's single-reviewer
@@ -857,6 +871,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"error: {bad_rounds}", file=sys.stderr)
         return 2
 
+    explicit_panel = args.review_panel  # capture BEFORE resolution overwrites it
     args.review_panel = _resolve_review_panel(repo_root, args.review_panel)
     bad_panel = _validate_review_panel(
         args.review_panel, no_review=args.no_review, provider=args.provider,
@@ -864,6 +879,15 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if bad_panel:
         print(f"error: {bad_panel}", file=sys.stderr)
         return 2
+    bad_panel_best_of = _validate_review_panel_best_of(explicit_panel, args.best_of)
+    if bad_panel_best_of:
+        print(f"error: {bad_panel_best_of}", file=sys.stderr)
+        return 2
+    if args.best_of > 1 and args.review_panel > 1:
+        # a saved config value shouldn't hard-block --best-of the way an
+        # explicit flag does — it just doesn't apply here; best-of's own
+        # single-reviewer ranking runs instead.
+        args.review_panel = 1
 
     if args.best_of > 1 and args.no_review and args.provider not in ("static",):
         # best-of ranking needs review for non-static; grok/codex best-of not supported yet
@@ -1671,7 +1695,7 @@ def cmd_init(args) -> int:
             return 2
         panel = args.review_panel
     else:
-        panel = _ask_review_panel(default=1)
+        panel = _ask_review_panel(default=_resolve_review_panel(repo_root, None))
     config.save_config(repo_root, {"review_panel": panel})
     if panel == 1:
         print(f"review panel: 1 (single reviewer)  →  {config.CONFIG_NAME}")
