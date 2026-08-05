@@ -113,27 +113,38 @@ input cancels rather than running with an empty feature.
 ## Option table
 
 `menu.py` holds a table classifying every flag of every exposed subcommand as
-`MAIN`, `ADVANCED`, or `HIDDEN` with a written reason.
+either `MAIN` or `ADVANCED`. The classification is exhaustive: **no flag is
+withheld from the menu**.
 
 For `run`, `MAIN` is: the `feature` positional, `--provider`, `--mode`,
 `--review-panel`, `--review-rounds`, `--best-of`, `--review-report`.
+Everything else is `ADVANCED`.
 
-`HIDDEN` for the run family, with the reason recorded in the table:
+An earlier draft added a third class, `HIDDEN`, for `--json` and `--quiet` on
+the reasoning that neither makes sense to someone sitting at a menu. That was
+wrong twice over, and the class is dropped:
 
-- `--json` — a machine output contract; a menu user is not parsing stdout.
-- `--quiet` — suppresses the very progress the menu user is watching.
+- The menu prints the equivalent command, which makes it a command *builder*
+  as much as a runner. Someone assembling a line to paste into CI wants
+  `--json` specifically, and `--quiet` for exactly the same reason.
+- "Curated + advanced" was chosen because nothing becomes unreachable. A
+  hidden class breaks that promise.
 
-Everything else is `ADVANCED`. Two `ADVANCED` entries are pre-filled rather
-than blank: `--repo` from `config.find_repo_root()`, and `--test-cmd` from
-`config.resolve_test_cmd()`, each displaying its origin (`saved` / `detected`
-/ `native`).
+Neither flag is broken when chosen from a menu — `--json` prints its envelope
+as the last stdout line and skips the interactive settle (`cli.py:1997-2001`),
+`--quiet` swaps in `NullProgress` (`cli.py:975`). Both are merely unusual, and
+unusual is what `ADVANCED` is for.
+
+Two `ADVANCED` entries are pre-filled rather than blank: `--repo` from
+`config.find_repo_root()`, and `--test-cmd` from `config.resolve_test_cmd()`,
+each displaying its origin (`saved` / `detected` / `native`).
 
 ### Keeping the table honest
 
 A drift test enumerates each subparser's real flags and asserts the table
-classifies all of them. A flag added later belongs to no class and fails the
-test until someone classifies it — the same guard, and the same reasoning, as
-`RendererDriftTests` in `tests/test_supervisor.py`.
+classifies all of them as `MAIN` or `ADVANCED`. A flag added later is in
+neither and fails the test until someone classifies it — the same guard, and
+the same reasoning, as `RendererDriftTests` in `tests/test_supervisor.py`.
 
 That enumeration needs `parser._actions`, which is private argparse API. **It
 lives in the test only**; production code reads the table. If argparse changes
