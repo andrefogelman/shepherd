@@ -279,7 +279,13 @@ def ask_value(opt: Opt, current: object) -> object | None:
             print(f"    {i}) {choice}")
         picked = ask_choice(f"  {opt.flag}", len(opt.choices))
         return None if picked is None else opt.choices[picked - 1]
-    answer = _read(f"  {opt.flag} [{current if current not in (None, '', []) else 'unset'}]: ")
+    # The prompt spells out both non-edit paths: bare Enter keeps the current
+    # value (see _edit_loop's blank-input guard), "-" clears it back to
+    # unset. Neither is discoverable without being shown.
+    answer = _read(
+        f"  {opt.flag} [{current if current not in (None, '', []) else 'unset'}, "
+        "enter keeps, - clears]: "
+    )
     if answer is None:
         return None
     if opt.kind == "list":
@@ -360,6 +366,20 @@ def _edit_loop(command: str, values: dict[str, object]) -> bool:
             # only ever intercepts the no-op case, never a real edit.
             if opt.kind in ("value", "list") and new in ("", []):
                 continue
+            # "-" (advertised in ask_value's prompt) is the deliberate
+            # opposite of a bare Enter: it explicitly clears a field back to
+            # unset — including one _prefill populated from the repo's saved
+            # config — so build_argv omits the flag and the parser's own
+            # default applies. Checked against every value/list dest in
+            # OPTIONS: none is a shell command, path, model name or number
+            # that is legitimately the bare string "-", so it collides with
+            # no real value.
+            if opt.kind == "value" and new == "-":
+                values[opt.dest] = ""
+                continue
+            if opt.kind == "list" and new == ["-"]:
+                values[opt.dest] = []
+                continue
             values[opt.dest] = new
 
 
@@ -374,7 +394,19 @@ def run_menu(argv_out: list[str]) -> int | None:
         answer = ask_text(f"\n  {opt.dest}: ")
         if not answer:  # None (quit) or empty — never run on an empty required field
             return None
-        values[opt.dest] = answer.split(",") if opt.dest == "features" else answer
+        if opt.dest == "features":
+            # Strip each part and drop empties, matching ask_value's list
+            # branch (kind="list") — a bare split(",") lets a stray comma
+            # ("a,,b") or trailing comma ("a, ") through as an EMPTY feature
+            # request, which reaches the worker. If nothing usable survives
+            # ("," or " , " alone), that is an empty required field by the
+            # same rule as a bare Enter above: cancel rather than run empty.
+            features = [part.strip() for part in answer.split(",") if part.strip()]
+            if not features:
+                return None
+            values[opt.dest] = features
+        else:
+            values[opt.dest] = answer
     if not _edit_loop(command, values):
         return None
     argv_out.extend(build_argv(command, values))

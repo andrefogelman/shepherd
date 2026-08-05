@@ -450,6 +450,132 @@ class RunMenuTests(unittest.TestCase):
         self.assertIn("src/", argv)
         self.assertIn("tests/", argv)
 
+    def test_a_dash_explicitly_clears_a_value_field(self):
+        """Bare Enter means "leave unchanged" (see the two tests above), so
+        there has to be a SEPARATE, deliberate way to clear a field back to
+        unset — e.g. to drop a value _prefill pulled in from the repo's
+        saved config for this one run. "-" is that sentinel: set
+        review_rounds to 7, reopen the field, type "-", and confirm
+        --review-rounds is absent from argv entirely (not merely re-set to
+        7) and that the parser's own default (1) is what's parsed."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, OPTIONS, MAIN, run_menu
+
+        main_run = [o for o in OPTIONS["run"] if o.tier == MAIN and o.kind != "positional"]
+        rounds_pos = next(i for i, o in enumerate(main_run, 1) if o.dest == "review_rounds")
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "e",                              # edit a field
+            str(rounds_pos),                  # pick --review-rounds
+            "7",                              # set it
+            "e",                              # edit again
+            str(rounds_pos),                  # pick --review-rounds again
+            "-",                              # explicit clear
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertNotIn("--review-rounds", argv)
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.review_rounds, 1)  # the parser's own default
+
+    def test_a_dash_explicitly_clears_a_list_field(self):
+        """Same sentinel, for kind="list": set allowed_prefix, reopen it,
+        type "-", and confirm --allowed-prefix is absent from argv and the
+        parser's own default ([]) is what's parsed."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import ADVANCED, COMMANDS, OPTIONS, run_menu
+
+        advanced_run = [o for o in OPTIONS["run"] if o.tier == ADVANCED and o.kind != "positional"]
+        prefix_pos = next(i for i, o in enumerate(advanced_run, 1) if o.dest == "allowed_prefix")
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "a",                              # switch to advanced settings
+            "e",                              # edit a field
+            str(prefix_pos),                  # pick --allowed-prefix
+            "src/, tests/",                   # set it
+            "e",                              # edit again
+            str(prefix_pos),                  # pick --allowed-prefix again
+            "-",                              # explicit clear
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertNotIn("--allowed-prefix", argv)
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.allowed_prefix, [])  # the parser's own default
+
+    def test_multi_feature_input_strips_whitespace_around_each_part(self):
+        """A bare answer.split(",") let whitespace after a comma survive into
+        the feature text ('add X, add Y' -> [..., ' add Y']). Must match
+        ask_value's list branch, which already strips."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("runN") + 1), "add X, add Y", ""]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertEqual(argv[:3], ["runN", "add X", "add Y"])
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.features, ["add X", "add Y"])
+
+    def test_multi_feature_input_drops_empty_entries_between_commas(self):
+        """'a,,b' must not hand the worker an empty feature request."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("runN") + 1), "a,,b", ""]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.features, ["a", "b"])
+
+    def test_a_trailing_comma_yields_one_feature_not_an_empty_one(self):
+        """'a, ' has one real feature after stripping the trailing empty
+        part. That is NOT the "nothing survived" case (covered separately
+        below) — verified against the real parser rather than assumed:
+        `features` is nargs="+" (>=1) at the argparse level, so a single
+        feature parses; runN's own 2-5 floor is a separate runtime check in
+        cmd_runN, not something parse_args enforces or the menu duplicates."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("runN") + 1), "a, ", ""]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.features, ["a"])
+
+    def test_all_commas_cancels_rather_than_running_empty(self):
+        """',' alone strips down to no features at all — the same "empty
+        required field" rule that already cancels on a bare Enter."""
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("runN") + 1), ","]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertIsNone(run_menu(argv))
+        self.assertEqual(argv, [])
+
 
 if __name__ == "__main__":
     unittest.main()
