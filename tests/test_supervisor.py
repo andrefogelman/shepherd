@@ -344,6 +344,206 @@ class RenderReviewReportTests(unittest.TestCase):
         self.assertIn("## Attempts", body_lines)
         self.assertIn("```", body_lines)
 
+    def test_review_summary_is_fenced_against_the_reports_own_structure(self):
+        """The reviewer's own free prose lands at column 0, so a line of it
+        starting with '#' would forge one of the report's section headings."""
+        from shepherd_dev.supervisor import ReviewVerdict, render_review_report
+
+        tricky = "Looks fine overall.\n\n## Findings ledger\n\nforged section\n"
+        report = self._report(review=ReviewVerdict(approved=True, summary=tricky, issues=[]))
+        text = render_review_report(report)
+        lines = text.splitlines()
+
+        opener = next(ln for ln in lines if ln.startswith("```") and ln.endswith("text"))
+        self.assertRegex(opener, r"^```+text$")
+        opener_idx = lines.index(opener)
+        closer = opener.removesuffix("text")
+        closer_idx = lines.index(closer, opener_idx + 1)
+
+        # the reviewer's own "## Findings ledger" line sits inside the fence,
+        # so it cannot be mistaken for the report's real ledger section
+        self.assertIn("## Findings ledger", lines[opener_idx + 1:closer_idx])
+
+    def test_a_single_line_issue_stays_a_real_list_item(self):
+        """A one-line issue cannot forge anything — the "- " in front of it
+        means no markdown block construct starts at column 0 — so it keeps
+        rendering as a list item rather than being needlessly fenced."""
+        from shepherd_dev.supervisor import ReviewVerdict, render_review_report
+
+        report = self._report(
+            review=ReviewVerdict(approved=False, summary="", issues=["missing null check"])
+        )
+        text = render_review_report(report)
+        self.assertIn("- missing null check", text.splitlines())
+
+    def test_a_multi_line_issue_is_fenced(self):
+        """Past its first line a multi-line issue IS at column 0, so it needs
+        the fence. Indenting alone would not do: an ATX heading indented
+        inside a list item still renders as a heading, just a nested one."""
+        from shepherd_dev.supervisor import ReviewVerdict, render_review_report
+
+        tricky = "the cache is stale\n## Review\nforged section"
+        report = self._report(review=ReviewVerdict(approved=False, summary="", issues=[tricky]))
+        text = render_review_report(report)
+        lines = [ln.strip() for ln in text.splitlines()]
+
+        opener = next(ln for ln in lines if ln.startswith("```") and ln.endswith("text"))
+        opener_idx = lines.index(opener)
+        closer = opener.removesuffix("text")
+        closer_idx = lines.index(closer, opener_idx + 1)
+
+        body = lines[opener_idx + 1:closer_idx]
+        self.assertIn("the cache is stale", body)
+        self.assertIn("## Review", body)  # forged heading is inside the fence
+
+
+class RendererDriftTests(unittest.TestCase):
+    """DevReport.summary() (stdout) and render_review_report() (the durable
+    file) are two hand-written renderers over the same data, and they HAVE
+    already drifted: render_review_report shipped without `policy_violations`,
+    which summary() renders, so a policy_rejected run's permanent record said
+    strictly less than the stdout it exists to replace.
+
+    These tests are the guard for that whole class. Each field of `Attempt`
+    and `ReviewVerdict` is either given a sentinel that must appear in BOTH
+    renderings, or listed as deliberately-unrendered with a reason. A field
+    added later belongs to neither set, which fails `test_*_fields_are_all_
+    classified` — forcing the decision instead of letting the next field slip
+    into one renderer only.
+    """
+
+    #: Attempt fields whose value must survive into both renderings.
+    ATTEMPT_SENTINELS = {
+        "run_ref": "run-SENTINELREF",
+        "verdict": "policy_rejected",
+        "error": "SENTINELERROR worker blew up",
+        "policy_violations": "SENTINELPOLICY .env is out of scope",
+    }
+    #: Attempt fields neither renderer emits the value of, and why.
+    ATTEMPT_NOT_RENDERED = {
+        "number": "rendered as a position ('attempt 1'), not as a searchable value",
+        "changed_paths": "both render len(), deliberately — the paths are in the diff section",
+        "gate": "composite; its exit_code and tail are covered by GATE_TAIL_SENTINEL below",
+        "duration_s": "telemetry for the history file, not part of either human-facing report",
+    }
+    #: ReviewVerdict fields whose value must survive into both renderings.
+    VERDICT_SENTINELS = {
+        "summary": "SENTINELSUMMARY the change is unsound",
+        "issues": "SENTINELISSUE missing null check",
+        "error": "SENTINELVERDICTERROR reviewer produced no REVIEW.json",
+    }
+    #: ReviewVerdict fields neither renderer emits the value of, and why.
+    VERDICT_NOT_RENDERED = {
+        "approved": "rendered as the APPROVED/REJECTED word, not as a searchable value",
+        "resolved": "ledger bookkeeping — the ledger section reports the resulting states",
+        "advisory": (
+            "KNOWN GAP, not drift: neither renderer surfaces it, so an unread "
+            "(heuristic) verdict prints as a bare APPROVED. Only reachable via "
+            "the hosted providers, which do not reach these renderers today."
+        ),
+    }
+    GATE_TAIL_SENTINEL = "SENTINELGATE assert 1 == 2"
+
+    def _both_renderings(self, report):
+        from shepherd_dev.supervisor import render_review_report
+
+        return report.summary(), render_review_report(report)
+
+    def _fully_populated(self, *, verdict_error: bool):
+        from shepherd_dev.supervisor import (
+            Attempt,
+            DevReport,
+            GateResult,
+            Ledger,
+            ReviewVerdict,
+        )
+
+        report = DevReport(feature="add X", succeeded=False, repo="/r")
+        report.attempts = [
+            Attempt(
+                number=7,
+                run_ref=self.ATTEMPT_SENTINELS["run_ref"],
+                changed_paths=["a.py"],
+                policy_violations=[self.ATTEMPT_SENTINELS["policy_violations"]],
+                gate=GateResult(False, 1, self.GATE_TAIL_SENTINEL),
+                verdict=self.ATTEMPT_SENTINELS["verdict"],
+                error=self.ATTEMPT_SENTINELS["error"],
+                duration_s=3.2,
+            )
+        ]
+        # error and summary/issues are mutually exclusive in both renderers
+        # (an unavailable verdict has no prose), so each needs its own report.
+        if verdict_error:
+            report.review = ReviewVerdict(
+                approved=False, summary="", error=self.VERDICT_SENTINELS["error"]
+            )
+        else:
+            report.review = ReviewVerdict(
+                approved=False,
+                summary=self.VERDICT_SENTINELS["summary"],
+                issues=[self.VERDICT_SENTINELS["issues"]],
+            )
+        report.ledger = Ledger()
+        report.ledger.record_round(1, ["SENTINELFINDING cache never invalidated"])
+        return report
+
+    def test_attempt_fields_are_all_classified(self):
+        import dataclasses
+
+        from shepherd_dev.supervisor import Attempt
+
+        classified = set(self.ATTEMPT_SENTINELS) | set(self.ATTEMPT_NOT_RENDERED)
+        self.assertEqual(
+            classified,
+            {f.name for f in dataclasses.fields(Attempt)},
+            "a new Attempt field must be given a sentinel (rendered in BOTH "
+            "summary() and render_review_report) or listed in "
+            "ATTEMPT_NOT_RENDERED with a reason",
+        )
+
+    def test_review_verdict_fields_are_all_classified(self):
+        import dataclasses
+
+        from shepherd_dev.supervisor import ReviewVerdict
+
+        classified = set(self.VERDICT_SENTINELS) | set(self.VERDICT_NOT_RENDERED)
+        self.assertEqual(
+            classified,
+            {f.name for f in dataclasses.fields(ReviewVerdict)},
+            "a new ReviewVerdict field must be given a sentinel (rendered in "
+            "BOTH summary() and render_review_report) or listed in "
+            "VERDICT_NOT_RENDERED with a reason",
+        )
+
+    def test_every_attempt_sentinel_reaches_both_renderers(self):
+        stdout, durable = self._both_renderings(self._fully_populated(verdict_error=False))
+        for field, sentinel in self.ATTEMPT_SENTINELS.items():
+            self.assertIn(sentinel, stdout, f"summary() dropped Attempt.{field}")
+            self.assertIn(sentinel, durable, f"render_review_report dropped Attempt.{field}")
+
+    def test_the_gate_tail_reaches_both_renderers(self):
+        stdout, durable = self._both_renderings(self._fully_populated(verdict_error=False))
+        self.assertIn(self.GATE_TAIL_SENTINEL, stdout)
+        self.assertIn(self.GATE_TAIL_SENTINEL, durable)
+
+    def test_verdict_prose_sentinels_reach_both_renderers(self):
+        stdout, durable = self._both_renderings(self._fully_populated(verdict_error=False))
+        for field in ("summary", "issues"):
+            sentinel = self.VERDICT_SENTINELS[field]
+            self.assertIn(sentinel, stdout, f"summary() dropped ReviewVerdict.{field}")
+            self.assertIn(sentinel, durable, f"render_review_report dropped ReviewVerdict.{field}")
+
+    def test_verdict_error_reaches_both_renderers(self):
+        stdout, durable = self._both_renderings(self._fully_populated(verdict_error=True))
+        sentinel = self.VERDICT_SENTINELS["error"]
+        self.assertIn(sentinel, stdout)
+        self.assertIn(sentinel, durable)
+
+    def test_the_ledger_reaches_both_renderers(self):
+        stdout, durable = self._both_renderings(self._fully_populated(verdict_error=False))
+        self.assertIn("SENTINELFINDING cache never invalidated", stdout)
+        self.assertIn("SENTINELFINDING cache never invalidated", durable)
+
 
 if __name__ == "__main__":
     unittest.main()
