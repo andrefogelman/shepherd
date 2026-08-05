@@ -474,6 +474,15 @@ repositório tenha sido `init`ado com uma escolha diferente ou `--review-panel`
 seja passado explicitamente. Custo é K× os tokens de revisão por rodada; wall-clock
 fica perto de uma única revisão já que os K revisores executam concorrentemente.
 
+**`--review-report ARQUIVO`** escreve o veredito da rodada, questões, histórico
+do ledger de achados, e o diff proposto real para `ARQUIVO` como markdown —
+durável, independente de como stdout seja capturado (ou descartado) por qualquer
+coisa que tenha disparado a rodada. Escrito uma única vez, ao fim da rodada, a
+partir do mesmo report em memória do qual o resumo em console é construído —
+nada é re-fetched ou re-derivado depois. Funciona independente do resultado: uma
+rodada falha ou bloqueada ainda ganha um report, apenas sem a seção de diff (não
+há conteúdo de proposta aprovada para mostrar).
+
 **Proposta idêntica encerra o loop.** Se uma tentativa devolve exatamente os
 mesmos arquivos da anterior, o feedback não pegou: re-julgar gastaria o resto
 do orçamento para chegar ao mesmo veredito, e o run reportaria "tentativas

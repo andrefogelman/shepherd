@@ -480,6 +480,15 @@ different choice, or `--review-panel` is passed explicitly. Cost is K× the
 review tokens per round; wall-clock stays close to a single review since
 the K reviewers run concurrently.
 
+`--review-report FILE` writes the run's verdict, issues, findings-ledger
+history, and the actual proposed diff to `FILE` as markdown — durable,
+independent of however stdout gets captured (or discarded) by whatever
+launched the run. Written once, at the end of the run, from the same
+in-memory report the console summary is built from — nothing gets
+re-fetched or re-derived afterward. Works regardless of outcome: a failed
+or blocked run still gets a report, just without a diff section (there is
+no passing proposal's content to show).
+
 **An identical proposal ends the loop.** If an attempt hands back exactly the
 files of the previous one, the feedback did not land: re-judging would spend the
 rest of the budget to reach the same verdict, and the run would report
