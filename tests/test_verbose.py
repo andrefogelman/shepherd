@@ -236,6 +236,35 @@ class DevelopEmitsEvents(unittest.TestCase):
         )
         self.assertIn("policy.reject", self.kinds())
 
+    def test_review_verdict_event_carries_the_summary(self):
+        """The reviewer's free-text assessment must reach the (durable,
+        ~/.shepherd-dev/runs-rooted) event log, not just the CLI's stdout —
+        otherwise it only ever existed in whatever ephemeral place captured
+        the process output."""
+        import shepherd_dev.supervisor as sup
+
+        ws = _Workspace([{"impl.py": b"X = 1\n"}])
+        orig_run_review = sup.run_review
+
+        def _fake_review(workspace, review_task, **kw):
+            return sup.ReviewVerdict(
+                approved=True, summary="APPROVED — clean implementation.", issues=[], resolved=[],
+            )
+
+        sup.run_review = _fake_review
+        try:
+            develop(
+                ws, None, repo=None, repo_root=self.repo, feature="f",
+                test_cmd="echo ok", provider="static", placement="advisory",
+                max_attempts=1, review_task=object(), event_log=self.log,
+            )
+        finally:
+            sup.run_review = orig_run_review
+
+        verdicts = [e for e in self.seen if e["kind"] == "review.verdict"]
+        self.assertEqual(len(verdicts), 1)
+        self.assertEqual(verdicts[0]["payload"]["summary"], "APPROVED — clean implementation.")
+
 
 class ThreadBoundHookTests(unittest.TestCase):
     """Parallel best-of: one global hook, per-thread candidate logs."""

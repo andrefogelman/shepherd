@@ -1483,7 +1483,7 @@ def develop(
                 )
         report.review = verdict
         if verdict is not None:
-            _emit("review.verdict", {"approved": verdict.approved}, attempt=number)
+            _emit("review.verdict", {"approved": verdict.approved, "summary": verdict.summary}, attempt=number)
             for issue in verdict.issues or []:
                 _emit("review.issue", {"text": str(issue)}, attempt=number)
             if not verdict.error and ledger is not None:
