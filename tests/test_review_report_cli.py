@@ -13,7 +13,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tmpdirs import mkdtemp  # noqa: E402
+from tmpdirs import isolate_runs_dir, mkdtemp  # noqa: E402
+
+
+def setUpModule() -> None:
+    """These tests shell out to the CLI, which writes a run log. Keep those
+    out of ~/.shepherd-dev/runs — the developer's real history."""
+    isolate_runs_dir()
 
 try:
     import shepherd as _sp  # noqa: F401

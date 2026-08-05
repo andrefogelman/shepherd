@@ -15,6 +15,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from tmpdirs import isolate_runs_dir  # noqa: E402
+
+
+def setUpModule() -> None:
+    """These tests shell out to the CLI, which writes a run log. Keep those
+    out of ~/.shepherd-dev/runs — the developer's real history."""
+    isolate_runs_dir()
+
 
 class IsattyGateTests(unittest.TestCase):
     def test_piped_stdin_gets_todays_usage_error_not_a_menu(self):
