@@ -7,3 +7,6 @@ __pycache__/
 # regenerable shepherd demos (shepherd demo write <name>)
 quickstart_demo.py
 agent_task.py
+
+# macOS finder droppings
+.DS_Store
