@@ -350,19 +350,43 @@ def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
         key = None if fresh else _adoption_key(repo_root)
         key_file = vcscore / _ADOPT_KEY_FILE
         if vcscore.exists():
-            with sp.open(repo_root) as workspace:
-                pending = []
-                for record in workspace.runs.list():
-                    for output in workspace.runs.outputs(run_ref=record.run_ref):
-                        if output.state == "unconsumed":
-                            pending.append(record.run_ref)
-            if pending:
+            pending: list[str] = []
+            readable = True
+            try:
+                with sp.open(repo_root) as workspace:
+                    for record in workspace.runs.list():
+                        for output in workspace.runs.outputs(run_ref=record.run_ref):
+                            if output.state == "unconsumed":
+                                pending.append(record.run_ref)
+            except Exception:
+                # The store cannot be opened at all — the state a killed run
+                # leaves behind (LifecycleRecoveryRequiredError: "interrupted
+                # discard ... run recover_lifecycle first"). Without this
+                # guard the recovery was unreachable by construction: the
+                # rmtree a few lines below is exactly the fix, but reading
+                # the store to check for pending proposals came first, and
+                # reading is what is broken. Every documented recovery route
+                # dead-ends (`vcs-core` is not a real binary; the API calls
+                # need an activated core), so a worker failure with nothing
+                # to do with the substrate — a 429, say — left the workspace
+                # bricked for every later run.
+                #
+                # Skipping the pending check loses nothing recoverable: a
+                # proposal inside an unopenable store cannot be settled
+                # either, and git is the durable source of truth (see the
+                # docstring). Re-adopt from the worktree and move on.
+                readable = False
+            if readable and pending:
                 return (
                     "pending unconsumed proposal(s): "
                     + ", ".join(sorted(set(pending)))
                     + " — settle them first (shepherd-dev settle <ref> [--reject])"
                 )
-            if key is not None:
+            # `readable` gates the shortcut too: an unopenable store must be
+            # replaced even when the worktree has not moved. The key only ever
+            # licensed skipping the re-adopt because the EXISTING store was
+            # still good, which is precisely what is not true here.
+            if readable and key is not None:
                 try:
                     if key_file.is_file() and key_file.read_text(encoding="utf-8").strip() == key:
                         return None  # worktree unchanged since the last adoption
