@@ -839,5 +839,163 @@ class PrefillTests(unittest.TestCase):
             self.assertEqual(menu._decide_counts(), {})
 
 
+class FlagPromptTests(unittest.TestCase):
+    """The flag prompt used to read EVERY non-q answer as a toggle, so typing
+    "n" at what reads as a yes/no question turned the flag ON."""
+
+    def _flag(self, dest="no_review"):
+        from shepherd_dev.menu import OPTIONS
+
+        return next(o for o in OPTIONS["run"] if o.dest == dest)
+
+    def _ask(self, answer, current=None, opt=None):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_value
+
+        with redirect_stdout(io.StringIO()):
+            with patch("builtins.input", return_value=answer):
+                return ask_value(opt or self._flag(), current)
+
+    def test_n_turns_a_flag_off_not_on(self):
+        self.assertIs(self._ask("n", current=True), False)
+        self.assertIs(self._ask("no", current=True), False)
+
+    def test_y_turns_a_flag_on(self):
+        self.assertIs(self._ask("y", current=False), True)
+        self.assertIs(self._ask("yes", current=False), True)
+
+    def test_bare_enter_still_toggles(self):
+        self.assertIs(self._ask("", current=False), True)
+        self.assertIs(self._ask("", current=True), False)
+
+    def test_unrecognised_input_reprompts_rather_than_toggling(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_value
+
+        with redirect_stdout(io.StringIO()):
+            with patch("builtins.input", side_effect=["maybe", "banana", "y"]) as m:
+                self.assertIs(ask_value(self._flag(), False), True)
+        self.assertEqual(m.call_count, 3)
+
+    def test_q_still_quits(self):
+        self.assertIsNone(self._ask("q"))
+
+    def test_y_n_respect_a_negating_rows_polarity(self):
+        """--no-verbose shares its dest with --verbose. Answering "y" to the
+        negating row means "yes, no-verbose" — so the dest goes False."""
+        from shepherd_dev.menu import OPTIONS
+
+        rows = {o.negates: o for o in OPTIONS["run"] if o.dest == "verbose"}
+        self.assertEqual(set(rows), {True, False}, "the pair must still exist")
+
+        self.assertIs(self._ask("y", current=None, opt=rows[True]), False)
+        self.assertIs(self._ask("n", current=None, opt=rows[True]), True)
+        # the non-negating row of the same pair reads the ordinary way
+        self.assertIs(self._ask("y", current=None, opt=rows[False]), True)
+        self.assertIs(self._ask("n", current=None, opt=rows[False]), False)
+
+
+class ChoiceClearTests(unittest.TestCase):
+    """The manual promises any field can be put back to its default, but a
+    choice cannot be cleared by typing "-" — ask_choice only takes a number —
+    so the escape has to be one of the numbered entries."""
+
+    def _provider(self):
+        from shepherd_dev.menu import OPTIONS
+
+        return next(o for o in OPTIONS["run"] if o.dest == "provider")
+
+    def test_the_last_entry_clears_the_field(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_value
+
+        opt = self._provider()
+        with redirect_stdout(io.StringIO()) as buf:
+            with patch("builtins.input", return_value=str(len(opt.choices) + 1)):
+                self.assertEqual(ask_value(opt, "static"), "-")
+        self.assertIn("(leave at default)", buf.getvalue())
+
+    def test_a_real_choice_still_comes_back(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_value
+
+        opt = self._provider()
+        with redirect_stdout(io.StringIO()):
+            with patch("builtins.input", return_value="2"):
+                self.assertEqual(ask_value(opt, None), opt.choices[1])
+
+    def test_clearing_a_choice_omits_the_flag_from_argv(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, MAIN, _tier_options, run_menu
+
+        opt = self._provider()
+        row = str(next(i for i, o in enumerate(_tier_options("run", MAIN), 1) if o.dest == "provider"))
+        answers = [
+            str(COMMANDS.index("run") + 1), "add X",
+            "e", row, "2",                              # pick a provider
+            "e", row, str(len(opt.choices) + 1),        # then clear it
+            "",
+        ]
+        argv: list[str] = []
+        with redirect_stdout(io.StringIO()):
+            with patch("builtins.input", side_effect=answers):
+                self.assertEqual(run_menu(argv), 0)
+        self.assertNotIn("--provider", argv)
+        # and the parser's own default applies
+        self.assertEqual(build_parser().parse_args(argv).provider, "claude")
+
+
+class EmptyTierTests(unittest.TestCase):
+    """`status` and `update` carry no MAIN options, so opening there showed a
+    heading with nothing under it — the user's first sight of the command."""
+
+    def _run(self, command, answers):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        argv: list[str] = []
+        with redirect_stdout(io.StringIO()) as buf:
+            with patch("builtins.input", side_effect=[str(COMMANDS.index(command) + 1), *answers]):
+                run_menu(argv)
+        return buf.getvalue(), argv
+
+    def test_a_command_with_no_main_options_opens_on_advanced(self):
+        from shepherd_dev.menu import MAIN, _tier_options
+
+        self.assertEqual(_tier_options("status", MAIN), [])  # the precondition
+        text, argv = self._run("status", [""])
+        self.assertIn("status — advanced settings", text)
+        self.assertNotIn("status — main settings", text)
+        self.assertEqual(argv, ["status"])
+
+    def test_a_command_with_main_options_still_opens_on_main(self):
+        text, _ = self._run("run", ["add X", ""])
+        self.assertIn("run — main settings", text)
+
+    def test_editing_an_empty_tier_says_so_rather_than_redrawing(self):
+        # status opens on advanced; switch to the empty main tier and press e
+        text, _ = self._run("status", ["a", "e", ""])
+        self.assertIn("nothing to edit here", text)
+
+
 if __name__ == "__main__":
     unittest.main()

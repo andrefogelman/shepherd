@@ -302,16 +302,43 @@ def ask_value(opt: Opt, current: object) -> object | None:
     """
     if opt.kind == "flag":
         on = (current is False) if opt.negates else bool(current)
-        answer = _read(f"{opt.flag}: currently {on} — [enter] toggles, q quits: ")
-        if answer is None or answer.lower() == "q":
-            return None
-        new_on = not on
+        # y/n rather than "any key toggles": the old prompt read EVERY
+        # non-q answer as a toggle, so typing "n" at what looks like a
+        # yes/no question turned the flag ON — a footgun on the likes of
+        # --reject. Bare Enter still toggles, which is what the row is for.
+        while True:
+            answer = _read(f"{opt.flag}: currently {on} — [enter] toggles · y/n · q quits: ")
+            if answer is None or answer.lower() == "q":
+                return None
+            lowered = answer.lower()
+            if lowered == "":
+                new_on = not on
+                break
+            if lowered in ("y", "yes"):
+                new_on = True
+                break
+            if lowered in ("n", "no"):
+                new_on = False
+                break
         return (not new_on) if opt.negates else new_on
     if opt.kind == "choice":
+        # A choice cannot be cleared by typing "-" the way a free-text field
+        # can (ask_choice only accepts a number), so the escape has to be one
+        # of the numbered entries — otherwise the manual's promise that any
+        # field can be put back to its default is false for --provider,
+        # --mode, --best-of and --worker-backend.
         for i, choice in enumerate(opt.choices, 1):
             print(f"    {i}) {choice}")
-        picked = ask_choice(f"  {opt.flag}", len(opt.choices))
-        return None if picked is None else opt.choices[picked - 1]
+        print(f"    {len(opt.choices) + 1}) (leave at default)")
+        picked = ask_choice(f"  {opt.flag}", len(opt.choices) + 1)
+        if picked is None:
+            return None
+        if picked == len(opt.choices) + 1:
+            # Same "-" the free-text branch returns, so _edit_loop has one
+            # clear path rather than two. Safe as a signal: no flag in the
+            # table offers "-" as a real choice.
+            return "-"
+        return opt.choices[picked - 1]
     # The prompt spells out both non-edit paths: bare Enter keeps the current
     # value (see _edit_loop's blank-input guard), "-" clears it back to
     # unset. Neither is discoverable without being shown.
@@ -456,6 +483,12 @@ def _prefill(command: str) -> tuple[dict[str, object], dict[str, str], dict[str,
     return values, origins, hints
 
 
+def _tier_options(command: str, tier: str) -> list[Opt]:
+    """The editable settings of one screen. Positionals are asked before the
+    screens exist, so they never appear on one."""
+    return [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
+
+
 def _summary(
     command: str,
     values: dict[str, object],
@@ -465,7 +498,7 @@ def _summary(
 ) -> None:
     origins = origins or {}
     hints = hints or {}
-    shown = [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
+    shown = _tier_options(command, tier)
     for i, opt in enumerate(shown, 1):
         value = values.get(opt.dest)
         if value in (None, "", []):
@@ -485,7 +518,11 @@ def _edit_loop(
     """Second and third screens. False means the user quit."""
     origins = {} if origins is None else origins
     hints = {} if hints is None else hints
-    tier = MAIN
+    # Open on whichever tier actually has something. `status` and `update`
+    # carry no MAIN options at all, so opening there showed a heading with
+    # nothing under it — the user's first sight of the command was an empty
+    # screen.
+    tier = MAIN if _tier_options(command, MAIN) else ADVANCED
     while True:
         print(f"\n{command} — {tier} settings\n")
         _summary(command, values, tier, origins, hints)
@@ -499,8 +536,10 @@ def _edit_loop(
             tier = other
             continue
         if answer.lower() == "e":
-            shown = [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
+            shown = _tier_options(command, tier)
             if not shown:
+                # Silently redrawing looked like the keypress was ignored.
+                print("\n  nothing to edit here")
                 continue
             picked = ask_choice("  which", len(shown))
             if picked is None:
@@ -531,7 +570,7 @@ def _edit_loop(
             # or a detected one — drop the recorded origin so the summary says
             # "chosen" rather than keeping a now-false "from repo".
             origins.pop(opt.dest, None)
-            if opt.kind == "value" and new == "-":
+            if opt.kind in ("value", "choice") and new == "-":
                 values[opt.dest] = ""
                 continue
             if opt.kind == "list" and new == ["-"]:

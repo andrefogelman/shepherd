@@ -233,9 +233,16 @@ de falhar depois; o `init` está no mesmo menu.
 **Limpando um campo.** Na tela de edição do menu, um Enter vazio num campo
 significa "deixa como está". Para limpar explicitamente um campo de volta ao
 não-definido — para que o default do parser se aplique neste run — digite um
-`-` sozinho. O prompt mostra isto. Importa principalmente quando um campo vem
-pré-preenchido do `.shepherd-dev.json` do repo: `-` é como você faz um run
-ignorar aquele valor salvo.
+`-` sozinho. Num campo que oferece lista de escolhas, escolha a última entrada,
+`(leave at default)`, já que essas só aceitam número. Nos dois casos o prompt
+mostra. Importa principalmente quando um campo vem pré-preenchido do
+`.shepherd-dev.json` do repo: limpar é como você faz um run ignorar o valor
+salvo.
+
+**Campos de sim/não.** Uma linha de flag aceita `y` ou `n` direto, e um Enter
+vazio inverte o que estiver valendo. Num par como `--verbose` / `--no-verbose` a
+resposta é lida nos termos da própria linha — `y` na linha `--no-verbose`
+significa "sim, sem verbose".
 
 **Múltiplas features para `runN`.** A entrada `runN` pede as features como uma
 única linha separada por vírgulas (`add X, add Y`). Espaços nas bordas são

@@ -233,9 +233,15 @@ failing later; `init` is in the same menu.
 
 **Clearing a field.** Inside the menu's edit screen, a bare Enter on a field means
 "leave unchanged". To explicitly clear a field back to unset — so the parser's own
-default applies for that run — type a single `-`. The prompt shows this. This matters
-most for a field pre-filled from the repo's `.shepherd-dev.json`: `-` is how you make
-one run ignore the repo's saved value.
+default applies for that run — type a single `-`. On a field that offers a list of
+choices, pick its last entry, `(leave at default)`, since those only take a number.
+Either way the prompt shows it. This matters most for a field pre-filled from the
+repo's `.shepherd-dev.json`: clearing is how you make one run ignore the saved value.
+
+**Yes/no fields.** A flag row takes `y` or `n` outright, and a bare Enter flips
+whatever it is now. On a paired flag like `--verbose` / `--no-verbose`, the answer
+is read in the row's own terms — `y` on the `--no-verbose` row means "yes, no
+verbose".
 
 **Multiple features for `runN`.** The `runN` entry asks for its features as one
 comma-separated line (`add X, add Y`). Surrounding whitespace is trimmed and empty
