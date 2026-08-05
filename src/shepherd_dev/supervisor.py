@@ -749,16 +749,25 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
         return False
 
 
-def build_diff_text(changeset, limit: int = DIFF_TEXT_LIMIT) -> str:
-    """Render a retained changeset's content entries as reviewer-readable text."""
+def _render_entries_as_diff_text(entries, limit: int = DIFF_TEXT_LIMIT) -> str:
+    """Render already-extracted content entries (rel path -> bytes) as the
+    same reviewer-readable `=== FILE: ... ===` text build_diff_text has
+    always produced — factored out so a second caller (the review-report
+    writer) renders a diff identically to what the reviewer itself saw,
+    rather than reimplementing this formatting a second time."""
     parts: list[str] = []
-    for rel, content in read_changeset_entries(changeset).items():
+    for rel, content in entries.items():
         text = content.decode("utf-8", errors="replace")
         parts.append(f"=== FILE: {rel} (proposed content) ===\n{text}")
     diff = "\n\n".join(parts)
     if len(diff) > limit:
         diff = diff[:limit] + f"\n\n[... truncated at {limit} chars ...]"
     return diff
+
+
+def build_diff_text(changeset, limit: int = DIFF_TEXT_LIMIT) -> str:
+    """Render a retained changeset's content entries as reviewer-readable text."""
+    return _render_entries_as_diff_text(read_changeset_entries(changeset), limit)
 
 
 def run_review(

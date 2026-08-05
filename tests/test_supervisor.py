@@ -24,6 +24,8 @@ from shepherd_dev.diffcollect import Entries  # noqa: E402
 from shepherd_dev.progress import ProgressReporter  # noqa: E402
 from shepherd_dev.supervisor import (  # noqa: E402
     _prior_attempt_guidance,
+    _render_entries_as_diff_text,
+    build_diff_text,
     develop,
     materialize_into,
     read_changeset_entries,
@@ -175,6 +177,40 @@ class ExecBitSurvives(unittest.TestCase):
         root = Path(mkdtemp())
         materialize_into(root, {"run.sh": b"#!/bin/sh\n"})
         self.assertFalse((root / "run.sh").stat().st_mode & 0o111)
+
+
+class RenderEntriesAsDiffTextTests(unittest.TestCase):
+    def test_renders_each_file_with_a_header(self):
+        text = _render_entries_as_diff_text({"a.py": b"A = 1\n", "b.py": b"B = 2\n"})
+        self.assertIn("=== FILE: a.py (proposed content) ===", text)
+        self.assertIn("A = 1", text)
+        self.assertIn("=== FILE: b.py (proposed content) ===", text)
+        self.assertIn("B = 2", text)
+
+    def test_truncates_past_the_limit(self):
+        text = _render_entries_as_diff_text({"big.py": b"x" * 100}, limit=20)
+        self.assertLessEqual(len(text), 20 + len("\n\n[... truncated at 20 chars ...]"))
+        self.assertIn("truncated at 20 chars", text)
+
+    def test_build_diff_text_still_delegates_correctly(self):
+        """build_diff_text takes a real changeset (with .changed_paths /
+        .read_file), not a plain dict — this proves the refactor didn't
+        change its existing (changeset-based) call contract."""
+        class _SimpleChangeset:
+            def __init__(self, files):
+                self._files = files
+
+            @property
+            def changed_paths(self):
+                return list(self._files)
+
+            def read_file(self, rel):
+                b = self._files.get(rel)
+                return (b, 0o644) if b is not None else None
+
+        text = build_diff_text(_SimpleChangeset({"a.py": b"A = 1\n"}))
+        self.assertIn("=== FILE: a.py (proposed content) ===", text)
+        self.assertIn("A = 1", text)
 
 
 if __name__ == "__main__":
