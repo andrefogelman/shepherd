@@ -204,12 +204,32 @@ def render_review_report(report: DevReport) -> str:
             lines.append(f"**{'APPROVED' if report.review.approved else 'REJECTED'}**")
             lines.append("")
             if report.review.summary:
-                lines.append(report.review.summary)
+                # Fenced for the same reason the diff and gate tail are: this
+                # is a model's free prose landing at column 0, so a line of it
+                # starting with `#` would forge one of this report's own
+                # section headings.
+                sf = _fence(report.review.summary)
+                lines += [f"{sf}text", report.review.summary, sf]
             if report.review.issues:
                 lines.append("")
                 lines.append("Issues:")
                 for issue in report.review.issues:
-                    lines.append(f"- {issue}")
+                    text = str(issue)
+                    if "\n" not in text:
+                        # A single-line issue cannot forge anything: the "- "
+                        # in front of it means no markdown block construct
+                        # starts at column 0. Keep it a real list item.
+                        lines.append(f"- {text}")
+                        continue
+                    # Multi-line: every line past the first IS at column 0, so
+                    # it needs the fence. Indenting alone would not do — an ATX
+                    # heading indented inside a list item still renders as a
+                    # heading, just a nested one.
+                    isf = _fence(text)
+                    lines.append("-")
+                    lines.append(f"  {isf}text")
+                    lines.extend(f"  {ln}" for ln in text.splitlines())
+                    lines.append(f"  {isf}")
         lines.append("")
 
     if report.ledger is not None:
