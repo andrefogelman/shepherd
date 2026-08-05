@@ -98,11 +98,11 @@ class LedgerRoundTests(unittest.TestCase):
         self.assertEqual(by_id[finding_id("issue A")].state, "open")
         self.assertEqual(by_id[finding_id("issue B")].state, "open")
 
-    def test_a_fixed_finding_that_comes_back_reopens(self):
+    def test_a_closed_finding_that_comes_back_reopens(self):
         led = Ledger()
         led.record_round(1, ["issue A"])
         led.record_round(2, [], approved=True)
-        self.assertEqual(led.findings[0].state, "fixed")
+        self.assertEqual(led.findings[0].state, "accepted")
         led.record_round(3, ["issue A"])
         self.assertEqual(led.findings[0].state, "open")
         self.assertEqual(led.findings[0].rounds, [1, 3])
@@ -202,13 +202,24 @@ class ClosureNeedsEvidenceTests(unittest.TestCase):
         self.assertEqual(by_id[finding_id("issue A")].state, "fixed")
         self.assertEqual(by_id[finding_id("issue B")].state, "open")
 
-    def test_approval_closes_whatever_is_still_open(self):
+    def test_approval_closes_whatever_is_still_open_as_accepted(self):
         # Approval IS the explicit judgement: the reviewer saw the open list
-        # and signed the change off anyway.
+        # and signed the change off anyway. But it closes them `accepted`, not
+        # `fixed` — signing the change off says nothing about whether THIS
+        # item was dealt with, and reporting it as fixed claimed work nobody
+        # did (findings read [fixed] while still in the delivered file).
         led = Ledger()
         led.record_round(1, ["issue A", "issue B"])
         led.record_round(2, [], approved=True)
-        self.assertEqual({f.state for f in led.findings}, {"fixed"})
+        self.assertEqual({f.state for f in led.findings}, {"accepted"})
+
+    def test_only_an_explicit_resolved_earns_fixed(self):
+        led = Ledger()
+        led.record_round(1, ["issue A", "issue B"])
+        led.record_round(2, [], resolved=[finding_id("issue A")], approved=True)
+        by_id = {f.id: f.state for f in led.findings}
+        self.assertEqual(by_id[finding_id("issue A")], "fixed")     # checked
+        self.assertEqual(by_id[finding_id("issue B")], "accepted")  # merely approved
 
     def test_a_re_raise_beats_a_resolved_claim_for_the_same_finding(self):
         # Contradictory verdict; the unsafe reading is the one that closes.

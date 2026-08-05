@@ -19,7 +19,11 @@ handed the open findings with their ids and answers about them directly: an
 item it still sees is re-raised under its id, an item it has verified as gone
 goes in `resolved`. Absence closes nothing on a rejection, because a rejecting
 reviewer that stopped mentioning something has told us nothing about it.
-Approval closes the rest — that one IS an explicit judgement over the change.
+
+Approval closes the rest, but as `accepted`, never `fixed`: it is a judgement
+over the change as a whole, not evidence that each remaining item was dealt
+with. Recording those as `fixed` made the ledger claim work nobody did —
+findings read `[fixed]` while still sitting in the delivered file.
 """
 
 from __future__ import annotations
@@ -29,7 +33,17 @@ import re
 from dataclasses import dataclass, field
 
 #: Findings leave the open set only through one of these.
-TERMINAL_STATES = ("fixed", "blocked", "refused")
+#:
+#: `fixed` is a claim about the CODE: this problem is gone. Only a reviewer
+#: naming the finding in `resolved` earns it — that is the one signal that
+#: says someone checked this item and found it addressed.
+#:
+#: `accepted` is a claim about the JUDGEMENT: the reviewer approved the change
+#: as a whole while this was still open. It closes the item without asserting
+#: the problem was solved, because approval does not say that. Stamping these
+#: `fixed` made the ledger report work that was never done — findings showed
+#: `[fixed]` while still sitting in the delivered file.
+TERMINAL_STATES = ("fixed", "accepted", "blocked", "refused")
 #: blocked/refused are human-or-agent judgements — they must say why.
 _REASON_REQUIRED = ("blocked", "refused")
 
@@ -160,7 +174,12 @@ class Ledger:
         if approved:
             for finding in self._by_id.values():
                 if finding.state == "open" and finding.rounds:
-                    finding.state = "fixed"
+                    # `accepted`, NOT `fixed`. Approval is a judgement over the
+                    # change as a whole; it is not evidence that this
+                    # particular finding was addressed. The reviewer may have
+                    # judged it tolerable, or simply not re-checked it. Only an
+                    # explicit `resolved` says the problem is gone.
+                    finding.state = "accepted"
 
     def close(self, finding_id_: str, state: str, reason: str | None = None) -> Finding:
         if state not in TERMINAL_STATES:
