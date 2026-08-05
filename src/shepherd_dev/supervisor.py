@@ -149,6 +149,71 @@ class DevReport:
         return "\n".join(lines)
 
 
+def render_review_report(report: DevReport) -> str:
+    """Durable markdown record of one develop() run: verdict, issues, the
+    full cross-round ledger history, and the actual proposed diff — the
+    same content DevReport.summary() prints to stdout, rendered so it
+    survives past the process that produced it. Never raises: a
+    malformed/partial report still gets a best-effort file rather than an
+    empty one.
+    """
+    lines = [
+        f"# Review report: {report.feature}",
+        "",
+        f"- outcome: `{report.outcome}`",
+        f"- succeeded: {report.succeeded}",
+    ]
+    if report.blocked_reason:
+        lines.append(f"- blocked: {report.blocked_reason}")
+    if report.final_run_ref:
+        lines.append(f"- run ref: `{report.final_run_ref}`")
+    lines.append("")
+
+    lines.append("## Attempts")
+    lines.append("")
+    for a in report.attempts:
+        lines.append(f"- attempt {a.number}: run=`{a.run_ref}` verdict={a.verdict} changed={len(a.changed_paths)}")
+        if a.error:
+            lines.append(f"  - error: {a.error}")
+        if a.gate and not a.gate.passed:
+            reason = a.gate.infra_error or a.gate.output_tail[-500:]
+            lines.append(f"  - gate: exit={a.gate.exit_code} {reason}")
+    lines.append("")
+
+    if report.review is not None:
+        lines.append("## Review")
+        lines.append("")
+        if report.review.error:
+            lines.append(f"UNAVAILABLE: {report.review.error}")
+        else:
+            lines.append(f"**{'APPROVED' if report.review.approved else 'REJECTED'}**")
+            lines.append("")
+            if report.review.summary:
+                lines.append(report.review.summary)
+            if report.review.issues:
+                lines.append("")
+                lines.append("Issues:")
+                for issue in report.review.issues:
+                    lines.append(f"- {issue}")
+        lines.append("")
+
+    if report.ledger is not None:
+        rendered = report.ledger.render()
+        if rendered:
+            lines.append("## Findings ledger")
+            lines.append("")
+            lines.append(rendered)
+            lines.append("")
+
+    if report.entries:
+        lines.append("## Diff")
+        lines.append("")
+        lines.append(_render_entries_as_diff_text(report.entries))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def materialize_into(
     root: Path, entries: dict[str, bytes], progress: list[str] | None = None
 ) -> list[str]:

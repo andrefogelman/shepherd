@@ -213,5 +213,72 @@ class RenderEntriesAsDiffTextTests(unittest.TestCase):
         self.assertIn("A = 1", text)
 
 
+class RenderReviewReportTests(unittest.TestCase):
+    def _report(self, *, succeeded=True, review=None, entries=None, blocked_reason=None):
+        from shepherd_dev.supervisor import Attempt, DevReport, GateResult
+
+        report = DevReport(feature="add CPF validation", succeeded=succeeded, repo="/r")
+        report.final_run_ref = "run-abc" if succeeded else None
+        report.attempts = [
+            Attempt(1, "run-abc", ["validators.py"], [], GateResult(True, 0, "ok"), "passed", duration_s=3.2)
+        ]
+        report.entries = entries
+        report.review = review
+        report.blocked_reason = blocked_reason
+        return report
+
+    def test_includes_feature_and_outcome(self):
+        from shepherd_dev.supervisor import render_review_report
+
+        text = render_review_report(self._report())
+        self.assertIn("add CPF validation", text)
+        self.assertIn("passed_unreviewed", text)  # no .review set
+
+    def test_includes_verdict_summary_and_issues(self):
+        from shepherd_dev.supervisor import ReviewVerdict, render_review_report
+
+        report = self._report(
+            review=ReviewVerdict(approved=False, summary="Two problems found.", issues=["missing null check", "off-by-one"])
+        )
+        text = render_review_report(report)
+        self.assertIn("REJECTED", text)
+        self.assertIn("Two problems found.", text)
+        self.assertIn("missing null check", text)
+        self.assertIn("off-by-one", text)
+
+    def test_includes_the_diff_when_entries_are_present(self):
+        from shepherd_dev.supervisor import render_review_report
+
+        report = self._report(entries={"validators.py": b"def validate_cpf(s): ...\n"})
+        text = render_review_report(report)
+        self.assertIn("=== FILE: validators.py (proposed content) ===", text)
+        self.assertIn("def validate_cpf", text)
+
+    def test_omits_a_diff_section_when_there_are_no_entries(self):
+        """A failed run (no passing proposal) still gets a report — just
+        without a diff section, since there is no content to show."""
+        from shepherd_dev.supervisor import render_review_report
+
+        report = self._report(succeeded=False, entries=None)
+        text = render_review_report(report)
+        self.assertNotIn("=== FILE:", text)
+
+    def test_includes_the_ledger_when_present(self):
+        from shepherd_dev.supervisor import Ledger, render_review_report
+
+        report = self._report()
+        report.ledger = Ledger()
+        report.ledger.record_round(1, ["cache is never invalidated"])
+        text = render_review_report(report)
+        self.assertIn("cache is never invalidated", text)
+
+    def test_includes_the_blocked_reason_when_present(self):
+        from shepherd_dev.supervisor import render_review_report
+
+        report = self._report(succeeded=False, blocked_reason="no progress after 3 attempts")
+        text = render_review_report(report)
+        self.assertIn("no progress after 3 attempts", text)
+
+
 if __name__ == "__main__":
     unittest.main()
