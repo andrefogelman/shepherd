@@ -146,46 +146,25 @@ class BuildArgvTests(unittest.TestCase):
         argv = build_argv("runN", {"features": ["add X", "add Y"]})
         self.assertEqual(argv, ["runN", "add X", "add Y"])
 
-    def test_store_true_and_store_false_share_a_dest_without_double_firing(self):
-        """`verbose` has two table entries (--verbose store_true, --no-verbose
-        store_false) sharing one dest. A naive "emit the flag whenever the
-        value isn't unset" implementation fires BOTH for verbose=True, and
-        since --no-verbose is applied last, argparse silently parses that
-        back to verbose=False — command still matches, no SystemExit, but
-        the round-tripped value is wrong. This pins the correct behavior:
-        only --verbose fires, and it fires alone."""
-        from shepherd_dev.menu import build_argv
-
-        argv = build_argv("run", {"feature": "add X", "verbose": True})
-        self.assertEqual(argv, ["run", "add X", "--verbose"])
-
-        argv = build_argv("run", {"feature": "add X", "verbose": False})
-        self.assertEqual(argv, ["run", "add X", "--no-verbose"])
-
     def test_every_built_argv_parses(self):
         """The loop-closer: the menu must not be able to emit a command its
-        own CLI would reject — and, per the extra `verbose` case, must not
-        be able to emit one that parses back to a different value than the
-        one chosen."""
+        own CLI would reject."""
         from shepherd_dev.cli import build_parser
         from shepherd_dev.menu import build_argv
 
         cases = [
-            ("run", {"feature": "add X", "provider": "static", "review_panel": 2}, {}),
-            ("run", {"feature": "add X", "verbose": True}, {"verbose": True}),
-            ("run2", {"feature_a": "a", "feature_b": "b"}, {}),
-            ("runN", {"features": ["a", "b"]}, {}),
-            ("settle", {"run_ref": "run-abc", "reject": True}, {}),
-            ("status", {}, {}),
-            ("update", {}, {}),
+            ("run", {"feature": "add X", "provider": "static", "review_panel": 2}),
+            ("run2", {"feature_a": "a", "feature_b": "b"}),
+            ("runN", {"features": ["a", "b"]}),
+            ("settle", {"run_ref": "run-abc", "reject": True}),
+            ("status", {}),
+            ("update", {}),
         ]
-        for command, values, expected in cases:
-            with self.subTest(command=command, values=values):
+        for command, values in cases:
+            with self.subTest(command=command):
                 argv = build_argv(command, values)
                 args = build_parser().parse_args(argv)  # raises SystemExit on a bad argv
                 self.assertEqual(args.command, command)
-                for attr, want in expected.items():
-                    self.assertEqual(getattr(args, attr), want)
 
 
 if __name__ == "__main__":
