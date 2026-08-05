@@ -201,7 +201,7 @@ em vez de fingir. `--no-gitignore` pula a parte do gitignore.
 
 Rode `shepherd-dev` sem argumentos num terminal e ele abre um menu:
 cada subcomando, depois as configurações do subcomando — as comuns primeiro,
-o resto atrás de `[a]`. Nada fica retido do menu.
+o resto atrás de `[a]`. Nada fica de fora do menu.
 
 Ele imprime a linha de comando equivalente antes de rodar, então o menu é também
 como você aprende (ou monta) o comando para colar num script:
@@ -212,6 +212,23 @@ como você aprende (ou monta) o comando para colar num script:
 O menu lê os defaults salvos do repo mas nunca os escreve — uma escolha
 feita no menu vale só para esse run. `shepherd-dev init` continua sendo o
 lugar para mudar os defaults do repo.
+
+**De onde veio cada valor.** Toda configuração na tela de resumo vem marcada:
+`[from repo]` para valor lido do `.shepherd-dev.json`, `[chosen]` depois que
+você edita, `(default)` quando nada está definido e vale o default do próprio
+comando. `--repo` e `--test-cmd` mostram além disso o que o comando resolveria
+sozinho, marcado `[detected]`, `[saved]` ou `[native]` — exibido para você ver
+onde o run vai cair, mas deliberadamente **fora** do comando: cravar um caminho
+absoluto da sua máquina numa linha feita para colar não ajudaria ninguém.
+
+**O que está esperando por você.** As entradas de `decide` trazem contagem:
+`settle-par` informa exatamente quantas propostas estão staged, e `settle`
+informa quantos runs recentes retiveram uma. `settle` diz "recent" e não
+"pending" de propósito — se uma proposta retida ainda está por liquidar é
+pergunta que só o substrato responde, e o menu não a faz.
+
+**Fora de um workspace,** as entradas `run`, `run2` e `runN` avisam disso em vez
+de falhar depois; o `init` está no mesmo menu.
 
 **Limpando um campo.** Na tela de edição do menu, um Enter vazio num campo
 significa "deixa como está". Para limpar explicitamente um campo de volta ao
@@ -225,7 +242,7 @@ ignorar aquele valor salvo.
 cortados e entradas vazias descartadas, então `add X, add Y` resulta em
 exatamente dois pedidos de feature.
 
-Stdin com pipe ou não-interativo nunca abre o menu: um `shepherd-dev` nu em CI
+Stdin com pipe ou não-interativo nunca abre o menu: um `shepherd-dev` sem argumentos em CI
 continua imprimindo o erro de uso, exatamente como antes.
 
 ## Ciclo básico

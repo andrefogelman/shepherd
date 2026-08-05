@@ -326,49 +326,169 @@ def ask_value(opt: Opt, current: object) -> object | None:
     return answer
 
 
+def _decide_counts() -> dict[str, str]:
+    """How much is waiting on the `decide` commands, for the first screen.
+
+    Only `settle-par` can be counted exactly: a staged proposal is a directory
+    under PROPOSALS_DIR and settling removes it. A `settle` proposal lives in
+    the substrate, and whether one is still unconsumed is a question only the
+    substrate can answer — which this module is deliberately not allowed to
+    ask. So `settle` reports recent runs that RETAINED a proposal and says
+    "recent", not "pending": claiming a precise pending count we cannot
+    actually compute would be the kind of confident-and-wrong number a menu
+    should never print.
+
+    Best-effort throughout — a first screen must never fail to draw because a
+    count could not be taken.
+    """
+    counts: dict[str, str] = {}
+    try:
+        from . import config
+        from .staging import PROPOSALS_DIR
+
+        repo_root = config.find_repo_root()
+        if repo_root is not None and (repo_root / PROPOSALS_DIR).is_dir():
+            staged = [p for p in (repo_root / PROPOSALS_DIR).iterdir() if p.is_dir()]
+            if staged:
+                counts["settle-par"] = f"{len(staged)} staged"
+    except Exception:
+        pass
+    try:
+        from .status import runs_status
+
+        retained = [
+            r for r in runs_status(limit=20)
+            if r.get("state") == "succeeded" and r.get("final_run_ref")
+        ]
+        if retained:
+            counts["settle"] = f"{len(retained)} recent"
+    except Exception:
+        pass
+    return counts
+
+
 def _pick_command() -> str | None:
     """First screen: the subcommands, grouped."""
     print("\nShepherd — supervised AI development\n")
+    counts = _decide_counts()
+    in_workspace = _repo_root() is not None
     ordered: list[str] = []
     for heading, names in GROUPS:
         print(f"  {heading}")
         for name in names:
             ordered.append(name)
-            print(f"    {len(ordered)}) {name}")
+            note = counts.get(name, "")
+            if not note and not in_workspace and name in ("run", "run2", "runN"):
+                # `init` is right there in the same menu, so say what is
+                # missing rather than hiding the entries or failing later.
+                note = "no workspace here — run init first"
+            suffix = f"  ({note})" if note else ""
+            print(f"    {len(ordered)}) {name}{suffix}")
         print()
     picked = ask_choice("choose", len(ordered))
     return None if picked is None else ordered[picked - 1]
 
 
-def _prefill(command: str) -> dict[str, object]:
-    """Values the repo already knows: read from config, never written back.
-    A one-off menu choice must not silently become the repo's default."""
+def _repo_root():
+    """The enclosing Shepherd workspace, or None. Never raises."""
+    try:
+        from . import config
+
+        return config.find_repo_root()
+    except Exception:
+        return None
+
+
+#: How `config.resolve_test_cmd`'s `source` reads on screen. Its "config"
+#: means "saved in this repo's .shepherd-dev.json", which "saved" says more
+#: plainly to someone looking at a menu.
+_TEST_CMD_ORIGIN = {"config": "saved", "detected": "detected", "native": "native"}
+
+
+def _prefill(command: str) -> tuple[dict[str, object], dict[str, str], dict[str, str]]:
+    """What the repo already knows, and where each piece came from.
+
+    Read-only, always: a one-off menu choice must not silently become the
+    repo's default.
+
+    Returns three mappings rather than folding them together, because they
+    mean different things:
+
+    - `values` — goes into argv. Only the repo's SAVED config lands here, as
+      before; the flag really is being set on the user's behalf.
+    - `origins` — how to label a value on screen ("from repo"); absent means
+      the user chose it.
+    - `hints`   — display only, never emitted. What a command would resolve
+      for itself if the flag is left alone: the enclosing workspace for
+      `--repo`, the resolved gate for `--test-cmd`. Emitting these would put
+      a machine-specific absolute path into the equivalent command the menu
+      prints for pasting, and would state as a choice something the user
+      never made.
+
+    `build_argv` still takes the plain dest->value mapping it was reviewed
+    against.
+    """
+    values: dict[str, object] = {}
+    origins: dict[str, str] = {}
+    hints: dict[str, str] = {}
+    repo_root = _repo_root()
+    if repo_root is None:
+        return values, origins, hints
+
     from . import config
 
-    values: dict[str, object] = {}
-    repo_root = config.find_repo_root()
-    if repo_root is None:
-        return values
     saved = config.load_config(repo_root)
     for opt in OPTIONS[command]:
         if opt.dest in saved:
             values[opt.dest] = saved[opt.dest]
-    return values
+            origins[opt.dest] = "from repo"
+
+    by_dest = {o.dest for o in OPTIONS[command]}
+    if "repo" in by_dest:
+        hints["repo"] = f"{repo_root}  [detected]"
+    if "test_cmd" in by_dest and "test_cmd" not in values:
+        try:
+            cmd, source, _ = config.resolve_test_cmd(repo_root, None)
+        except Exception:
+            cmd, source = None, "none"
+        if cmd:
+            hints["test_cmd"] = f"{cmd}  [{_TEST_CMD_ORIGIN.get(source, source)}]"
+    return values, origins, hints
 
 
-def _summary(command: str, values: dict[str, object], tier: str) -> None:
+def _summary(
+    command: str,
+    values: dict[str, object],
+    tier: str,
+    origins: dict[str, str] | None = None,
+    hints: dict[str, str] | None = None,
+) -> None:
+    origins = origins or {}
+    hints = hints or {}
     shown = [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
     for i, opt in enumerate(shown, 1):
         value = values.get(opt.dest)
-        print(f"    {i}) {opt.flag:<22} {value if value not in (None, '', []) else '(default)'}")
+        if value in (None, "", []):
+            hint = hints.get(opt.dest)
+            print(f"    {i}) {opt.flag:<22} {hint if hint else '(default)'}")
+            continue
+        origin = origins.get(opt.dest, "chosen")
+        print(f"    {i}) {opt.flag:<22} {value}  [{origin}]")
 
 
-def _edit_loop(command: str, values: dict[str, object]) -> bool:
+def _edit_loop(
+    command: str,
+    values: dict[str, object],
+    origins: dict[str, str] | None = None,
+    hints: dict[str, str] | None = None,
+) -> bool:
     """Second and third screens. False means the user quit."""
+    origins = {} if origins is None else origins
+    hints = {} if hints is None else hints
     tier = MAIN
     while True:
         print(f"\n{command} — {tier} settings\n")
-        _summary(command, values, tier)
+        _summary(command, values, tier, origins, hints)
         other = ADVANCED if tier == MAIN else MAIN
         answer = _read(f"\n  [enter] run · [e] edit · [a] {other} · [q] quit: ")
         if answer is None or answer.lower() == "q":
@@ -407,6 +527,10 @@ def _edit_loop(command: str, values: dict[str, object]) -> bool:
             # OPTIONS: none is a shell command, path, model name or number
             # that is legitimately the bare string "-", so it collides with
             # no real value.
+            # Whatever the user does below, the value stops being the repo's
+            # or a detected one — drop the recorded origin so the summary says
+            # "chosen" rather than keeping a now-false "from repo".
+            origins.pop(opt.dest, None)
             if opt.kind == "value" and new == "-":
                 values[opt.dest] = ""
                 continue
@@ -422,7 +546,7 @@ def run_menu(argv_out: list[str]) -> int | None:
     command = _pick_command()
     if command is None:
         return None
-    values = _prefill(command)
+    values, origins, hints = _prefill(command)
     for opt in (o for o in OPTIONS[command] if o.kind == "positional"):
         answer = ask_text(f"\n  {opt.dest}: ")
         if answer is None:  # quit — EOF or Ctrl-C, never run on that
@@ -450,7 +574,7 @@ def run_menu(argv_out: list[str]) -> int | None:
             values[opt.dest] = features
         else:
             values[opt.dest] = answer
-    if not _edit_loop(command, values):
+    if not _edit_loop(command, values, origins, hints):
         return None
     argv_out.extend(build_argv(command, values))
     return 0

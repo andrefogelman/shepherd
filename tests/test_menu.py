@@ -692,5 +692,152 @@ class RunMenuTests(unittest.TestCase):
         self.assertEqual(args.run_id, "last")
 
 
+class FirstScreenAnnotationTests(unittest.TestCase):
+    """The design spec asks the first screen to say what is waiting and where
+    it would run. These were specified and then dropped by the implementation
+    plan, so they arrive after the fact — hence their own class."""
+
+    def _screen(self, *, counts=None, in_workspace=True) -> str:
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        from shepherd_dev import menu
+
+        buf = io.StringIO()
+        with patch.object(menu, "_decide_counts", return_value=counts or {}), \
+             patch.object(menu, "_repo_root", return_value=("/r" if in_workspace else None)), \
+             patch("builtins.input", return_value="q"), \
+             redirect_stdout(buf):
+            menu._pick_command()
+        return buf.getvalue()
+
+    def _entry(self, text: str, name: str) -> str:
+        """The one numbered line for `name`. Matching on the whole screen is
+        too loose — "develop" also occurs inside the title's "development"."""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if ")" in stripped and stripped.split(")", 1)[1].strip().split()[:1] == [name]:
+                return stripped
+        raise AssertionError(f"no entry for {name!r} in:\n{text}")
+
+    def test_decide_entries_carry_their_counts(self):
+        text = self._screen(counts={"settle": "2 recent", "settle-par": "1 staged"})
+        self.assertIn("(2 recent)", self._entry(text, "settle"))
+        self.assertIn("(1 staged)", self._entry(text, "settle-par"))
+
+    def test_no_counts_means_no_annotation(self):
+        text = self._screen(counts={})
+        for name in ("settle", "settle-par"):
+            self.assertNotIn("(", self._entry(text, name))
+
+    def test_run_entries_say_so_when_there_is_no_workspace(self):
+        text = self._screen(in_workspace=False)
+        for name in ("run", "run2", "runN"):
+            self.assertIn("no workspace here", self._entry(text, name))
+        # maintenance entries are NOT marked — `init` is exactly what you want
+        # there, so telling the user it is missing would be noise
+        for name in ("init", "status", "update"):
+            self.assertNotIn("no workspace here", self._entry(text, name))
+
+    def test_no_marker_inside_a_workspace(self):
+        self.assertNotIn("no workspace here", self._screen(in_workspace=True))
+
+    def test_a_count_annotation_wins_over_the_workspace_marker(self):
+        """settle/settle-par are not run-family, so they never carry the
+        marker — but this pins that the two annotations cannot collide."""
+        text = self._screen(counts={"settle": "2 recent"}, in_workspace=False)
+        self.assertIn("(2 recent)", self._entry(text, "settle"))
+        self.assertIn("no workspace here", self._entry(text, "run"))
+
+
+class ProvenanceTests(unittest.TestCase):
+    def _summary_text(self, command, values, origins=None, hints=None, tier=None) -> str:
+        import io
+        from contextlib import redirect_stdout
+
+        from shepherd_dev.menu import MAIN, _summary
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _summary(command, values, tier or MAIN, origins or {}, hints or {})
+        return buf.getvalue()
+
+    def test_a_saved_value_is_labelled_from_repo(self):
+        text = self._summary_text("run", {"review_panel": 3}, {"review_panel": "from repo"})
+        self.assertIn("[from repo]", text)
+
+    def test_an_unlabelled_value_reads_as_chosen(self):
+        text = self._summary_text("run", {"review_panel": 3})
+        self.assertIn("[chosen]", text)
+
+    def test_an_unset_field_reads_as_default(self):
+        self.assertIn("(default)", self._summary_text("run", {}))
+
+    def test_a_hint_replaces_default_without_becoming_a_value(self):
+        from shepherd_dev.menu import ADVANCED
+
+        text = self._summary_text(
+            "run", {}, hints={"repo": "/some/repo  [detected]"}, tier=ADVANCED
+        )
+        self.assertIn("/some/repo  [detected]", text)
+
+    def test_editing_a_repo_value_relabels_it_as_chosen(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ADVANCED, MAIN, OPTIONS, _edit_loop
+
+        main = [o for o in OPTIONS["run"] if o.tier == MAIN and o.kind != "positional"]
+        pos = next(i for i, o in enumerate(main, 1) if o.dest == "review_panel")
+        values = {"review_panel": 3}
+        origins = {"review_panel": "from repo"}
+        with patch("builtins.input", side_effect=["e", str(pos), "5", ""]):
+            self.assertTrue(_edit_loop("run", values, origins))
+        self.assertEqual(values["review_panel"], "5")
+        self.assertNotIn("review_panel", origins)  # no longer the repo's
+
+
+class PrefillTests(unittest.TestCase):
+    def test_detected_values_are_hints_only_and_never_reach_argv(self):
+        """--repo resolved from the enclosing workspace must not be emitted:
+        it would bake a machine-specific absolute path into the equivalent
+        command the menu prints for pasting, and would present as a choice
+        something the user never made."""
+        from shepherd_dev.menu import _prefill, build_argv
+
+        values, _origins, hints = _prefill("status")
+        self.assertNotIn("repo", values)
+        argv = build_argv("status", values)
+        self.assertNotIn("--repo", argv)
+        if hints.get("repo"):  # only when run inside a workspace
+            self.assertIn("[detected]", hints["repo"])
+
+    def test_outside_a_workspace_everything_is_empty(self):
+        from unittest.mock import patch
+
+        from shepherd_dev import menu
+
+        with patch.object(menu, "_repo_root", return_value=None):
+            values, origins, hints = menu._prefill("run")
+        self.assertEqual((values, origins, hints), ({}, {}, {}))
+
+    def test_repo_root_never_raises(self):
+        from unittest.mock import patch
+
+        from shepherd_dev import menu
+
+        with patch("shepherd_dev.config.find_repo_root", side_effect=RuntimeError("boom")):
+            self.assertIsNone(menu._repo_root())
+
+    def test_decide_counts_never_raises(self):
+        from unittest.mock import patch
+
+        from shepherd_dev import menu
+
+        with patch("shepherd_dev.status.runs_status", side_effect=RuntimeError("boom")), \
+             patch("shepherd_dev.config.find_repo_root", side_effect=RuntimeError("boom")):
+            self.assertEqual(menu._decide_counts(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

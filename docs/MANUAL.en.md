@@ -214,6 +214,23 @@ The menu reads this repo's saved defaults but never writes them — a choice
 made in the menu applies to that run only. `shepherd-dev init` remains the
 place to change a repo's defaults.
 
+**Where each value came from.** Every setting on the summary screen is tagged:
+`[from repo]` for a value read out of `.shepherd-dev.json`, `[chosen]` once you
+edit it, `(default)` when nothing is set and the command's own default applies.
+`--repo` and `--test-cmd` additionally show what the command *would* resolve on
+its own, tagged `[detected]`, `[saved]` or `[native]` — shown so you can see
+where a run will land, but deliberately NOT put into the command, since baking a
+machine-specific absolute path into a line meant for pasting would help nobody.
+
+**What is waiting on you.** The `decide` entries carry a count: `settle-par`
+reports exactly how many proposals are staged, and `settle` reports how many
+recent runs retained one. `settle` says "recent" rather than "pending" on
+purpose — whether a retained proposal is still unsettled is a question only the
+substrate can answer, and the menu does not ask it.
+
+**Outside a workspace,** the `run`, `run2` and `runN` entries say so instead of
+failing later; `init` is in the same menu.
+
 **Clearing a field.** Inside the menu's edit screen, a bare Enter on a field means
 "leave unchanged". To explicitly clear a field back to unset — so the parser's own
 default applies for that run — type a single `-`. The prompt shows this. This matters
