@@ -999,6 +999,13 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             speculative_review=getattr(args, "speculative_review", False),
         )
     reporter.close(ok=report.succeeded)
+    if args.review_report:
+        from .supervisor import render_review_report
+
+        try:
+            Path(args.review_report).write_text(render_review_report(report), encoding="utf-8")
+        except Exception as exc:
+            print(f"warning: --review-report could not write {args.review_report}: {exc}", file=sys.stderr)
     if event_log is not None:
         event_log.emit(
             "run.summary",
@@ -2021,6 +2028,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-panel", type=int, default=None,
         help=f"K independent reviewers instead of 1 — approval needs unanimity "
              f"(default: the repo's saved init-time choice, else 1; max {MAX_REVIEW_PANEL})",
+    )
+    p_run.add_argument(
+        "--review-report", default=None, metavar="FILE",
+        help="write a durable markdown report (verdict, issues, ledger, diff) to this path",
     )
     p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
     p_run.add_argument(
