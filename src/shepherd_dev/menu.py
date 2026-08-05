@@ -30,6 +30,12 @@ class Opt:
     tier: str = ADVANCED
     choices: tuple[str, ...] = ()
     flag: str = ""  # "" for positionals
+    #: True only for the store_false half of a store_true/store_false pair
+    #: sharing one dest (currently just the three `--no-verbose` entries).
+    #: Such a `kind="flag"` entry fires on value is False; every other
+    #: flag fires on value is True. OptionTableDriftTests checks this
+    #: against the real action, so a wrong setting fails loudly.
+    negates: bool = False
 
 
 #: Menu order. `mcp` is absent on purpose: it is a stdio server for another
@@ -70,7 +76,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="no_plan", kind="flag", flag="--no-plan"),
         Opt(dest="quiet", kind="flag", flag="--quiet"),
         Opt(dest="verbose", kind="flag", flag="--verbose"),
-        Opt(dest="verbose", kind="flag", flag="--no-verbose"),
+        Opt(dest="verbose", kind="flag", flag="--no-verbose", negates=True),
         Opt(dest="no_watchdog", kind="flag", flag="--no-watchdog"),
         Opt(dest="fresh_adopt", kind="flag", flag="--fresh-adopt"),
         Opt(dest="json", kind="flag", flag="--json"),
@@ -97,7 +103,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
             choices=("claude", "static")),
         Opt(dest="no_review", kind="flag", flag="--no-review"),
         Opt(dest="verbose", kind="flag", flag="--verbose"),
-        Opt(dest="verbose", kind="flag", flag="--no-verbose"),
+        Opt(dest="verbose", kind="flag", flag="--no-verbose", negates=True),
         Opt(dest="auto_settle", kind="flag", flag="--auto-settle"),
         Opt(dest="no_settle", kind="flag", flag="--no-settle"),
         Opt(dest="no_context_pack", kind="flag", flag="--no-context-pack"),
@@ -129,7 +135,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="no_plan", kind="flag", flag="--no-plan"),
         Opt(dest="fresh_adopt", kind="flag", flag="--fresh-adopt"),
         Opt(dest="verbose", kind="flag", flag="--verbose"),
-        Opt(dest="verbose", kind="flag", flag="--no-verbose"),
+        Opt(dest="verbose", kind="flag", flag="--no-verbose", negates=True),
     ),
     "settle": (
         Opt(dest="run_ref", kind="positional", tier=MAIN),
@@ -170,18 +176,30 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
 }
 
 
+def _is_unset(value: object) -> bool:
+    """True when a value contributes nothing: absent, None, False, "" or []."""
+    return value is None or value is False or value == "" or value == []
+
+
 def build_argv(command: str, values: dict[str, object]) -> list[str]:
     """Assemble the argv for one command from the chosen values.
 
     A dest that is absent, None, False, "" or [] contributes nothing, so the
     parser's own default applies — the menu never has to know what that
     default is, and can never drift from it.
+
+    `verbose` is the one dest with two entries in the table: `--verbose`
+    and `--no-verbose` (`negates=True`) share it, mirroring argparse's
+    store_true/store_false pair. Each entry fires only for the value it
+    actually sets — the negating entry on False, the other on True —
+    otherwise both would fire together on a shared True/False and silently
+    flip the parsed result.
     """
     argv: list[str] = [command]
     table = OPTIONS[command]
     for opt in (o for o in table if o.kind == "positional"):
         value = values.get(opt.dest)
-        if value in (None, "", []):
+        if _is_unset(value):
             continue
         if isinstance(value, list):
             argv.extend(str(v) for v in value)
@@ -189,11 +207,14 @@ def build_argv(command: str, values: dict[str, object]) -> list[str]:
             argv.append(str(value))
     for opt in (o for o in table if o.kind != "positional"):
         value = values.get(opt.dest)
-        if value in (None, "", [], False):
-            continue
         if opt.kind == "flag":
-            argv.append(opt.flag)
-        elif opt.kind == "list":
+            fires = value is False if opt.negates else value is True
+            if fires:
+                argv.append(opt.flag)
+            continue
+        if _is_unset(value):
+            continue
+        if opt.kind == "list":
             for item in value:  # type: ignore[union-attr]
                 argv.extend([opt.flag, str(item)])
         else:

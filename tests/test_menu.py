@@ -81,6 +81,13 @@ class OptionTableDriftTests(unittest.TestCase):
                         opt.kind == "flag",
                         isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)),
                     )
+                    if opt.kind == "flag":
+                        self.assertEqual(
+                            opt.negates,
+                            isinstance(action, argparse._StoreFalseAction),
+                            "negates must be True exactly for the store_false half "
+                            "of a store_true/store_false pair",
+                        )
                     self.assertEqual(
                         opt.kind == "list",
                         isinstance(action, argparse._AppendAction),
@@ -145,6 +152,40 @@ class BuildArgvTests(unittest.TestCase):
 
         argv = build_argv("runN", {"features": ["add X", "add Y"]})
         self.assertEqual(argv, ["runN", "add X", "add Y"])
+
+    def test_store_true_and_store_false_share_a_dest_without_double_firing(self):
+        """`verbose` has two table entries (--verbose store_true, --no-verbose
+        store_false, negates=True) sharing one dest on run, run2 and runN.
+        A naive "emit the flag whenever the value isn't unset" implementation
+        fires BOTH for verbose=True, and since --no-verbose is applied last,
+        argparse silently parses that back to verbose=False — command still
+        matches, no SystemExit, but the round-tripped value is wrong. All
+        three commands also default verbose to True, so an implementation
+        that treats False as merely "unset" can never turn verbose off at
+        all. This pins the full round trip (chosen value -> argv -> parsed
+        value) for True, False and absent, on all three commands."""
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import build_argv
+
+        base_values = {
+            "run": {"feature": "add X"},
+            "run2": {"feature_a": "a", "feature_b": "b"},
+            "runN": {"features": ["a", "b"]},
+        }
+        for command, base in base_values.items():
+            for chosen in (True, False, None):
+                values = dict(base)
+                if chosen is not None:
+                    values["verbose"] = chosen
+                with self.subTest(command=command, chosen=chosen):
+                    argv = build_argv(command, values)
+                    self.assertLessEqual(
+                        sum(f in argv for f in ("--verbose", "--no-verbose")), 1,
+                        "at most one of --verbose/--no-verbose may fire",
+                    )
+                    args = build_parser().parse_args(argv)
+                    expected = True if chosen is None else chosen  # default is True
+                    self.assertEqual(args.verbose, expected)
 
     def test_every_built_argv_parses(self):
         """The loop-closer: the menu must not be able to emit a command its
