@@ -307,5 +307,149 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(ask_value(opt, current=[]), ["src/", "tests/"])
 
 
+class RunMenuTests(unittest.TestCase):
+    def test_quitting_the_first_screen_returns_none_and_writes_nothing(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import run_menu
+
+        argv: list[str] = []
+        with patch("builtins.input", return_value="q"):
+            self.assertIsNone(run_menu(argv))
+        self.assertEqual(argv, [])
+
+    def test_a_run_with_defaults_produces_a_parseable_argv(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        # 1) pick `run`  2) type the feature  3) [enter] to run
+        answers = [str(COMMANDS.index("run") + 1), "add CPF validation", ""]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertEqual(argv[:2], ["run", "add CPF validation"])
+        build_parser().parse_args(argv)  # must parse
+
+    def test_an_empty_feature_cancels_rather_than_running_empty(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("run") + 1), ""]  # pick run, then blank feature
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertIsNone(run_menu(argv))
+        self.assertEqual(argv, [])
+
+    def test_eof_anywhere_quits_without_raising(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import run_menu
+
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertIsNone(run_menu(argv))
+        self.assertEqual(argv, [])
+
+    def test_a_command_with_no_required_input_goes_straight_through(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        answers = [str(COMMANDS.index("status") + 1), ""]  # pick status, [enter] runs
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertEqual(argv, ["status"])
+        build_parser().parse_args(argv)
+
+    def test_editing_a_main_setting_reaches_the_argv(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import COMMANDS, OPTIONS, MAIN, run_menu
+
+        main_run = [o for o in OPTIONS["run"] if o.tier == MAIN and o.kind != "positional"]
+        panel_pos = next(i for i, o in enumerate(main_run, 1) if o.dest == "review_panel")
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "e",                              # edit a field
+            str(panel_pos),                   # pick --review-panel
+            "3",                              # its new value
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertIn("--review-panel", argv)
+        self.assertEqual(argv[argv.index("--review-panel") + 1], "3")
+
+    def test_a_blank_re_edit_of_a_value_field_leaves_it_unchanged(self):
+        """Decision (Task 4): ask_value's free-text branch returns "" on a
+        bare Enter rather than echoing back the current value the way
+        ask_text does. A naive edit loop would then blank a field the user
+        merely reopened to look at. _edit_loop treats that "" as "leave
+        unchanged" instead — this pins the round trip: set review_rounds to
+        7, reopen the same field, hit Enter with nothing typed, and confirm
+        7 survives into the argv rather than being cleared."""
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import COMMANDS, OPTIONS, MAIN, run_menu
+
+        main_run = [o for o in OPTIONS["run"] if o.tier == MAIN and o.kind != "positional"]
+        rounds_pos = next(i for i, o in enumerate(main_run, 1) if o.dest == "review_rounds")
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "e",                              # edit a field
+            str(rounds_pos),                  # pick --review-rounds
+            "7",                              # set it
+            "e",                              # edit again
+            str(rounds_pos),                  # pick --review-rounds again
+            "",                               # bare enter — must NOT blank it
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertIn("--review-rounds", argv)
+        self.assertEqual(argv[argv.index("--review-rounds") + 1], "7")
+
+    def test_a_blank_re_edit_of_a_list_field_leaves_it_unchanged(self):
+        """Same decision, extended to kind="list": ask_value returns [] on a
+        bare Enter for a list field too, so the same "leave unchanged"
+        treatment applies there for the same reason."""
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ADVANCED, COMMANDS, OPTIONS, run_menu
+
+        advanced_run = [o for o in OPTIONS["run"] if o.tier == ADVANCED and o.kind != "positional"]
+        prefix_pos = next(i for i, o in enumerate(advanced_run, 1) if o.dest == "allowed_prefix")
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "a",                              # switch to advanced settings
+            "e",                              # edit a field
+            str(prefix_pos),                  # pick --allowed-prefix
+            "src/, tests/",                   # set it
+            "e",                              # edit again
+            str(prefix_pos),                  # pick --allowed-prefix again
+            "",                               # bare enter — must NOT clear it
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertEqual(
+            argv.count("--allowed-prefix"), 2,
+            "the list set before the blank re-edit must survive intact",
+        )
+        self.assertIn("src/", argv)
+        self.assertIn("tests/", argv)
+
+
 if __name__ == "__main__":
     unittest.main()

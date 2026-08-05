@@ -285,3 +285,97 @@ def ask_value(opt: Opt, current: object) -> object | None:
     if opt.kind == "list":
         return [part.strip() for part in answer.split(",") if part.strip()]
     return answer
+
+
+def _pick_command() -> str | None:
+    """First screen: the subcommands, grouped."""
+    print("\nShepherd — supervised AI development\n")
+    ordered: list[str] = []
+    for heading, names in GROUPS:
+        print(f"  {heading}")
+        for name in names:
+            ordered.append(name)
+            print(f"    {len(ordered)}) {name}")
+        print()
+    picked = ask_choice("choose", len(ordered))
+    return None if picked is None else ordered[picked - 1]
+
+
+def _prefill(command: str) -> dict[str, object]:
+    """Values the repo already knows: read from config, never written back.
+    A one-off menu choice must not silently become the repo's default."""
+    from . import config
+
+    values: dict[str, object] = {}
+    repo_root = config.find_repo_root()
+    if repo_root is None:
+        return values
+    saved = config.load_config(repo_root)
+    for opt in OPTIONS[command]:
+        if opt.dest in saved:
+            values[opt.dest] = saved[opt.dest]
+    return values
+
+
+def _summary(command: str, values: dict[str, object], tier: str) -> None:
+    shown = [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
+    for i, opt in enumerate(shown, 1):
+        value = values.get(opt.dest)
+        print(f"    {i}) {opt.flag:<22} {value if value not in (None, '', []) else '(default)'}")
+
+
+def _edit_loop(command: str, values: dict[str, object]) -> bool:
+    """Second and third screens. False means the user quit."""
+    tier = MAIN
+    while True:
+        print(f"\n{command} — {tier} settings\n")
+        _summary(command, values, tier)
+        other = ADVANCED if tier == MAIN else MAIN
+        answer = _read(f"\n  [enter] run · [e] edit · [a] {other} · [q] quit: ")
+        if answer is None or answer.lower() == "q":
+            return False
+        if answer == "":
+            return True
+        if answer.lower() == "a":
+            tier = other
+            continue
+        if answer.lower() == "e":
+            shown = [o for o in OPTIONS[command] if o.tier == tier and o.kind != "positional"]
+            if not shown:
+                continue
+            picked = ask_choice("  which", len(shown))
+            if picked is None:
+                return False
+            opt = shown[picked - 1]
+            new = ask_value(opt, values.get(opt.dest))
+            if new is None:
+                return False
+            # ask_value's free-text branch returns "" (kind="value") or []
+            # (kind="list") on a bare Enter rather than echoing the current
+            # value back the way ask_text does. Left as-is, a user who opens
+            # a field just to look at it and hits Enter would blank it.
+            # Treat that bare-Enter result as "leave unchanged" instead:
+            # choice answers can't be "" here (ask_choice re-prompts until a
+            # valid pick or quit) and flag answers are always a bool, so this
+            # only ever intercepts the no-op case, never a real edit.
+            if opt.kind in ("value", "list") and new in ("", []):
+                continue
+            values[opt.dest] = new
+
+
+def run_menu(argv_out: list[str]) -> int | None:
+    """Fill argv_out with the argv the user assembled and return 0.
+    Return None when the user quit — nothing should run."""
+    command = _pick_command()
+    if command is None:
+        return None
+    values = _prefill(command)
+    for opt in (o for o in OPTIONS[command] if o.kind == "positional"):
+        answer = ask_text(f"\n  {opt.dest}: ")
+        if not answer:  # None (quit) or empty — never run on an empty required field
+            return None
+        values[opt.dest] = answer.split(",") if opt.dest == "features" else answer
+    if not _edit_loop(command, values):
+        return None
+    argv_out.extend(build_argv(command, values))
+    return 0
