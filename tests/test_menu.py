@@ -208,5 +208,84 @@ class BuildArgvTests(unittest.TestCase):
                 self.assertEqual(args.command, command)
 
 
+class PromptTests(unittest.TestCase):
+    """input() is the repo's established interaction primitive (_ask_decision,
+    _ask_review_panel). These follow the same EOF-safe shape."""
+
+    def test_choice_returns_a_one_based_index(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_choice
+
+        with patch("builtins.input", return_value="2"):
+            self.assertEqual(ask_choice("pick", 3), 2)
+
+    def test_choice_quits_on_q_eof_and_interrupt(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_choice
+
+        for side in ("q", EOFError, KeyboardInterrupt):
+            with self.subTest(side=side):
+                kw = {"return_value": side} if isinstance(side, str) else {"side_effect": side}
+                with patch("builtins.input", **kw):
+                    self.assertIsNone(ask_choice("pick", 3))
+
+    def test_choice_reprompts_on_garbage_and_out_of_range(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_choice
+
+        with patch("builtins.input", side_effect=["banana", "0", "9", "1"]) as m:
+            self.assertEqual(ask_choice("pick", 3), 1)
+        self.assertEqual(m.call_count, 4)
+
+    def test_text_empty_keeps_the_default(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_text
+
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(ask_text("feature", default="keep me"), "keep me")
+
+    def test_text_quits_on_eof(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_text
+
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertIsNone(ask_text("feature"))
+
+    def test_value_toggles_a_store_true_flag(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import Opt, ask_value
+
+        opt = Opt(dest="reject", kind="flag", flag="--reject")
+        with patch("builtins.input", return_value=""):
+            self.assertIs(ask_value(opt, current=False), True)
+        with patch("builtins.input", return_value=""):
+            self.assertIs(ask_value(opt, current=True), False)
+
+    def test_value_picks_from_choices(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import Opt, ask_value
+
+        opt = Opt(dest="provider", kind="choice", flag="--provider",
+                  choices=("claude", "static", "grok", "codex"))
+        with patch("builtins.input", return_value="2"):
+            self.assertEqual(ask_value(opt, current="claude"), "static")
+
+    def test_value_splits_a_list_on_commas(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import Opt, ask_value
+
+        opt = Opt(dest="allowed_prefix", kind="list", flag="--allowed-prefix")
+        with patch("builtins.input", return_value="src/, tests/"):
+            self.assertEqual(ask_value(opt, current=[]), ["src/", "tests/"])
+
+
 if __name__ == "__main__":
     unittest.main()

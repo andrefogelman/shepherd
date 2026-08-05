@@ -220,3 +220,55 @@ def build_argv(command: str, values: dict[str, object]) -> list[str]:
         else:
             argv.extend([opt.flag, str(value)])
     return argv
+
+
+def _read(prompt: str) -> str | None:
+    """One line from the user. None means quit — EOF (a closed or piped
+    stdin) and Ctrl-C both land here, and neither may raise past the menu."""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def ask_choice(prompt: str, n: int) -> int | None:
+    """A 1-based choice among n items. None = quit. Anything else re-asks."""
+    while True:
+        answer = _read(f"{prompt} [1-{n}, q quits]: ")
+        if answer is None or answer.lower() == "q":
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= n:
+            return int(answer)
+
+
+def ask_text(prompt: str, default: str = "") -> str | None:
+    answer = _read(prompt)
+    if answer is None:
+        return None
+    return answer or default
+
+
+def ask_value(opt: Opt, current: object) -> object | None:
+    """One setting's value, honoring opt.kind. None = quit.
+
+    The `flag` branch is a plain toggle (`not bool(current)`) regardless of
+    `opt.negates` — polarity is build_argv's concern, not this one's. See
+    OPTIONS' `negates` docstring.
+    """
+    if opt.kind == "flag":
+        answer = _read(f"{opt.flag}: currently {bool(current)} — [enter] toggles, q quits: ")
+        if answer is None or answer.lower() == "q":
+            return None
+        return not bool(current)
+    if opt.kind == "choice":
+        for i, choice in enumerate(opt.choices, 1):
+            print(f"    {i}) {choice}")
+        picked = ask_choice(f"  {opt.flag}", len(opt.choices))
+        return None if picked is None else opt.choices[picked - 1]
+    answer = _read(f"  {opt.flag} [{current if current not in (None, '', []) else 'unset'}]: ")
+    if answer is None:
+        return None
+    if opt.kind == "list":
+        return [part.strip() for part in answer.split(",") if part.strip()]
+    return answer
