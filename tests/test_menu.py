@@ -79,7 +79,7 @@ class OptionTableDriftTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         opt.kind == "flag",
-                        isinstance(action, argparse._StoreTrueAction),
+                        isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)),
                     )
                     self.assertEqual(
                         opt.kind == "list",
