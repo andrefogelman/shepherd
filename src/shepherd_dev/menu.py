@@ -233,13 +233,26 @@ def _read(prompt: str) -> str | None:
 
 
 def ask_choice(prompt: str, n: int) -> int | None:
-    """A 1-based choice among n items. None = quit. Anything else re-asks."""
+    """A 1-based choice among n items. None = quit. Anything else re-asks.
+
+    n < 1 has no valid answer and no way to reach it by re-prompting, so it
+    quits immediately rather than looping forever.
+    """
+    if n < 1:
+        return None
     while True:
         answer = _read(f"{prompt} [1-{n}, q quits]: ")
         if answer is None or answer.lower() == "q":
             return None
-        if answer.isdigit() and 1 <= int(answer) <= n:
-            return int(answer)
+        # str.isdigit() accepts Unicode digits (e.g. '²') that int() then
+        # rejects with ValueError — convert inside try/except, don't gate on
+        # isdigit(), so garbage input re-asks instead of raising past here.
+        try:
+            n_answer = int(answer)
+        except ValueError:
+            continue
+        if 1 <= n_answer <= n:
+            return n_answer
 
 
 def ask_text(prompt: str, default: str = "") -> str | None:

@@ -240,6 +240,26 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(ask_choice("pick", 3), 1)
         self.assertEqual(m.call_count, 4)
 
+    def test_choice_reprompts_on_a_non_decimal_unicode_digit(self):
+        """str.isdigit() is True for '²' but int('²') raises ValueError.
+        Must re-prompt, never raise past ask_choice."""
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_choice
+
+        with patch("builtins.input", side_effect=["²", "1"]) as m:
+            self.assertEqual(ask_choice("pick", 3), 1)
+        self.assertEqual(m.call_count, 2)
+
+    def test_choice_with_zero_items_quits_without_asking(self):
+        from unittest.mock import patch
+
+        from shepherd_dev.menu import ask_choice
+
+        with patch("builtins.input") as m:
+            self.assertIsNone(ask_choice("pick", 0))
+        m.assert_not_called()
+
     def test_text_empty_keeps_the_default(self):
         from unittest.mock import patch
 
