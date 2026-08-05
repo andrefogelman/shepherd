@@ -77,6 +77,15 @@ class OptionTableDriftTests(unittest.TestCase):
                     self.assertEqual(
                         opt.kind == "positional", not action.option_strings
                     )
+                    if opt.kind == "positional":
+                        self.assertEqual(
+                            opt.nargs, action.nargs or "",
+                            "nargs must mirror the parser's arity ('?' for an "
+                            "optional positional like trace's run_id, '+' for "
+                            "one-or-more like runN's features) so a positional "
+                            "whose arity changes is caught here rather than "
+                            "silently cancelling or mishandling the menu.",
+                        )
                     self.assertEqual(
                         opt.kind == "flag",
                         isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)),
@@ -186,6 +195,33 @@ class BuildArgvTests(unittest.TestCase):
                     args = build_parser().parse_args(argv)
                     expected = True if chosen is None else chosen  # default is True
                     self.assertEqual(args.verbose, expected)
+
+    def test_a_positional_value_starting_with_dash_gets_a_separator(self):
+        """I4 regression: free text beginning with '-' (a plausible feature
+        request like "--dry-run support") would otherwise be read as a flag
+        by argparse, since positionals are emitted with no `--` separator.
+        build_argv must insert one whenever a positional value starts with
+        '-', with the parsed positional equal to what was chosen."""
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import build_argv
+
+        argv = build_argv("run", {"feature": "--dry-run support", "review_panel": 3})
+        self.assertEqual(argv, ["run", "--review-panel", "3", "--", "--dry-run support"])
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.feature, "--dry-run support")
+        self.assertEqual(args.review_panel, 3)
+
+    def test_a_normal_positional_value_gets_no_separator(self):
+        """The common case (no leading dash) keeps today's shape — no `--`
+        clutter for the vast majority of feature requests."""
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import build_argv
+
+        argv = build_argv("run", {"feature": "add CPF validation", "review_panel": 3})
+        self.assertNotIn("--", argv)
+        self.assertEqual(argv, ["run", "add CPF validation", "--review-panel", "3"])
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.feature, "add CPF validation")
 
     def test_every_built_argv_parses(self):
         """The loop-closer: the menu must not be able to emit a command its
@@ -575,6 +611,85 @@ class RunMenuTests(unittest.TestCase):
         with patch("builtins.input", side_effect=answers):
             self.assertIsNone(run_menu(argv))
         self.assertEqual(argv, [])
+
+    def test_toggling_the_no_verbose_row_sets_verbose_false(self):
+        """I2 regression: choosing the --no-verbose row must produce
+        verbose=False (and --no-verbose in argv), not --verbose. ask_value
+        must present a negating row in its own terms (on = current is
+        False) rather than toggling the shared dest's raw boolean."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import ADVANCED, COMMANDS, OPTIONS, run_menu
+
+        advanced_run = [o for o in OPTIONS["run"] if o.tier == ADVANCED and o.kind != "positional"]
+        no_verbose_pos = next(
+            i for i, o in enumerate(advanced_run, 1) if o.dest == "verbose" and o.negates
+        )
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "a",                              # switch to advanced settings
+            "e",                              # edit a field
+            str(no_verbose_pos),              # pick --no-verbose
+            "",                                # toggle it
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertIn("--no-verbose", argv)
+        self.assertNotIn("--verbose", argv)
+        args = build_parser().parse_args(argv)
+        self.assertFalse(args.verbose)
+
+    def test_toggling_the_verbose_row_sets_verbose_true(self):
+        """The non-negating --verbose row must still toggle to True from
+        its default, unaffected by the I2 fix above."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import ADVANCED, COMMANDS, OPTIONS, run_menu
+
+        advanced_run = [o for o in OPTIONS["run"] if o.tier == ADVANCED and o.kind != "positional"]
+        verbose_pos = next(
+            i for i, o in enumerate(advanced_run, 1) if o.dest == "verbose" and not o.negates
+        )
+        answers = [
+            str(COMMANDS.index("run") + 1),  # pick run
+            "add X",                          # the feature
+            "a",                              # switch to advanced settings
+            "e",                              # edit a field
+            str(verbose_pos),                 # pick --verbose
+            "",                                # toggle it
+            "",                               # [enter] runs
+        ]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertIn("--verbose", argv)
+        self.assertNotIn("--no-verbose", argv)
+        args = build_parser().parse_args(argv)
+        self.assertTrue(args.verbose)
+
+    def test_trace_with_a_blank_run_id_uses_the_parsers_default(self):
+        """I3 regression: run_id is nargs='?' (default "last") — a bare
+        `shepherd-dev trace` (replay the most recent run) is its common
+        form. A blank answer must leave the positional unset so the
+        parser's own default applies, not cancel the whole menu."""
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import COMMANDS, run_menu
+
+        # pick trace, blank run_id, [enter] runs
+        answers = [str(COMMANDS.index("trace") + 1), "", ""]
+        argv: list[str] = []
+        with patch("builtins.input", side_effect=answers):
+            self.assertEqual(run_menu(argv), 0)
+        self.assertEqual(argv, ["trace"])
+        args = build_parser().parse_args(argv)
+        self.assertEqual(args.run_id, "last")
 
 
 if __name__ == "__main__":

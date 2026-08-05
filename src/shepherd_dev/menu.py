@@ -36,6 +36,14 @@ class Opt:
     #: flag fires on value is True. OptionTableDriftTests checks this
     #: against the real action, so a wrong setting fails loudly.
     negates: bool = False
+    #: argparse's `nargs` for a positional, mirrored as a string: "" for a
+    #: plain required single value (argparse's nargs=None), "+" for
+    #: one-or-more (runN's `features`), "?" for optional-with-a-default
+    #: (trace's `run_id`). Ignored for kind != "positional".
+    #: OptionTableDriftTests checks this against the real action's nargs,
+    #: so a positional whose arity changes is caught here rather than
+    #: silently cancelling the menu or losing the special-case handling.
+    nargs: str = ""
 
 
 #: Menu order. `mcp` is absent on purpose: it is a stdio server for another
@@ -119,7 +127,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="allowed_prefix", kind="list", flag="--allowed-prefix"),
     ),
     "runN": (
-        Opt(dest="features", kind="positional", tier=MAIN),
+        Opt(dest="features", kind="positional", tier=MAIN, nargs="+"),
         Opt(dest="repo", kind="value", flag="--repo"),
         Opt(dest="test_cmd", kind="value", flag="--test-cmd"),
         Opt(dest="provider", kind="choice", tier=MAIN, flag="--provider",
@@ -166,7 +174,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="json", kind="flag", flag="--json"),
     ),
     "trace": (
-        Opt(dest="run_id", kind="positional", tier=MAIN),
+        Opt(dest="run_id", kind="positional", tier=MAIN, nargs="?"),
         Opt(dest="full", kind="flag", tier=MAIN, flag="--full"),
         Opt(dest="json", kind="flag", flag="--json"),
     ),
@@ -194,31 +202,47 @@ def build_argv(command: str, values: dict[str, object]) -> list[str]:
     actually sets — the negating entry on False, the other on True —
     otherwise both would fire together on a shared True/False and silently
     flip the parsed result.
+
+    Positionals are collected separately from options and joined at the
+    end, because free text starting with `-` (a plausible feature request
+    like "--dry-run support") would otherwise be read as a flag by
+    argparse. A `--` separator is inserted before the positionals, but
+    ONLY when one of them actually starts with `-` — the common case keeps
+    today's positional-then-flags shape with no separator clutter.
     """
-    argv: list[str] = [command]
     table = OPTIONS[command]
+    positionals: list[str] = []
     for opt in (o for o in table if o.kind == "positional"):
         value = values.get(opt.dest)
         if _is_unset(value):
             continue
         if isinstance(value, list):
-            argv.extend(str(v) for v in value)
+            positionals.extend(str(v) for v in value)
         else:
-            argv.append(str(value))
+            positionals.append(str(value))
+    options: list[str] = []
     for opt in (o for o in table if o.kind != "positional"):
         value = values.get(opt.dest)
         if opt.kind == "flag":
             fires = value is False if opt.negates else value is True
             if fires:
-                argv.append(opt.flag)
+                options.append(opt.flag)
             continue
         if _is_unset(value):
             continue
         if opt.kind == "list":
             for item in value:  # type: ignore[union-attr]
-                argv.extend([opt.flag, str(item)])
+                options.extend([opt.flag, str(item)])
         else:
-            argv.extend([opt.flag, str(value)])
+            options.extend([opt.flag, str(value)])
+    argv: list[str] = [command]
+    if any(part.startswith("-") for part in positionals):
+        argv.extend(options)
+        argv.append("--")
+        argv.extend(positionals)
+    else:
+        argv.extend(positionals)
+        argv.extend(options)
     return argv
 
 
@@ -265,15 +289,24 @@ def ask_text(prompt: str, default: str = "") -> str | None:
 def ask_value(opt: Opt, current: object) -> object | None:
     """One setting's value, honoring opt.kind. None = quit.
 
-    The `flag` branch is a plain toggle (`not bool(current)`) regardless of
-    `opt.negates` — polarity is build_argv's concern, not this one's. See
-    OPTIONS' `negates` docstring.
+    The `flag` branch reads and writes in the ROW's own terms, not the
+    shared dest's raw boolean: `on` is whatever makes this row's label
+    true right now — `current is False` for the negating half of a pair
+    like `--no-verbose`, `bool(current)` for every other flag — and
+    toggling flips `on` before converting back to the dest's raw value.
+    Without this, a negating row would display and toggle the dest's raw
+    boolean directly: `--no-verbose` at its default (dest is None, i.e.
+    falsy) would read "currently False" (as if off) and toggling it would
+    set the dest True — producing `--verbose`, the opposite of the row
+    picked. See OPTIONS' `negates` docstring.
     """
     if opt.kind == "flag":
-        answer = _read(f"{opt.flag}: currently {bool(current)} — [enter] toggles, q quits: ")
+        on = (current is False) if opt.negates else bool(current)
+        answer = _read(f"{opt.flag}: currently {on} — [enter] toggles, q quits: ")
         if answer is None or answer.lower() == "q":
             return None
-        return not bool(current)
+        new_on = not on
+        return (not new_on) if opt.negates else new_on
     if opt.kind == "choice":
         for i, choice in enumerate(opt.choices, 1):
             print(f"    {i}) {choice}")
@@ -392,9 +425,19 @@ def run_menu(argv_out: list[str]) -> int | None:
     values = _prefill(command)
     for opt in (o for o in OPTIONS[command] if o.kind == "positional"):
         answer = ask_text(f"\n  {opt.dest}: ")
-        if not answer:  # None (quit) or empty — never run on an empty required field
+        if answer is None:  # quit — EOF or Ctrl-C, never run on that
             return None
-        if opt.dest == "features":
+        if not answer:
+            if opt.nargs == "?":
+                # An optional positional (trace's run_id, nargs="?",
+                # default="last") has a sensible default of its own — a
+                # blank answer means "use it," not "cancel." Leaving
+                # values[opt.dest] unset is enough: build_argv already
+                # omits any unset positional, so the parser's own default
+                # applies.
+                continue
+            return None  # a required field, blank cancels
+        if opt.nargs == "+":
             # Strip each part and drop empties, matching ask_value's list
             # branch (kind="list") — a bare split(",") lets a stray comma
             # ("a,,b") or trailing comma ("a, ") through as an EMPTY feature

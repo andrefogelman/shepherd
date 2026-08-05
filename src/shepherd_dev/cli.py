@@ -2219,10 +2219,14 @@ def _equivalent_command(argv: list[str]) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) == 1 and sys.stdin.isatty():
+    if len(sys.argv) == 1 and sys.stdin is not None and sys.stdin.isatty():
         # A bare, interactive invocation gets the menu. Piped or CI stdin
         # deliberately does not: it keeps today's usage error and exit 2, so
-        # adding the menu changes nothing for existing automation.
+        # adding the menu changes nothing for existing automation. `sys.stdin`
+        # is None (not just non-tty) when fd 0 is closed outright — CPython
+        # sets it that way at startup — and `.isatty()` would raise on None,
+        # turning an already-failing invocation into a traceback instead of
+        # today's usage error.
         from . import menu
 
         argv: list[str] = []
