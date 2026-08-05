@@ -198,6 +198,35 @@ If your stack isn't auto-detected, state it once: `shepherd-dev init
 --test-cmd "…"`. With no test command at all there is no gate — the tool says
 so instead of pretending. `--no-gitignore` skips the gitignore step.
 
+### Starting without remembering the flags
+
+Run `shepherd-dev` with no arguments in a terminal and it opens a menu:
+every subcommand, then that subcommand's settings — the common ones first,
+the rest behind `[a]`. Nothing is withheld from the menu.
+
+It prints the equivalent command line before running, so the menu is also
+how you learn (or assemble) the command to paste into a script:
+
+    equivalent:
+      shepherd-dev run 'add CPF validation' --review-panel 3
+
+The menu reads this repo's saved defaults but never writes them — a choice
+made in the menu applies to that run only. `shepherd-dev init` remains the
+place to change a repo's defaults.
+
+**Clearing a field.** Inside the menu's edit screen, a bare Enter on a field means
+"leave unchanged". To explicitly clear a field back to unset — so the parser's own
+default applies for that run — type a single `-`. The prompt shows this. This matters
+most for a field pre-filled from the repo's `.shepherd-dev.json`: `-` is how you make
+one run ignore the repo's saved value.
+
+**Multiple features for `runN`.** The `runN` entry asks for its features as one
+comma-separated line (`add X, add Y`). Surrounding whitespace is trimmed and empty
+entries are dropped, so `add X, add Y` gives exactly two feature requests.
+
+Piped or non-interactive stdin never gets the menu: a bare `shepherd-dev`
+in CI keeps printing the usage error, exactly as before.
+
 ## The basic loop
 
 From inside the repo, the everyday command is just the feature. `--repo`
