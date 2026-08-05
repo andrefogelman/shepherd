@@ -933,6 +933,8 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
 
     # ── Hosted paths (L1 host / L2 try): no Claude, no workspace.run by default ──
     if args.provider in ("grok", "codex"):
+        if args.review_report:
+            print("warning: --review-report is not written for this run path", file=sys.stderr)
         return _cmd_run_hosted(args, repo_root, feature, pack, pack_stats, provider=args.provider)
 
     error = _refresh_substrate(repo_root, fresh=getattr(args, "fresh_adopt", False))
@@ -964,6 +966,8 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     reviewer = None if (args.no_review or args.provider == "static") else review
 
     if args.best_of > 1:
+        if args.review_report:
+            print("warning: --review-report is not written for this run path", file=sys.stderr)
         return _run_best_of(args, repo_root, worker, reviewer, policy, placement, feature, pack, pack_stats)
 
     from .progress import NullProgress, ProgressReporter, VerboseReporter

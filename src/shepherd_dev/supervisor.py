@@ -149,6 +149,15 @@ class DevReport:
         return "\n".join(lines)
 
 
+def _fence(text: str) -> str:
+    """A backtick fence at least one tick longer than any run already inside
+    `text`, so embedded proposal/gate content can never close the fence early
+    (or, being inside a fenced block at all, be parsed as markdown headings
+    or section boundaries of its own) — see render_review_report."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def render_review_report(report: DevReport) -> str:
     """Durable markdown record of one develop() run: verdict, issues, the
     full cross-round ledger history, and the actual proposed diff — the
@@ -175,9 +184,15 @@ def render_review_report(report: DevReport) -> str:
         lines.append(f"- attempt {a.number}: run=`{a.run_ref}` verdict={a.verdict} changed={len(a.changed_paths)}")
         if a.error:
             lines.append(f"  - error: {a.error}")
+        for v in a.policy_violations:
+            lines.append(f"  - policy: {v}")
         if a.gate and not a.gate.passed:
             reason = a.gate.infra_error or a.gate.output_tail[-500:]
-            lines.append(f"  - gate: exit={a.gate.exit_code} {reason}")
+            lines.append(f"  - gate: exit={a.gate.exit_code}")
+            gf = _fence(reason)
+            lines.append(f"    {gf}text")
+            lines.extend(f"    {ln}" for ln in reason.splitlines())
+            lines.append(f"    {gf}")
     lines.append("")
 
     if report.review is not None:
@@ -208,7 +223,9 @@ def render_review_report(report: DevReport) -> str:
     if report.entries:
         lines.append("## Diff")
         lines.append("")
-        lines.append(_render_entries_as_diff_text(report.entries))
+        body = _render_entries_as_diff_text(report.entries)
+        f = _fence(body)
+        lines += [f"{f}text", body, f]
         lines.append("")
 
     return "\n".join(lines)

@@ -279,6 +279,71 @@ class RenderReviewReportTests(unittest.TestCase):
         text = render_review_report(report)
         self.assertIn("no progress after 3 attempts", text)
 
+    def test_policy_violations_reach_the_report(self):
+        """summary() renders policy_violations; render_review_report must
+        not be a downgrade for the one failure class where stdout names
+        WHICH rule was violated (final review, Important #1)."""
+        from shepherd_dev.supervisor import Attempt, render_review_report
+
+        report = self._report(succeeded=False)
+        report.attempts = [
+            Attempt(1, "run-xyz", ["etc/passwd"], ["path escapes allowed prefixes"], None, "policy_rejected")
+        ]
+        text = render_review_report(report)
+        self.assertIn("path escapes allowed prefixes", text)
+
+    def test_diff_content_is_fenced_against_the_reports_own_structure(self):
+        """A proposal file containing '## Diff' and a ``` fence must not be
+        able to forge the report's own section boundaries (final review,
+        Important #2)."""
+        from shepherd_dev.supervisor import render_review_report
+
+        tricky = "# My Project\n\n## Diff\n\n```bash\nnpm i\n```\n"
+        report = self._report(entries={"README.md": tricky.encode()})
+        text = render_review_report(report)
+        lines = text.splitlines()
+
+        # the report's own "## Diff" heading is the first occurrence; it is
+        # immediately followed by a blank line and an opening fence longer
+        # than any backtick run inside the embedded content.
+        heading = lines.index("## Diff")
+        self.assertEqual(lines[heading + 1], "")
+        opener = lines[heading + 2]
+        self.assertRegex(opener, r"^````+text$")
+        closer = opener.removesuffix("text")
+        closer_idx = lines.index(closer, heading + 3)
+
+        # everything the proposal contributed — including its own "## Diff"
+        # line and its own ``` fence, which are too short to close ours —
+        # sits strictly inside the fence.
+        body_lines = lines[heading + 3:closer_idx]
+        self.assertIn("## Diff", body_lines)
+        self.assertIn("```bash", body_lines)
+
+    def test_gate_tail_is_fenced_against_the_reports_own_structure(self):
+        """Multi-line gate output containing '## Attempts' and a ``` fence
+        must not be able to forge the report's own structure either (final
+        review, Important #2)."""
+        from shepherd_dev.supervisor import Attempt, GateResult, render_review_report
+
+        tricky_output = "## Attempts\n\n```\nsome pytest output\n```\n"
+        report = self._report(succeeded=False)
+        report.attempts = [
+            Attempt(1, "run-xyz", ["a.py"], [], GateResult(False, 1, tricky_output), "tests_failed")
+        ]
+        text = render_review_report(report)
+        lines = text.splitlines()
+
+        gate_idx = next(i for i, ln in enumerate(lines) if ln.strip().startswith("- gate: exit=1"))
+        opener = lines[gate_idx + 1].strip()
+        self.assertRegex(opener, r"^````+text$")
+        closer = opener.removesuffix("text")
+        closer_idx = next(i for i in range(gate_idx + 2, len(lines)) if lines[i].strip() == closer)
+
+        body_lines = [lines[i].strip() for i in range(gate_idx + 2, closer_idx)]
+        self.assertIn("## Attempts", body_lines)
+        self.assertIn("```", body_lines)
+
 
 if __name__ == "__main__":
     unittest.main()

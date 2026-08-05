@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmpdirs import mkdtemp  # noqa: E402
 
 try:
     import shepherd as _sp  # noqa: F401
@@ -38,7 +40,7 @@ class ReviewReportFlagParsingTests(unittest.TestCase):
 @unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
 class ReviewReportCliIntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="shepherd-review-report-"))
+        self.tmp = Path(mkdtemp(prefix="shepherd-review-report-"))
         (self.tmp / "src").mkdir()
         (self.tmp / "src" / "a.py").write_text("V = 1\n")
         subprocess.run(["git", "init", "-q"], cwd=self.tmp, check=True)
@@ -75,6 +77,28 @@ class ReviewReportCliIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)  # run itself still succeeds
         self.assertIn("review-report", result.stderr.lower())  # a warning was printed
+
+    def test_review_report_is_a_silent_no_op_no_longer_on_best_of(self):
+        """--best-of returns from _cmd_run_inner before the write block ever
+        runs, so the flag used to be a silent no-op there (final review,
+        Important #3). --best-of 2 --no-review --provider static is the
+        cheapest combination that genuinely reaches _run_best_of: best-of
+        with a non-static provider requires review for ranking, but the
+        static provider is explicitly exempted from that requirement
+        (cli.py's `args.best_of > 1 and args.no_review and args.provider
+        not in ("static",)` guard), so this needs no model access."""
+        out = self.tmp / "review.md"
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "shepherd_dev.cli", "run", "add a comment to a.py",
+                "--repo", str(self.tmp), "--provider", "static", "--no-review",
+                "--best-of", "2", "--review-report", str(out),
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not written for this run path", result.stderr)
+        self.assertFalse(out.exists(), "no file should be written on the best-of path")
 
 
 if __name__ == "__main__":

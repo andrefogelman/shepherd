@@ -480,7 +480,7 @@ different choice, or `--review-panel` is passed explicitly. Cost is K× the
 review tokens per round; wall-clock stays close to a single review since
 the K reviewers run concurrently.
 
-`--review-report FILE` writes the run's verdict, issues, findings-ledger
+**`--review-report FILE`** writes the run's verdict, issues, findings-ledger
 history, and the actual proposed diff to `FILE` as markdown — durable,
 independent of however stdout gets captured (or discarded) by whatever
 launched the run. Written once, at the end of the run, from the same
