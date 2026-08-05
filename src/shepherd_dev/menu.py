@@ -168,3 +168,49 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="force", kind="flag", flag="--force"),
     ),
 }
+
+
+def _is_unset(value: object) -> bool:
+    """True when a value contributes nothing: absent, None, False, "" or []."""
+    return value is None or value is False or value == "" or value == []
+
+
+def build_argv(command: str, values: dict[str, object]) -> list[str]:
+    """Assemble the argv for one command from the chosen values.
+
+    A dest that is absent, None, False, "" or [] contributes nothing, so the
+    parser's own default applies — the menu never has to know what that
+    default is, and can never drift from it.
+
+    `verbose` is the one dest with two entries in the table: `--verbose`
+    (store_true) and `--no-verbose` (store_false) share it, mirroring
+    argparse. Each entry fires only for the value it actually sets — the
+    "--no-" entry on False, the other on True — otherwise both would fire
+    together on a shared True/False and silently flip the parsed result.
+    """
+    argv: list[str] = [command]
+    table = OPTIONS[command]
+    for opt in (o for o in table if o.kind == "positional"):
+        value = values.get(opt.dest)
+        if _is_unset(value):
+            continue
+        if isinstance(value, list):
+            argv.extend(str(v) for v in value)
+        else:
+            argv.append(str(value))
+    for opt in (o for o in table if o.kind != "positional"):
+        value = values.get(opt.dest)
+        if opt.kind == "flag":
+            negates = opt.flag == "--no-" + opt.dest.replace("_", "-")
+            fires = value is False if negates else value is True
+            if fires:
+                argv.append(opt.flag)
+            continue
+        if _is_unset(value):
+            continue
+        if opt.kind == "list":
+            for item in value:  # type: ignore[union-attr]
+                argv.extend([opt.flag, str(item)])
+        else:
+            argv.extend([opt.flag, str(value)])
+    return argv
