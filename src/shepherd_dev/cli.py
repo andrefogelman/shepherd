@@ -2207,8 +2207,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _equivalent_command(argv: list[str]) -> str:
+    """The command line the menu just assembled, quoted so it can be pasted.
+
+    Built from the argv actually being executed, so it can never disagree
+    with what runs.
+    """
+    import shlex
+
+    return "shepherd-dev " + shlex.join(argv)
+
+
 def main() -> int:
-    args = build_parser().parse_args()
+    if len(sys.argv) == 1 and sys.stdin.isatty():
+        # A bare, interactive invocation gets the menu. Piped or CI stdin
+        # deliberately does not: it keeps today's usage error and exit 2, so
+        # adding the menu changes nothing for existing automation.
+        from . import menu
+
+        argv: list[str] = []
+        if menu.run_menu(argv) is None:
+            return 0
+        print(f"\nequivalent:\n  {_equivalent_command(argv)}\n")
+        print("─" * 40)
+        args = build_parser().parse_args(argv)
+    else:
+        args = build_parser().parse_args()
     # Update notice: cache-only at the end (zero added latency); a stale cache
     # refreshes in a background thread for the NEXT invocation. Skipped for the
     # MCP server (a long-lived subprocess whose stderr is the client's log).
