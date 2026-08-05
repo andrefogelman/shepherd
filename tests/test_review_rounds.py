@@ -453,5 +453,80 @@ class TheAttemptLabelNamesItsOwnBudget(unittest.TestCase):
                         self.assertGreaterEqual(position, 1)
 
 
+class QuotaAbortsTests(unittest.TestCase):
+    """An exhausted API allowance is not a transient failure. Retrying spent
+    all three attempts in seconds and reported the same 429 three times."""
+
+    QUOTA = (
+        "RunStartError: agent run failed to start: api_error_status: 429 "
+        "You have reached your weekly limit. Resets at 2026-08-09 03:00 UTC"
+    )
+    RATE = "api_error_status: 429 rate_limit_error: too many requests, slow down"
+
+    def test_the_detector_separates_a_spent_allowance_from_a_rate_limit(self):
+        from shepherd_dev.supervisor import _quota_exhausted
+
+        self.assertIsNone(_quota_exhausted(Exception(self.RATE)))
+        self.assertIsNone(_quota_exhausted(Exception("ConnectionError: boom")))
+        reason = _quota_exhausted(Exception(self.QUOTA))
+        self.assertIsNotNone(reason)
+        self.assertIn("allowance is exhausted", reason)
+
+    def test_the_reset_time_reaches_the_message(self):
+        from shepherd_dev.supervisor import _quota_exhausted
+
+        # the API already says when it lifts; repeating it saves the user
+        # guessing when to come back
+        self.assertIn("2026-08-09 03:00 UTC", _quota_exhausted(Exception(self.QUOTA)))
+
+    def _develop(self, error: str, max_attempts: int = 3):
+        from pathlib import Path
+
+        from shepherd_dev import supervisor as sup
+
+        calls = {"runs": 0}
+
+        class _Tasks:
+            def register(self, task):
+                pass
+
+        class _Workspace:
+            tasks = _Tasks()
+
+            def run(self, task, **kw):
+                calls["runs"] += 1
+                raise RuntimeError(error)
+
+        orig = sup._start_gate_warmup
+        sup._start_gate_warmup = lambda *a, **k: None
+        try:
+            report = sup.develop(
+                _Workspace(), object(), repo=object(), repo_root=Path("/r"),
+                feature="add X", test_cmd="pytest -q", max_attempts=max_attempts,
+            )
+        finally:
+            sup._start_gate_warmup = orig
+        return report, calls
+
+    def test_a_spent_allowance_stops_after_one_attempt(self):
+        report, calls = self._develop(self.QUOTA)
+        self.assertEqual(calls["runs"], 1, "the remaining attempts must not be spent")
+        self.assertEqual(len(report.attempts), 1)
+        self.assertFalse(report.succeeded)
+
+    def test_the_report_says_why_rather_than_looking_like_a_worker_bug(self):
+        report, _ = self._develop(self.QUOTA)
+        self.assertIsNotNone(report.blocked_reason)
+        self.assertIn("allowance is exhausted", report.blocked_reason)
+        self.assertIn("2026-08-09 03:00 UTC", report.blocked_reason)
+        self.assertEqual(report.outcome, "blocked")
+
+    def test_an_ordinary_rate_limit_still_gets_its_retries(self):
+        report, calls = self._develop(self.RATE)
+        self.assertEqual(calls["runs"], 3, "backing off is the right answer to this one")
+        self.assertEqual(len(report.attempts), 3)
+        self.assertIsNone(report.blocked_reason)
+
+
 if __name__ == "__main__":
     unittest.main()

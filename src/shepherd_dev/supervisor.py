@@ -605,6 +605,43 @@ def _attempt_label(
     return f"attempt {position}/{max_attempts} · round {round_no}/{review_rounds}"
 
 
+#: A 429 that means "your allowance is spent", not "you are going too fast".
+#: The distinction decides whether retrying can possibly help: a rate limit
+#: clears in seconds, an exhausted weekly/daily allowance does not, and the
+#: three attempts a run is given would burn in under a minute learning the
+#: same thing three times.
+_QUOTA_MARKERS = (
+    "weekly limit",
+    "usage limit",
+    "quota exceeded",
+    "quota_exceeded",
+    "insufficient_quota",
+    "credit balance is too low",
+)
+#: Windows the message may name, in the order we would rather report them.
+_RESET_HINT = re.compile(
+    r"(resets?|try again|available again)[^.\n]{0,60}", re.IGNORECASE
+)
+
+
+def _quota_exhausted(exc: BaseException) -> str | None:
+    """A one-line reason when `exc` is a spent allowance, else None.
+
+    Deliberately narrow: an ordinary rate-limit 429 still returns None and
+    keeps its retry, because backing off is exactly the right response to
+    one. Only a message that names an exhausted allowance stops the run.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if not any(marker in lowered for marker in _QUOTA_MARKERS):
+        return None
+    reason = "worker unavailable: the API allowance is exhausted"
+    hint = _RESET_HINT.search(text)
+    if hint:
+        return f"{reason} ({hint.group(0).strip()})"
+    return reason
+
+
 _TIMEOUT_GUIDANCE = (
     "PREVIOUS ATTEMPT: you exceeded the wall-clock budget and were stopped "
     "mid-run. Be far more direct — make the minimal change and write it now; "
@@ -1387,7 +1424,8 @@ def develop(
                     duration_s=round(_time.monotonic() - started, 1)))
                 guidance = _TIMEOUT_GUIDANCE
                 continue
-            reporter.fail(f"worker run failed: {type(exc).__name__}")
+            quota = _quota_exhausted(exc)
+            reporter.fail(quota or f"worker run failed: {type(exc).__name__}")
             report.attempts.append(
                 Attempt(
                     number, "(no run)", [], [], None, "run_failed",
@@ -1395,6 +1433,14 @@ def develop(
                     duration_s=round(_time.monotonic() - started, 1),
                 )
             )
+            if quota:
+                # Retrying spends the remaining attempts in seconds and learns
+                # the same thing each time — an exhausted allowance is not a
+                # transient failure, and nothing the worker could do differently
+                # would change it. Stop and say when it lifts.
+                report.blocked_reason = quota
+                _emit("phase.fail", {"label": "worker", "reason": quota}, attempt=number)
+                return report
             guidance = (
                 "PREVIOUS ATTEMPT: the agent run itself failed "
                 f"({type(exc).__name__}). Work efficiently and stay within the "
