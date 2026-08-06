@@ -125,7 +125,7 @@ class RunReviewPanelTests(unittest.TestCase):
 
         S.run_review = _fake_review
         verdict = S.run_review_panel(
-            self.repo, object(), 3, feature="add X", diff_text="+V = 2\n",
+            self.repo, object(), ["", "", ""], feature="add X", diff_text="+V = 2\n",
         )
         self.assertTrue(verdict.approved)
         self.assertEqual(len(calls), 3)
@@ -143,7 +143,7 @@ class RunReviewPanelTests(unittest.TestCase):
             return S.ReviewVerdict(approved=True, summary="fine", issues=[], resolved=[])
 
         S.run_review = _fake_review
-        verdict = S.run_review_panel(self.repo, object(), 3, feature="add X")
+        verdict = S.run_review_panel(self.repo, object(), ["", "", ""], feature="add X")
         self.assertFalse(verdict.approved)
         self.assertIn("real bug", verdict.issues)
 
@@ -156,7 +156,7 @@ class RunReviewPanelTests(unittest.TestCase):
         S.run_review = lambda workspace, review_task, **kw: S.ReviewVerdict(
             approved=True, summary="x", issues=[], resolved=[]
         )
-        S.run_review_panel(self.repo, object(), 2, feature="add X")
+        S.run_review_panel(self.repo, object(), ["", ""], feature="add X")
         after = set(Path(_tempfile.gettempdir()).glob("shepherd-par-*"))
         self.assertEqual(before, after)
 
@@ -166,7 +166,7 @@ class RunReviewPanelTests(unittest.TestCase):
         from shepherd_dev import supervisor as S
 
         with patch("shepherd_dev.parallel._clone_many", side_effect=RuntimeError("boom")):
-            verdict = S.run_review_panel(self.repo, object(), 2, feature="add X")
+            verdict = S.run_review_panel(self.repo, object(), ["", ""], feature="add X")
         self.assertFalse(verdict.approved)
         self.assertIsNotNone(verdict.error)
         self.assertIn("boom", verdict.error)
@@ -222,9 +222,9 @@ class DevelopReviewPanelWiringTests(unittest.TestCase):
             calls["review"] += 1
             return sup.ReviewVerdict(approved=True, summary="s", issues=[], resolved=[])
 
-        def _review_panel(repo_root, review_task, size, **kw):
+        def _review_panel(repo_root, review_task, lenses, **kw):
             calls["panel"] += 1
-            calls["panel_size"] = size
+            calls["panel_size"] = len(lenses)
             return panel_verdict or sup.ReviewVerdict(approved=True, summary="p", issues=[], resolved=[])
 
         orig = (

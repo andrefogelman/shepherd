@@ -1014,8 +1014,12 @@ def run_review(
     context_pack: str | None = None,
     findings: str = "",
     repo_root: Path | None = None,
+    lens: str = "",
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
+
+    `lens`, when non-empty, is the single dimension this reviewer owns (see
+    prompts.REVIEW_LENSES). Empty is the ordinary generalist reviewer.
 
     `repo_root`, when given, is the worktree the proposal was built against.
     It is the `before` side, so each file reaches the reviewer as a unified
@@ -1048,6 +1052,7 @@ def run_review(
                 "diff": diff_text,
                 "context": context_pack or "",
                 "findings": findings,
+                "lens": lens,
             },
         )
     except Exception as exc:
@@ -1134,7 +1139,7 @@ def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
 def run_review_panel(
     repo_root: Path,
     review_task,
-    size: int,
+    lenses: list[str],
     *,
     feature: str,
     changeset=None,
@@ -1147,10 +1152,15 @@ def run_review_panel(
     """Run `size` independent reviewers in separate clones, aggregate into
     one verdict via _aggregate_review_verdicts.
 
+    `lenses` carries one entry per reviewer: a lens name from
+    prompts.REVIEW_LENSES, or "" for an unlabelled generalist. A numeric
+    panel of K is therefore [""] * K — one implementation and one
+    aggregation path rather than two that can drift apart.
+
     run_review's own docstring explains why a single reviewer runs in the
     caller's existing workspace lane: v0.2 lane limits require disjoint
-    roots for concurrent workspace.run calls. A panel of `size` concurrent
-    reviewers needs `size` disjoint roots, so each gets its own clone — the
+    roots for concurrent workspace.run calls. A panel of concurrent
+    reviewers needs one disjoint root each, so each gets its own clone — the
     exact machinery parallel.py already uses to isolate concurrent workers
     (_clone_many), reused here rather than reinvented.
     """
@@ -1164,12 +1174,19 @@ def run_review_panel(
     if diff_text is None:
         diff_text = build_diff_text(changeset, repo_root=repo_root) if changeset is not None else ""
 
+    if not lenses:
+        # Not a silent single review, and not an approval: a caller asking
+        # for a panel of nothing has a bug, and inventing a verdict for it
+        # would hide that behind an approval nobody reviewed.
+        return ReviewVerdict(approved=False, summary="", error="review panel: no reviewers requested")
+
     try:
-        clones = _clone_many(repo_root, size)
+        clones = _clone_many(repo_root, len(lenses))
     except Exception as exc:
         return ReviewVerdict(approved=False, summary="", error=f"review panel could not create clones: {exc}")
     try:
-        def _one(clone: Path) -> ReviewVerdict:
+        def _one(pair: tuple[Path, str]) -> ReviewVerdict:
+            clone, lens = pair
             with sp.open(clone) as ws:
                 return run_review(
                     ws,
@@ -1180,10 +1197,11 @@ def run_review_panel(
                     placement=placement,
                     context_pack=context_pack,
                     findings=findings,
+                    lens=lens,
                 )
 
-        with ThreadPoolExecutor(max_workers=size) as pool:
-            verdicts = list(pool.map(_one, clones))
+        with ThreadPoolExecutor(max_workers=len(lenses)) as pool:
+            verdicts = list(pool.map(_one, zip(clones, lenses)))
     finally:
         for clone in clones:
             shutil.rmtree(clone.parent, ignore_errors=True)
@@ -1411,6 +1429,7 @@ def develop(
     max_attempts: int = 3,
     review_rounds: int = 1,
     review_panel: int = 1,
+    review_lenses: list[str] | None = None,
     gate_timeout: int = 600,
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
@@ -1444,6 +1463,11 @@ def develop(
     ones (separate clones, run in parallel) — approval requires all of them
     to agree; a real problem only one catches still blocks. 1 (default)
     takes the exact path today's single-reviewer runs already take.
+    review_lenses names one dimension per reviewer instead of running K
+    reviewers on the same prompt — the panel's disagreement then comes from
+    different questions rather than from sampling noise. It takes precedence
+    over review_panel (the CLI refuses both, but a library caller passing
+    both must not silently get the product of the two).
     """
     import time as _time
 
@@ -1625,7 +1649,12 @@ def develop(
         # away (tokens spent on a proposal that died; hence opt-in).
         spec_result: dict = {}
         spec_thread = None
-        if test_cmd is not None and review_task is not None and speculative_review and review_panel <= 1:
+        if (
+            test_cmd is not None
+            and review_task is not None
+            and speculative_review
+            and not (review_panel > 1 or review_lenses)
+        ):
             def _speculate():
                 try:
                     spec_result["verdict"] = run_review(
@@ -1714,12 +1743,17 @@ def develop(
         # A local, not report.review: on a rework round the previous verdict is
         # still on the report, and reusing it would skip this round's review.
         verdict = _reap_spec()  # already ran overlapped with the gate
+        # Named lenses win over a count rather than multiplying by it: a caller
+        # passing both asked for those reviewers, not review_panel copies of each.
+        panel_lenses = (
+            list(review_lenses) if review_lenses else ([""] * review_panel if review_panel > 1 else [])
+        )
         if verdict is None:
-            if review_panel > 1:
+            if panel_lenses:
                 verdict = run_review_panel(
                     repo_root,
                     review_task,
-                    review_panel,
+                    panel_lenses,
                     feature=feature,
                     changeset=changeset,
                     provider=provider,
