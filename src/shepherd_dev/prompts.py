@@ -138,6 +138,14 @@ DEFAULT_PROMPTS: dict[str, str] = {
     basis. Say plainly in `summary` which files you could not fully read,
     and put the gap in `issues`.
 
+    A path in that list which you cannot find in the repository is a NEW
+    file the proposal creates — the tree you are reading is the state
+    BEFORE this change. Never report that it "does not exist", is
+    "missing", or was not written: searching a pre-change tree cannot tell
+    you what the proposal adds, and `diff` already gave you its content.
+    Not finding something is not evidence of its absence, and never a
+    reason to reject.
+
     Assess: correctness, hidden bugs, security issues, scope discipline
     (does it touch only what the feature needs?), convention adherence,
     and missing edge cases. Be a rigorous skeptic; do not rubber-stamp.

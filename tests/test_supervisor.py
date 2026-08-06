@@ -228,6 +228,19 @@ class RenderEntriesAsDiffTextTests(unittest.TestCase):
         self.assertIn("not shown", prompt)
         self.assertIn("must NOT approve", prompt)
 
+    def test_the_prompt_forbids_reading_absence_out_of_the_worktree(self):
+        """Observed on a real run: the reviewer could not find a new
+        LiveView in the tree, went looking, saw the PRE-change tree, and
+        reported the file as nonexistent — while the gate was green on a
+        suite that could not compile without it. Saying the tree is
+        pre-change was not enough; the inference itself has to be banned."""
+        from shepherd_dev.prompts import get_prompt
+
+        # Collapsed, so the assertion survives the paragraph being rewrapped.
+        prompt = " ".join(get_prompt("review").split())
+        self.assertIn("is a NEW file the proposal creates", prompt)
+        self.assertIn('"does not exist"', prompt)
+
 
 class UnifiedDiffTests(unittest.TestCase):
     """With a repo_root the reviewer gets a diff, not whole files. A 48KB
