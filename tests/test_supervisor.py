@@ -187,10 +187,94 @@ class RenderEntriesAsDiffTextTests(unittest.TestCase):
         self.assertIn("=== FILE: b.py (proposed content) ===", text)
         self.assertIn("B = 2", text)
 
-    def test_truncates_past_the_limit(self):
-        text = _render_entries_as_diff_text({"big.py": b"x" * 100}, limit=20)
-        self.assertLessEqual(len(text), 20 + len("\n\n[... truncated at 20 chars ...]"))
-        self.assertIn("truncated at 20 chars", text)
+    def test_a_file_too_big_for_the_budget_says_so_in_place(self):
+        """The old form cut the whole rendering at `limit` and appended one
+        marker at the very end, so any file past the cut vanished without a
+        trace. The trim is now per file and named."""
+        text = _render_entries_as_diff_text({"big.py": b"x" * 500}, limit=200)
+        self.assertIn("big.py", text)
+        self.assertIn("not shown", text)
+        self.assertIn("do not approve", text)
+
+    def test_every_changed_path_is_listed_however_tight_the_budget(self):
+        """The reported failure: nine files changed, the reviewer received
+        two, and nothing told it the other seven existed. Paths are cheap —
+        the scope is the one thing that must never be dropped."""
+        entries = {f"lib/{'a' if i < 2 else 'z'}/file{i}.ex": b"x" * 40_000 for i in range(9)}
+        text = _render_entries_as_diff_text(entries, limit=1_000)
+        for rel in entries:
+            self.assertIn(rel, text, f"{rel} vanished from the manifest")
+        self.assertIn("CHANGED FILES (9)", text)
+
+    def test_a_small_file_is_not_starved_by_a_huge_one(self):
+        """Alphabetical order used to decide who got seen: a flat cut let the
+        first files eat the whole budget. A small file now always fits."""
+        entries = {"a_huge.py": b"x" * 50_000, "z_small.py": b"print(1)\n"}
+        text = _render_entries_as_diff_text(entries, limit=2_000)
+        self.assertIn("print(1)", text, "the small file's content must survive")
+        self.assertIn("not shown", text, "the huge one is the one that gets trimmed")
+
+    def test_an_empty_changeset_still_renders_a_manifest(self):
+        self.assertIn("CHANGED FILES (0)", _render_entries_as_diff_text({}))
+
+    def test_the_prompt_tells_the_reviewer_what_a_trimmed_body_means(self):
+        """The renderer marking a gap is only half of it — the reviewer has
+        to be told that a marked file must not be approved on that evidence,
+        or it can still sign off on a change it only partly read."""
+        from shepherd_dev.prompts import get_prompt
+
+        prompt = get_prompt("review")
+        self.assertIn("CHANGED FILES", prompt)
+        self.assertIn("not shown", prompt)
+        self.assertIn("must NOT approve", prompt)
+
+
+class UnifiedDiffTests(unittest.TestCase):
+    """With a repo_root the reviewer gets a diff, not whole files. A 48KB
+    file whose change is twenty lines used to cost 48KB of the budget."""
+
+    def _repo(self):
+        from tmpdirs import mkdtemp
+
+        repo = Path(mkdtemp(prefix="shepherd-diff-"))
+        (repo / "big.py").write_text("".join(f"line {i}\n" for i in range(2000)))
+        return repo
+
+    def test_an_edited_file_is_rendered_as_a_diff(self):
+        repo = self._repo()
+        after = (repo / "big.py").read_text().replace("line 5\n", "line 5 CHANGED\n")
+
+        text = _render_entries_as_diff_text({"big.py": after.encode()}, repo_root=repo)
+        self.assertIn("=== FILE: big.py (unified diff) ===", text)
+        self.assertIn("+line 5 CHANGED", text)
+        self.assertNotIn("line 1999", text, "untouched lines must not be shipped")
+
+    def test_the_diff_is_a_fraction_of_the_whole_file(self):
+        repo = self._repo()
+        after = (repo / "big.py").read_text().replace("line 5\n", "line 5 CHANGED\n")
+
+        as_diff = _render_entries_as_diff_text({"big.py": after.encode()}, repo_root=repo)
+        as_full = _render_entries_as_diff_text({"big.py": after.encode()})
+        self.assertLess(len(as_diff), len(as_full) // 10)
+
+    def test_a_new_file_has_no_before_so_it_ships_whole(self):
+        repo = self._repo()
+        text = _render_entries_as_diff_text({"brand_new.py": b"X = 1\n"}, repo_root=repo)
+        self.assertIn("=== FILE: brand_new.py (new file) ===", text)
+        self.assertIn("X = 1", text)
+
+    def test_without_a_repo_root_the_old_whole_file_form_is_kept(self):
+        text = _render_entries_as_diff_text({"a.py": b"A = 1\n"})
+        self.assertIn("=== FILE: a.py (proposed content) ===", text)
+
+    def test_a_file_the_worker_left_untouched_is_marked_not_dumped(self):
+        """The changeset can carry a file whose content equals the worktree's.
+        Shipping it whole would spend budget saying nothing."""
+        repo = self._repo()
+        same = (repo / "big.py").read_bytes()
+        text = _render_entries_as_diff_text({"big.py": same}, repo_root=repo)
+        self.assertIn("=== FILE: big.py (unchanged) ===", text)
+        self.assertLess(len(text), 200)
 
     def test_build_diff_text_still_delegates_correctly(self):
         """build_diff_text takes a real changeset (with .changed_paths /

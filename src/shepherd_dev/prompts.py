@@ -62,6 +62,14 @@ DEFAULT_PROMPTS: dict[str, str] = {
     deletions) for the feature described in `feature`. The proposal is
     NOT applied to the files you see.
 
+    `diff` opens with `=== CHANGED FILES (n) ===` listing EVERY path the
+    proposal touches, then a body per file — a unified diff where the file
+    already existed, its full content where it is new. That list is the
+    authoritative scope: if a body says some of it was `not shown`, you are
+    judging that file on partial evidence and must NOT approve it on that
+    basis. Say plainly in `summary` which files you could not fully read,
+    and put the gap in `issues`.
+
     Assess: correctness, hidden bugs, security issues, scope discipline
     (does it touch only what the feature needs?), convention adherence,
     and missing edge cases. Be a rigorous skeptic; do not rubber-stamp.

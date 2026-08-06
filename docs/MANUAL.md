@@ -521,6 +521,22 @@ shepherd-dev run "add pagination" --repo ~/projetos/meu-app --review-rounds 3
 O trace mostra as rodadas: `↻ rework round 2/3 — 4 open findings`, e
 `⏹ rework stopped: <razão>` quando o loop desiste.
 
+**O que chega ao revisor.** A proposta vai como diff unificado por arquivo,
+encabeçada por `=== CHANGED FILES (n) ===` listando todo caminho que a mudança
+toca. Daí decorrem duas coisas, ambas já erradas um dia:
+
+- O arquivo chega como as linhas que mudaram, não inteiro. Um arquivo de 48KB
+  editado em vinte pontos gastava 48KB do orçamento do revisor; medido num
+  commit real deste repo, o diff fica em torno de um décimo do conteúdo
+  integral.
+- Quando mesmo assim não cabe tudo, cada arquivo é cortado por si e avisa onde
+  foi cortado — e o manifesto lista todos os caminhos de qualquer forma. Antes,
+  a renderização inteira era cortada num único ponto: quem ficava depois sumia
+  sem rastro, então o revisor podia aprovar uma mudança de nove arquivos tendo
+  lido dois, sem nunca saber que os outros sete existiam. Ordem alfabética
+  decidia quem era visto. O prompt agora diz ao revisor que arquivo marcado
+  `not shown` não pode ser aprovado com essa evidência.
+
 **`--review-panel K`** substitui o revisor único por K revisores independentes,
 cada um em seu próprio clone, executados em paralelo — aprovação requer que
 todos os K concordem. Um problema real que apenas um deles encontra ainda bloqueia

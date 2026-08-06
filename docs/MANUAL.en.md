@@ -524,6 +524,21 @@ shepherd-dev run "add pagination" --repo ~/projects/my-app --review-rounds 3
 The trace shows the rounds: `↻ rework round 2/3 — 4 open findings`, and
 `⏹ rework stopped: <reason>` when the loop gives up.
 
+**What the reviewer is handed.** The proposal reaches it as a unified diff
+per file, headed by `=== CHANGED FILES (n) ===` listing every path the change
+touches. Two things follow, and both were once wrong:
+
+- A file arrives as the lines that changed, not in full. A 48KB file edited in
+  twenty places used to spend 48KB of the reviewer's budget; measured on a real
+  commit here, the diff is around a tenth of the whole-file size.
+- When the budget still cannot hold everything, each file is trimmed on its own
+  and says so where it was cut — and the manifest lists every path regardless.
+  Before, the whole rendering was cut at one offset: files past that point
+  vanished with no trace, so a reviewer could approve a nine-file change having
+  read two and never learn the other seven existed. Alphabetical order decided
+  who got seen. The prompt now tells the reviewer that a file marked `not shown`
+  must not be approved on that evidence.
+
 **`--review-panel K`** replaces the single reviewer with K independent ones,
 each in its own clone, run in parallel — approval requires all K to agree.
 A real problem only one of them catches still blocks the proposal. Default

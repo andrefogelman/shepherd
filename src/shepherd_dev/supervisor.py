@@ -8,6 +8,7 @@ stays retained; settlement (select/apply/discard) is always a human decision.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -888,25 +889,117 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
         return False
 
 
-def _render_entries_as_diff_text(entries, limit: int = DIFF_TEXT_LIMIT) -> str:
+def _fair_shares(sizes: list[int], limit: int) -> list[int]:
+    """Max-min fair split of `limit` over `sizes`.
+
+    Everything fits → everyone gets their whole size. Otherwise each file
+    takes at most an equal share, and whatever the small files leave unused
+    is redistributed to the ones still over budget. So a 200-char file is
+    never trimmed merely because a 48KB file is in the same changeset —
+    which a flat `total[:limit]` did by position, letting the
+    alphabetically-first files eat the whole budget and the rest vanish.
+    """
+    shares = [0] * len(sizes)
+    remaining = limit
+    pending = list(range(len(sizes)))
+    while pending and remaining > 0:
+        share = remaining // len(pending)
+        if share == 0:
+            break
+        settled = [i for i in pending if sizes[i] <= share]
+        if not settled:  # everyone left wants more than an equal share
+            for i in pending:
+                shares[i] = share
+            return shares
+        for i in settled:
+            shares[i] = sizes[i]
+            remaining -= sizes[i]
+        pending = [i for i in pending if i not in set(settled)]
+    return shares
+
+
+def _one_file_text(rel: str, content: bytes, repo_root: Path | None) -> str:
+    """One file's body for the reviewer: a unified diff against the current
+    worktree when we can read a `before`, else the proposed content.
+
+    Sending whole files was the default because a changeset only carries the
+    proposed side. But the `before` side is right there in the worktree — the
+    proposal is not applied — and a diff of a 48KB file whose change is 20
+    lines costs a fraction of the file. Measured on a real commit here: 12%
+    of the full-content size.
+    """
+    after = content.decode("utf-8", errors="replace")
+    if repo_root is not None:
+        current = Path(repo_root) / rel
+        try:
+            before = current.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            before = None  # new file, or unreadable — the content IS the diff
+        if before is not None:
+            if before == after:
+                return f"=== FILE: {rel} (unchanged) ===\n"
+            body = "".join(
+                difflib.unified_diff(
+                    before.splitlines(keepends=True),
+                    after.splitlines(keepends=True),
+                    fromfile=f"a/{rel}",
+                    tofile=f"b/{rel}",
+                )
+            )
+            return f"=== FILE: {rel} (unified diff) ===\n{body}"
+        return f"=== FILE: {rel} (new file) ===\n{after}"
+    return f"=== FILE: {rel} (proposed content) ===\n{after}"
+
+
+def _render_entries_as_diff_text(
+    entries, limit: int = DIFF_TEXT_LIMIT, repo_root: Path | None = None
+) -> str:
     """Render already-extracted content entries (rel path -> bytes) as the
-    same reviewer-readable `=== FILE: ... ===` text build_diff_text has
-    always produced — factored out so a second caller (the review-report
-    writer) renders a diff identically to what the reviewer itself saw,
-    rather than reimplementing this formatting a second time."""
-    parts: list[str] = []
-    for rel, content in entries.items():
-        text = content.decode("utf-8", errors="replace")
-        parts.append(f"=== FILE: {rel} (proposed content) ===\n{text}")
-    diff = "\n\n".join(parts)
-    if len(diff) > limit:
-        diff = diff[:limit] + f"\n\n[... truncated at {limit} chars ...]"
-    return diff
+    reviewer-readable `=== FILE: ... ===` text — factored out so a second
+    caller (the review-report writer) renders a diff identically to what the
+    reviewer itself saw, rather than reimplementing this formatting twice.
+
+    Two properties matter more than the formatting:
+
+    * With `repo_root`, each file is a unified diff against the worktree
+      instead of its whole content (see _one_file_text).
+    * The manifest lists EVERY changed path before any body, and a body that
+      did not fit says so in place. A reviewer used to be handed
+      `total[:60000]`: files past the cut vanished with no trace, so it could
+      approve a nine-file change having seen two and not know the other seven
+      existed. Paths are cheap; the scope is never the thing we drop.
+    """
+    items = list(entries.items())
+    manifest = "\n".join(
+        [f"=== CHANGED FILES ({len(items)}) ==="] + [rel for rel, _ in items]
+    )
+    if not items:
+        return manifest
+
+    bodies = [_one_file_text(rel, content, repo_root) for rel, content in items]
+    budget = max(0, limit - len(manifest) - 2 * len(bodies))
+    shares = _fair_shares([len(b) for b in bodies], budget)
+
+    parts = []
+    for body, share in zip(bodies, shares):
+        if len(body) <= share:
+            parts.append(body)
+            continue
+        head, _, _ = body.partition("\n")
+        kept = body[:share]
+        parts.append(
+            f"{kept}\n[... {head.strip('= ')}: {len(body) - share} of "
+            f"{len(body)} chars not shown — you have NOT seen all of this "
+            f"file, do not approve it on this evidence ...]"
+        )
+    return "\n\n".join([manifest] + parts)
 
 
-def build_diff_text(changeset, limit: int = DIFF_TEXT_LIMIT) -> str:
+def build_diff_text(
+    changeset, limit: int = DIFF_TEXT_LIMIT, repo_root: Path | None = None
+) -> str:
     """Render a retained changeset's content entries as reviewer-readable text."""
-    return _render_entries_as_diff_text(read_changeset_entries(changeset), limit)
+    return _render_entries_as_diff_text(read_changeset_entries(changeset), limit, repo_root)
 
 
 def run_review(
@@ -920,8 +1013,14 @@ def run_review(
     placement: str = "jail",
     context_pack: str | None = None,
     findings: str = "",
+    repo_root: Path | None = None,
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
+
+    `repo_root`, when given, is the worktree the proposal was built against.
+    It is the `before` side, so each file reaches the reviewer as a unified
+    diff instead of in full — the difference between a 48KB file and the
+    twenty lines that actually changed in it.
 
     `findings` carries the still-open findings of earlier rounds, so this
     reviewer answers about them by id instead of re-deriving the same
@@ -936,7 +1035,7 @@ def run_review(
     after the verdict is read.
     """
     if diff_text is None:
-        diff_text = build_diff_text(changeset)
+        diff_text = build_diff_text(changeset, repo_root=repo_root)
     workspace.tasks.register(review_task)
     try:
         run = workspace.run(
@@ -1063,7 +1162,7 @@ def run_review_panel(
     from .parallel import _clone_many
 
     if diff_text is None:
-        diff_text = build_diff_text(changeset) if changeset is not None else ""
+        diff_text = build_diff_text(changeset, repo_root=repo_root) if changeset is not None else ""
 
     try:
         clones = _clone_many(repo_root, size)
@@ -1537,6 +1636,7 @@ def develop(
                         provider=provider,
                         placement=placement,
                         context_pack=context_pack,
+                        repo_root=repo_root,
                     )
                 except Exception:
                     pass  # spec failure → the sequential path below reruns it
@@ -1637,6 +1737,7 @@ def develop(
                     placement=placement,
                     context_pack=context_pack,
                     findings=ledger.guidance() if ledger is not None else "",
+                    repo_root=repo_root,
                 )
         report.review = verdict
         if verdict is not None:
