@@ -96,6 +96,7 @@ OPTIONS: dict[str, tuple[Opt, ...]] = {
         Opt(dest="max_attempts", kind="value", flag="--max-attempts"),
         Opt(dest="review_rounds", kind="value", tier=MAIN, flag="--review-rounds"),
         Opt(dest="review_panel", kind="value", tier=MAIN, flag="--review-panel"),
+        Opt(dest="review_lens", kind="list", tier=MAIN, flag="--review-lens"),
         Opt(dest="review_report", kind="value", tier=MAIN, flag="--review-report"),
         Opt(dest="gate_timeout", kind="value", flag="--gate-timeout"),
         Opt(dest="worker_budget", kind="value", flag="--worker-budget"),

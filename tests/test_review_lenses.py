@@ -287,5 +287,123 @@ class DevelopLensWiringTests(unittest.TestCase):
         self.assertIsNone(inspect.signature(sup.develop).parameters["review_lenses"].default)
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class ReviewLensCliTests(unittest.TestCase):
+    def test_the_flag_defaults_to_no_lenses(self):
+        """Opt-in per run: a run that does not name a lens must behave
+        exactly as it does today."""
+        from shepherd_dev.cli import build_parser
+
+        self.assertEqual(build_parser().parse_args(["run", "add X"]).review_lens, [])
+
+    def test_the_flag_repeats(self):
+        from shepherd_dev.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["run", "add X", "--review-lens", "correctness", "--review-lens", "security"]
+        )
+        self.assertEqual(args.review_lens, ["correctness", "security"])
+
+    def test_an_unknown_lens_is_refused_by_name(self):
+        from shepherd_dev.cli import _validate_review_lenses
+
+        reason = _validate_review_lenses(
+            ["banana"], no_review=False, provider="claude", best_of=1, explicit_panel=None
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("banana", reason)
+        self.assertIn("correctness", reason, "the error must list the valid names")
+
+    def test_the_valid_names_are_accepted(self):
+        from shepherd_dev.cli import _validate_review_lenses
+        from shepherd_dev.prompts import LENS_NAMES
+
+        self.assertIsNone(
+            _validate_review_lenses(
+                list(LENS_NAMES), no_review=False, provider="claude", best_of=1, explicit_panel=None
+            )
+        )
+
+    def test_a_repeated_lens_is_refused_rather_than_run_twice(self):
+        from shepherd_dev.cli import _validate_review_lenses
+
+        reason = _validate_review_lenses(
+            ["security", "security"], no_review=False, provider="claude", best_of=1, explicit_panel=None
+        )
+        self.assertIsNotNone(reason)
+
+    def test_lenses_do_not_combine_with_an_explicit_panel(self):
+        """Both are panels; accepting both would silently honour neither —
+        the same reasoning as --review-panel vs --best-of."""
+        from shepherd_dev.cli import _validate_review_lenses
+
+        reason = _validate_review_lenses(
+            ["security"], no_review=False, provider="claude", best_of=1, explicit_panel=3
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("--review-panel", reason)
+
+    def test_a_saved_panel_value_does_not_block_lenses(self):
+        """Only an EXPLICIT --review-panel conflicts. A repo's saved value
+        must not make --review-lens unusable in that repo."""
+        from shepherd_dev.cli import _validate_review_lenses
+
+        self.assertIsNone(
+            _validate_review_lenses(
+                ["security"], no_review=False, provider="claude", best_of=1, explicit_panel=None
+            )
+        )
+
+    def test_lenses_need_a_reviewer_and_a_reviewing_provider(self):
+        from shepherd_dev.cli import _validate_review_lenses
+
+        self.assertIsNotNone(
+            _validate_review_lenses(
+                ["security"], no_review=True, provider="claude", best_of=1, explicit_panel=None
+            )
+        )
+        self.assertIsNotNone(
+            _validate_review_lenses(
+                ["security"], no_review=False, provider="static", best_of=1, explicit_panel=None
+            )
+        )
+
+    def test_lenses_do_not_combine_with_best_of(self):
+        from shepherd_dev.cli import _validate_review_lenses
+
+        self.assertIsNotNone(
+            _validate_review_lenses(
+                ["security"], no_review=False, provider="claude", best_of=2, explicit_panel=None
+            )
+        )
+
+    def test_no_lenses_is_always_usable(self):
+        """The default path must never be refused by this validator."""
+        from shepherd_dev.cli import _validate_review_lenses
+
+        self.assertIsNone(
+            _validate_review_lenses(
+                [], no_review=True, provider="static", best_of=3, explicit_panel=None
+            )
+        )
+
+
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class MenuKnowsTheFlagTests(unittest.TestCase):
+    def test_the_flag_is_classified_in_the_menu_table(self):
+        from shepherd_dev.menu import OPTIONS
+
+        opt = next(o for o in OPTIONS["run"] if o.flag == "--review-lens")
+        self.assertEqual(opt.kind, "list")
+        self.assertEqual(opt.dest, "review_lens")
+
+    def test_the_menu_builds_a_repeated_flag_that_parses(self):
+        from shepherd_dev.cli import build_parser
+        from shepherd_dev.menu import build_argv
+
+        argv = build_argv("run", {"feature": "add X", "review_lens": ["correctness", "tests"]})
+        self.assertEqual(build_parser().parse_args(argv).review_lens, ["correctness", "tests"])
+
+
 if __name__ == "__main__":
     unittest.main()

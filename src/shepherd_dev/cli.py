@@ -53,6 +53,10 @@ MAX_REVIEW_ROUNDS = 5
 #: not an open-ended amplifier.
 MAX_REVIEW_PANEL = 5
 
+#: Same bounded-allowance reasoning as MAX_REVIEW_PANEL, and the catalogue
+#: is this size anyway — naming every lens is the widest panel on offer.
+MAX_REVIEW_LENSES = 5
+
 
 def _validate_review_rounds(
     rounds: int, *, no_review: bool, provider: str, best_of: int = 1
@@ -97,6 +101,46 @@ def _validate_review_panel_best_of(explicit_panel: int | None, best_of: int) -> 
     it just doesn't apply to a best-of run, see _cmd_run_inner."""
     if best_of > 1 and explicit_panel is not None and explicit_panel > 1:
         return "--review-panel > 1 does not combine with --best-of"
+    return None
+
+
+def _validate_review_lenses(
+    lenses: list[str],
+    *,
+    no_review: bool,
+    provider: str,
+    best_of: int,
+    explicit_panel: int | None,
+) -> str | None:
+    """None = usable; otherwise the reason to refuse, ready to print.
+
+    An empty list is always usable — that is the default, and this feature
+    is opt-in per run.
+    """
+    from .prompts import LENS_NAMES
+
+    if not lenses:
+        return None
+    unknown = [name for name in lenses if name not in LENS_NAMES]
+    if unknown:
+        return (
+            f"unknown --review-lens {', '.join(sorted(set(unknown)))} — "
+            f"valid lenses: {', '.join(LENS_NAMES)}"
+        )
+    if len(set(lenses)) != len(lenses):
+        # Two reviewers with the same lens is the correlated-sampling
+        # problem this feature exists to fix, bought at twice the price.
+        return "--review-lens repeats a lens; each may be named once"
+    if len(lenses) > MAX_REVIEW_LENSES:
+        return f"--review-lens is capped at {MAX_REVIEW_LENSES}"
+    if no_review:
+        return "--review-lens needs the reviewer (drop --no-review)"
+    if provider == "static":
+        return "--review-lens needs a reviewing provider (not static)"
+    if best_of > 1:
+        return "--review-lens does not combine with --best-of"
+    if explicit_panel is not None and explicit_panel > 1:
+        return "--review-lens does not combine with --review-panel (both are panels)"
     return None
 
 
@@ -907,6 +951,13 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if bad_panel_best_of:
         print(f"error: {bad_panel_best_of}", file=sys.stderr)
         return 2
+    bad_lenses = _validate_review_lenses(
+        args.review_lens, no_review=args.no_review, provider=args.provider,
+        best_of=args.best_of, explicit_panel=explicit_panel,
+    )
+    if bad_lenses:
+        print(f"error: {bad_lenses}", file=sys.stderr)
+        return 2
     if args.best_of > 1 and args.review_panel > 1:
         # a saved config value shouldn't hard-block --best-of the way an
         # explicit flag does — it just doesn't apply here; best-of's own
@@ -1016,6 +1067,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             max_attempts=args.max_attempts,
             review_rounds=args.review_rounds,
             review_panel=args.review_panel,
+            review_lenses=args.review_lens,
             gate_timeout=args.gate_timeout,
             policy=policy,
             review_task=reviewer,
@@ -2056,6 +2108,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-panel", type=int, default=None,
         help=f"K independent reviewers instead of 1 — approval needs unanimity "
              f"(default: the repo's saved init-time choice, else 1; max {MAX_REVIEW_PANEL})",
+    )
+    p_run.add_argument(
+        "--review-lens",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="run one reviewer per named lens instead of one generalist "
+             "(repeatable; correctness, security, scope, conventions, tests). "
+             "Off unless named on this run",
     )
     p_run.add_argument(
         "--review-report", default=None, metavar="FILE",
