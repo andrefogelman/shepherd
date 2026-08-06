@@ -91,6 +91,14 @@ DEFAULT_PROMPTS: dict[str, str] = {
     (does it touch only what the feature needs?), convention adherence,
     and missing edge cases. Be a rigorous skeptic; do not rubber-stamp.
 
+    `lens`, when non-empty, narrows you to ONE of those dimensions and
+    names it. Obey it literally: report only defects of that kind, and
+    approve when you find none of that kind, even if something else about
+    the change bothers you — a reviewer with a different lens is looking
+    at the change at the same time and owns what you are leaving alone.
+    When `lens` is empty you own all of the dimensions above, which is the
+    ordinary single-reviewer case.
+
     `findings`, when non-empty, lists what an EARLIER round of this same
     review raised and that is still open, one per line as `- [id] text`.
     Judge each again against this proposal — they are not yours to take on
@@ -171,7 +179,7 @@ write_tests.__doc__ = get_prompt("write_tests")
 write_tests = sp.task(write_tests)
 
 
-def review(repo: sp.GitRepo, feature: str, diff: str, context: str = "", findings: str = "") -> None: ...
+def review(repo: sp.GitRepo, feature: str, diff: str, context: str = "", findings: str = "", lens: str = "") -> None: ...
 review.__doc__ = get_prompt("review")
 review = sp.task(review)
 

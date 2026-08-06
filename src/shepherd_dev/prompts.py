@@ -24,6 +24,74 @@ OVERRIDES_FILE = Path(
     or Path.home() / ".shepherd-dev" / "prompts-overrides.json"
 )
 
+#: One reviewer per dimension, instead of K reviewers sharing one prompt.
+#:
+#: These are not a new taxonomy: they are the dimensions the generic review
+#: prompt already lists in a single sentence ("correctness, hidden bugs,
+#: security issues, scope discipline, convention adherence, and missing edge
+#: cases"). Asking one reviewer to weigh all of them at once is what makes K
+#: samples of that prompt correlate — they share its blind spot. Splitting
+#: the sentence into separate reviewers is the whole feature.
+#:
+#: Each text ends by confining the reviewer to its lane. Without that, every
+#: lens drifts back into a general audit and the panel is K correlated
+#: samples again, only more expensive.
+REVIEW_LENSES: dict[str, str] = {
+    "correctness": (
+        "You are the CORRECTNESS reviewer. Ask only whether this change does "
+        "what it claims: wrong logic, off-by-one, an unhandled None, a branch "
+        "that cannot be reached, state mutated where a copy was meant, an "
+        "error swallowed, a race between two things that look sequential. "
+        "Trace the actual values through the changed code rather than reading "
+        "it for plausibility. Report ONLY correctness defects — another "
+        "reviewer owns security, scope, conventions and tests."
+    ),
+    "security": (
+        "You are the SECURITY reviewer. Ask only what an attacker or a "
+        "hostile input could do with this change: injection through an "
+        "unescaped value, a secret or token reaching a log or an error "
+        "message, a path that escapes its root, a permission or ownership "
+        "check that is missing or can be skipped, an unsafe default, a "
+        "dependency or subprocess invoked with attacker-influenced "
+        "arguments. Report ONLY security defects — another reviewer owns "
+        "correctness, scope, conventions and tests."
+    ),
+    "scope": (
+        "You are the SCOPE reviewer. Ask only whether this change is the "
+        "change that was asked for: files touched that the feature does not "
+        "need, refactoring smuggled in beside the fix, a behavior altered "
+        "for callers who did not ask, a public signature or output format "
+        "changed without cause, dead code or debugging residue left behind. "
+        "Judge against the stated feature, not against your taste. Report "
+        "ONLY scope defects — another reviewer owns correctness, security, "
+        "conventions and tests."
+    ),
+    "conventions": (
+        "You are the CONVENTIONS reviewer. Ask only whether this change "
+        "reads like the code around it: naming, structure and error "
+        "handling that match the surrounding module, an existing helper "
+        "reimplemented instead of reused, a comment that states what the "
+        "code plainly says rather than why it is that way, a comment that "
+        "no longer matches the code beneath it. Compare against the actual "
+        "neighbouring files, not a general style guide. Report ONLY "
+        "convention defects — another reviewer owns correctness, security, "
+        "scope and tests."
+    ),
+    "tests": (
+        "You are the TEST reviewer. Ask only whether this change is "
+        "genuinely covered: a new behavior with no test, a test that asserts "
+        "nothing or would pass against the unfixed code, a mock standing in "
+        "for the very thing under test, an edge case named in the code but "
+        "absent from the tests, a test whose name promises more than it "
+        "checks. A bug fix with no test that fails without it is the "
+        "clearest case. Report ONLY test defects — another reviewer owns "
+        "correctness, security, scope and conventions."
+    ),
+}
+
+#: Catalogue order — what `--review-lens` accepts, and the order a panel runs.
+LENS_NAMES: tuple[str, ...] = tuple(REVIEW_LENSES)
+
 DEFAULT_PROMPTS: dict[str, str] = {
     "implement": """Implement the requested feature in the repository.
 
@@ -73,6 +141,14 @@ DEFAULT_PROMPTS: dict[str, str] = {
     Assess: correctness, hidden bugs, security issues, scope discipline
     (does it touch only what the feature needs?), convention adherence,
     and missing edge cases. Be a rigorous skeptic; do not rubber-stamp.
+
+    `lens`, when non-empty, narrows you to ONE of those dimensions and
+    names it. Obey it literally: report only defects of that kind, and
+    approve when you find none of that kind, even if something else about
+    the change bothers you — a reviewer with a different lens is looking
+    at the change at the same time and owns what you are leaving alone.
+    When `lens` is empty you own all of the dimensions above, which is the
+    ordinary single-reviewer case.
 
     `findings`, when non-empty, lists what an EARLIER round of this same
     review raised and that is still open, one per line as `- [id] text`.
