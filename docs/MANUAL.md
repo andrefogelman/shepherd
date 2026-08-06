@@ -545,6 +545,23 @@ repositório tenha sido `init`ado com uma escolha diferente ou `--review-panel`
 seja passado explicitamente. Custo é K× os tokens de revisão por rodada; wall-clock
 fica perto de uma única revisão já que os K revisores executam concorrentemente.
 
+**`--review-lens NOME`** coloca um revisor em cada dimensão nomeada, em vez de
+vários revisores no mesmo prompt. Repita a flag: `--review-lens correctness
+--review-lens security`. As lentes são `correctness`, `security`, `scope`,
+`conventions` e `tests` — as dimensões que o revisor único já pesa todas de
+uma vez.
+
+É por isto que vale os tokens: `--review-panel 3` roda o mesmo prompt três
+vezes, então as três amostras compartilham aquilo a que esse prompt é cego.
+Nomear lentes faz três perguntas diferentes em vez disso, e a aprovação
+continua exigindo todas elas — um defeito que só a lente `security` notaria
+ainda bloqueia a proposta.
+
+Desligado a menos que você nomeie uma lente naquela rodada — não há padrão
+salvo, e o `init` não define nenhum. Não combina com `--review-panel` (ambos
+são painéis) nem com `--best-of`; qualquer das duas combinações é recusada em
+vez de silenciosamente ignorada.
+
 **`--review-report ARQUIVO`** escreve o veredito da rodada, questões, histórico
 do ledger de achados, e o diff proposto real para `ARQUIVO` como markdown —
 durável, independente de como stdout seja capturado (ou descartado) por qualquer

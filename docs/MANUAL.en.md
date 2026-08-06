@@ -547,6 +547,23 @@ different choice, or `--review-panel` is passed explicitly. Cost is K× the
 review tokens per round; wall-clock stays close to a single review since
 the K reviewers run concurrently.
 
+**`--review-lens NAME`** puts one reviewer on each named dimension instead of
+several reviewers on the same prompt. Repeat it: `--review-lens correctness
+--review-lens security`. The lenses are `correctness`, `security`, `scope`,
+`conventions` and `tests` — the dimensions the single reviewer already weighs
+all at once.
+
+This is why it is worth the tokens: `--review-panel 3` runs the same prompt
+three times, so the three samples share whatever that prompt is blind to.
+Naming lenses asks three different questions instead, and approval still
+requires all of them, so a defect only the security lens would notice still
+blocks the proposal.
+
+Off unless you name a lens on that run — there is no saved default, and
+`init` does not set one. It does not combine with `--review-panel` (both are
+panels) or `--best-of`; either combination is refused rather than silently
+ignored.
+
 **`--review-report FILE`** writes the run's verdict, issues, findings-ledger
 history, and the actual proposed diff to `FILE` as markdown — durable,
 independent of however stdout gets captured (or discarded) by whatever
