@@ -68,6 +68,20 @@ SUBSTRATE_BACKENDS = ("auto", "clonefile", "fuse", "kernel", "copy")
 #: directory copies, no mounts, so nothing can refuse to tear it down.
 FALLBACK_BACKEND = "copy"
 
+#: The run id of the command in flight, for the one caller that cannot be
+#: handed it: _report_broken_pipe, which runs after stdout is already gone and
+#: has to name the durable record instead of printing it.
+_LAST_RUN_ID: str | None = None
+
+
+def set_last_run_id(run_id: str | None) -> None:
+    global _LAST_RUN_ID
+    _LAST_RUN_ID = run_id
+
+
+def last_run_id() -> str | None:
+    return _LAST_RUN_ID
+
 
 def _configured_backend() -> str | None:
     """An explicitly requested carrier, or None for the substrate's `auto`."""
@@ -724,6 +738,7 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
 
         base = new_run_id()
         event_logs = [RunEventLog(run_id=f"{base}-c{i}") for i in range(args.best_of)]
+        set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
             set_worker_budget(args.worker_budget, stream_hook=stream_hook)
@@ -1092,6 +1107,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         from .events import RunEventLog, WorkerStreamHook, repo_baseline_reader
 
         event_log = RunEventLog()
+        set_last_run_id(event_log.run_id)
         stream_hook = WorkerStreamHook(event_log, read_baseline=repo_baseline_reader(repo_root))
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
@@ -1375,6 +1391,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         base = new_run_id()
         event_logs = [RunEventLog(run_id=f"{base}-wa"), RunEventLog(run_id=f"{base}-wb")]
         event_log_main = RunEventLog(run_id=base)
+        set_last_run_id(base)
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         event_log_main.subscribe(VerboseReporter().handle_event)
         print(f"verbose: events → {event_log_main.root}/{base}*/events.ndjson", file=sys.stderr)
@@ -1690,6 +1707,7 @@ def cmd_runN(args) -> int:
         base = new_run_id()
         event_logs = [RunEventLog(run_id=f"{base}-w{i}") for i in range(len(features))]
         event_log_main = RunEventLog(run_id=base)
+        set_last_run_id(base)
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         event_log_main.subscribe(VerboseReporter().handle_event)
         print(f"verbose: events → {event_log_main.root}/{base}*/events.ndjson", file=sys.stderr)
@@ -2401,7 +2419,15 @@ def main() -> int:
             updatecheck.maybe_refresh_in_background()
         except Exception:
             check_updates = False
-    code = args.func(args)
+    try:
+        code = args.func(args)
+    except BrokenPipeError:
+        # `cmd | head` closes the pipe the moment it has its count. Every later
+        # write raises, and CPython's only account of it is "Exception ignored"
+        # at shutdown — so a caller reads five lines, sees no error, and takes
+        # them for the run. Say plainly that what they read is partial.
+        _report_broken_pipe()
+        return 141  # 128 + SIGPIPE, what a shell reports for the same thing
     if check_updates:
         try:
             from . import __version__, updatecheck
@@ -2417,6 +2443,34 @@ def main() -> int:
 def entry() -> None:
     """Console-script entry point (pyproject [project.scripts])."""
     sys.exit(main())
+
+
+def _report_broken_pipe() -> None:
+    """Say on stderr that stdout was cut, and where the whole record is.
+
+    stdout is gone by definition here, so the notice goes to stderr — which
+    `cmd | head` does not touch. Then stdout is pointed at /dev/null so the
+    interpreter's own flush at shutdown cannot turn this into CPython's
+    "Exception ignored in: <_io.TextIOWrapper …>" noise, which is what the
+    caller would otherwise see instead of an instruction.
+    """
+    run_id = last_run_id()
+    recover = f"shepherd-dev trace {run_id}" if run_id else "shepherd-dev status"
+    try:
+        print(
+            "\nwarning: stdout was truncated by the consumer (a pipe closed early) — "
+            "what you read is NOT the whole run.\n"
+            f"  full record: {recover}",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass  # stderr closed too: nothing left to say it with
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
