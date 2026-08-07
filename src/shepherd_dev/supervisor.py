@@ -1002,6 +1002,61 @@ def build_diff_text(
     return _render_entries_as_diff_text(read_changeset_entries(changeset), limit, repo_root)
 
 
+#: Where the reviewer may write while it works. It has to reconstruct files
+#: to check they parse; before this existed the only writable place was the
+#: tree under review, so its scratch was indistinguishable from tampering.
+REVIEW_SCRATCH_DIR = ".review-scratch"
+
+
+def _is_review_scratch(rel: str) -> bool:
+    """Only the scratch directory at the ROOT, and only as a directory.
+
+    `.review-scratch-evil/x` and `lib/.review-scratch/x` are ordinary paths:
+    a prefix test would exempt the first, and a basename test the second.
+    """
+    return rel.startswith(REVIEW_SCRATCH_DIR + "/")
+
+
+def _salvage_review_json(entries, salvage_dir: Path | None) -> Path | None:
+    """Keep the reviewer's analysis when its verdict is invalidated.
+
+    Returns where it went, or None. Never raises: a salvage that fails must
+    not turn one failure into two.
+    """
+    blob = entries.get("REVIEW.json") if salvage_dir is not None else None
+    if not blob:
+        return None
+    try:
+        salvage_dir.mkdir(parents=True, exist_ok=True)
+        target = salvage_dir / "REVIEW.invalidated.json"
+        target.write_bytes(blob)
+        return target
+    except Exception:
+        return None
+
+
+def emit_review_verdict(event_log, verdict, *, attempt: int | None = None) -> None:
+    """Record a verdict, keeping "no verdict" distinct from "rejected".
+
+    An errored verdict carries approved=False so every caller's `if approved`
+    fails closed — but writing that False into the record turned an ABSENCE of
+    judgement into a rejection, which reads as information nobody produced.
+    approved is null there, and the error travels with it.
+    """
+    if event_log is None or verdict is None:
+        return
+    payload = {
+        "approved": None if verdict.error else verdict.approved,
+        "summary": verdict.summary,
+    }
+    if verdict.error:
+        payload["error"] = verdict.error
+    try:
+        event_log.emit("review.verdict", payload, attempt=attempt)
+    except Exception:
+        pass
+
+
 def run_review(
     workspace,
     review_task,
@@ -1015,6 +1070,8 @@ def run_review(
     findings: str = "",
     repo_root: Path | None = None,
     lens: str = "",
+    workspace_drift=None,
+    salvage_dir: Path | None = None,
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
 
@@ -1037,6 +1094,24 @@ def run_review(
     output is retained (never applied), a deterministic guard requires the
     changeset to be exactly {REVIEW.json}, and the output is always discarded
     after the verdict is read.
+
+    That guard accuses whatever the changeset lists, and a changeset lists more
+    than the run wrote: a run forks from the workspace's ORIGINAL adoption
+    basis, so paths still pending against it come back in every later run's
+    changeset. Measured twice on the seed workspace — a run that wrote ONE file
+    came back carrying five, and both times those five were exactly the pending
+    proposal's paths. `workspace_drift` is that set (develop passes the
+    proposal's own paths) and is subtracted before anyone is accused.
+
+    The trade-off is deliberate: a reviewer that edits a file the proposal also
+    touches is no longer caught. Nothing it writes can reach the repository —
+    its changeset is discarded below, and settle writes the WORKER's — so the
+    exposure is a verdict formed after tampering with the copy under review,
+    against the certainty of destroying real reviews, which is what shipped.
+
+    `salvage_dir`, when given, receives the reviewer's REVIEW.json if the
+    verdict is invalidated. Invalidating a verdict is defensible; discarding
+    the analysis behind it — the clone is deleted moments later — is not.
     """
     if diff_text is None:
         diff_text = build_diff_text(changeset, repo_root=repo_root)
@@ -1061,12 +1136,21 @@ def run_review(
     output = run.output()
     try:
         entries = read_changeset_entries(output.changeset())
-        touched = sorted(entries)
+        drift = set(workspace_drift or ())
+        touched = sorted(
+            rel
+            for rel in entries
+            if rel not in drift and not _is_review_scratch(rel)
+        )
         if touched and touched != ["REVIEW.json"]:
+            kept = _salvage_review_json(entries, salvage_dir)
             return ReviewVerdict(
                 approved=False,
                 summary="",
-                error=f"reviewer touched files beyond REVIEW.json: {touched} — verdict invalidated",
+                error=(
+                    f"reviewer touched files beyond REVIEW.json: {touched} — verdict invalidated"
+                    + (f" (its REVIEW.json was kept at {kept})" if kept else "")
+                ),
             )
         if "REVIEW.json" not in entries:
             return ReviewVerdict(approved=False, summary="", error="reviewer produced no REVIEW.json")
@@ -1666,6 +1750,8 @@ def develop(
                         placement=placement,
                         context_pack=context_pack,
                         repo_root=repo_root,
+                        workspace_drift=set(entries),
+                        salvage_dir=getattr(event_log, "dir", None),
                     )
                 except Exception:
                     pass  # spec failure → the sequential path below reruns it
@@ -1772,10 +1858,12 @@ def develop(
                     context_pack=context_pack,
                     findings=ledger.guidance() if ledger is not None else "",
                     repo_root=repo_root,
+                    workspace_drift=set(entries),
+                    salvage_dir=getattr(event_log, "dir", None),
                 )
         report.review = verdict
         if verdict is not None:
-            _emit("review.verdict", {"approved": verdict.approved, "summary": verdict.summary}, attempt=number)
+            emit_review_verdict(event_log, verdict, attempt=number)
             for issue in verdict.issues or []:
                 _emit("review.issue", {"text": str(issue)}, attempt=number)
             if not verdict.error and ledger is not None:

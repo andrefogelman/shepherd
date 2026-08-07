@@ -170,9 +170,16 @@ DEFAULT_PROMPTS: dict[str, str] = {
     A listed finding you put in neither stays open, which is the right
     outcome when you did not check it.
 
-    Write EXACTLY ONE file: `REVIEW.json` at the repository root, valid
-    JSON with this schema and nothing else. Do not modify any other file;
-    any other change invalidates your verdict.
+    If you need to write something to do the work — reconstructing a file
+    to check it parses, saving a diff to apply — put it under
+    `.review-scratch/` at the repository root, and nowhere else. That
+    directory is yours and is ignored when your verdict is checked. A file
+    you write anywhere else invalidates the verdict, including a file you
+    delete afterwards.
+
+    Write EXACTLY ONE file outside it: `REVIEW.json` at the repository root,
+    valid JSON with this schema and nothing else. Do not modify any other
+    file; any other change invalidates your verdict.
     {
       "approved": true | false,
       "summary": "<one-paragraph overall assessment>",
