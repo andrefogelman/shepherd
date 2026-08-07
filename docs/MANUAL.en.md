@@ -637,6 +637,44 @@ default (3/3). Becomes useful once the history has accumulated real runs.
   resets it). Cost stays controlled: nothing runs without new material. Repo
   config wins over global; with no config, the automatic layer is off.
 
+## `jail_env` (letting the worker compile)
+
+The worker's jail is materialized from a **git tree**, so everything your
+`.gitignore` covers is absent by construction: `deps/`, `_build/`,
+`node_modules/`, `target/`, `.venv/`. On a compiled language that means the
+worker cannot compile, and an error the compiler would report in seconds
+instead costs a whole attempt plus a gate — measured on a real Phoenix repo,
+about thirteen minutes each.
+
+`jail_env` puts variables in the environment for the run, so the toolchain can
+reach a cache that lives outside the clone:
+
+```json
+{ "jail_env": {
+  "MIX_DEPS_PATH": "~/.cache/myapp-deps",
+  "MIX_BUILD_ROOT": ".claude-scratch/build"
+} }
+```
+
+Measured on that repo: a `git archive` checkout with no `deps/` and no
+`_build/` compiles in 42s with `MIX_DEPS_PATH` set, and the dependency cache is
+only ever read — zero files touched. A relative value stays relative (the
+worker's working directory is the clone), and a leading `~` is expanded here,
+because the value travels as an environment variable and nothing downstream
+expands it.
+
+Two things worth knowing before you use it. The variables reach **every** child
+this command spawns, the gate included — the substrate has no per-run
+environment hook, so this is the only route to the worker. And variables that
+redirect a Python interpreter or its import path (`PYTHONPATH`, `PYTHONHOME`,
+`VIRTUAL_ENV`, `PYTEST_ADDOPTS`, and the rest of that family) are refused:
+shepherd scrubs exactly those before spawning its own interpreters, and a repo
+config must not put them back.
+
+Keep the cache in sync with your lockfile. A stale one fails the build for a
+reason the worker cannot fix from inside the sandbox, which is worse than not
+compiling at all.
+
 ## Remote gate (build/test on another host)
 
 Some repos only build/test in an environment the local machine lacks — a

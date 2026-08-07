@@ -633,6 +633,43 @@ padrão (3/3). Fica útil depois que o histórico acumular execuções reais.
   zera). Custo controlado: nada roda sem material novo. Config do repo vence a
   global; sem config, o automático fica desligado.
 
+## `jail_env` (deixar o worker compilar)
+
+O jail do worker é materializado a partir de uma **árvore git**, então tudo que
+seu `.gitignore` cobre está ausente por construção: `deps/`, `_build/`,
+`node_modules/`, `target/`, `.venv/`. Em linguagem compilada isso significa que
+o worker não consegue compilar, e um erro que o compilador apontaria em
+segundos custa uma tentativa inteira mais o portão — medido num repo Phoenix
+real, cerca de treze minutos cada.
+
+`jail_env` põe variáveis no ambiente da execução, para o toolchain alcançar um
+cache que vive fora do clone:
+
+```json
+{ "jail_env": {
+  "MIX_DEPS_PATH": "~/.cache/meuapp-deps",
+  "MIX_BUILD_ROOT": ".claude-scratch/build"
+} }
+```
+
+Medido nesse repo: um checkout de `git archive`, sem `deps/` e sem `_build/`,
+compila em 42s com `MIX_DEPS_PATH` definido, e o cache de dependências é apenas
+**lido** — zero arquivos tocados. Valor relativo continua relativo (o diretório
+de trabalho do worker é o clone), e `~` no início é expandido aqui, porque o
+valor viaja como variável de ambiente e nada adiante expande.
+
+Duas coisas a saber antes de usar. As variáveis chegam a **todo** processo
+filho deste comando, portão inclusive — o substrato não tem hook de ambiente
+por execução, então esta é a única rota até o worker. E variáveis que
+redirecionam interpretador Python ou seu caminho de import (`PYTHONPATH`,
+`PYTHONHOME`, `VIRTUAL_ENV`, `PYTEST_ADDOPTS` e o resto dessa família) são
+recusadas: shepherd remove exatamente essas antes de lançar os próprios
+interpretadores, e config de repo não pode repô-las.
+
+Mantenha o cache em sincronia com seu lockfile. Um cache defasado quebra o
+build por um motivo que o worker não tem como consertar de dentro do sandbox —
+pior que não compilar.
+
 ## Portão remoto (build/test em outro host)
 
 Alguns repos só compilam/testam num ambiente que a máquina local não tem — um

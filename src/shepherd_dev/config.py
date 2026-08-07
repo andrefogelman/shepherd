@@ -7,6 +7,7 @@ metadata, not local state). Stores `test_cmd` and `review_panel` today.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -315,6 +316,76 @@ def planning_config(repo_root: Path) -> dict:
             if isinstance(model, str) and model.strip():
                 out["model"] = model.strip()
     return out
+
+
+#: Variables a repo may NOT set through jail_env. Every one of them redirects
+#: an interpreter or its import path — the exact class supervisor scrubs in
+#: CHILD_PYTHON_ENV_STRIP / GATE_ENV_STRIP, because a wrong PYTHONHOME stops
+#: the interpreter booting before any of our code runs and a leaked PYTHONPATH
+#: puts the supervisor's own source on the sandbox's sys.path. Letting a repo
+#: config reintroduce them would undo those guarantees from the outside.
+JAIL_ENV_REFUSED = frozenset({
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV",
+    "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "__PYVENV_LAUNCHER__",
+})
+
+
+def jail_env(repo_root: Path) -> dict[str, str]:
+    """The repo's declared `jail_env`, ready to put in the environment.
+
+    The worker's jail is materialized from a git tree, so everything
+    gitignored is absent by construction: deps/, _build/, node_modules/,
+    target/, .venv/. A worker on a compiled language therefore cannot compile,
+    and errors a compiler reports in seconds cost a whole attempt plus a gate.
+    `jail_env` lets the repo point its toolchain at a cache that lives outside
+    the clone — measured on a Phoenix repo: a git-archive checkout with no
+    deps/ compiles in 42s with MIX_DEPS_PATH set, and the cache is only read.
+
+    Values are taken verbatim except for a leading `~`, which is expanded here
+    because nothing between this and the worker's process will do it — the
+    value travels as an environment variable, not as shell input. A relative
+    value stays relative, since it means "inside the clone" and the clone is
+    the worker's working directory.
+    """
+    raw = load_config(repo_root).get("jail_env")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if key in JAIL_ENV_REFUSED:
+            continue
+        out[key] = str(Path(value).expanduser()) if value.startswith("~") else value
+    return out
+
+
+@contextlib.contextmanager
+def jail_env_applied(repo_root: Path):
+    """Put the repo's jail_env in os.environ for the duration of the block.
+
+    The substrate has no per-run environment hook — RuntimeOptions carries
+    trace, provider and model and nothing else — so the values reach the
+    worker the only way left: the provider spawns it as a child of this
+    process. Which also means they reach every other child this command
+    spawns, the gate included. That is why JAIL_ENV_REFUSED exists, and why a
+    repo pointing its toolchain at a dependency cache is the intended use: the
+    gate needs the same cache to be honest about the same tree.
+    """
+    values = jail_env(repo_root)
+    if not values:
+        yield
+        return
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 def remote_gate(repo_root: Path) -> "RemoteGateConfig | None":
