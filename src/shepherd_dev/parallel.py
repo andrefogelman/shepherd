@@ -103,13 +103,12 @@ def _clone_workspace(repo_root: Path, overlay: dict[str, bytes] | None = None) -
     fast_copytree(Path(repo_root), clone, ignored=set(IGNORED_DIRS) | {".git"})
     if overlay:
         materialize_into(clone, overlay)
+    from .cli import run_shepherd_init
+
     shepherd_bin = Path(sys.executable).parent / "shepherd"
-    proc = subprocess.run(
-        [str(shepherd_bin), "init"], cwd=clone, capture_output=True, text=True,
-        env=child_python_env(),  # `shepherd` is a python entry point too
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"shepherd init failed in clone: {proc.stderr.strip()}")
+    failed = run_shepherd_init(shepherd_bin, clone)
+    if failed:
+        raise RuntimeError(f"{failed} (in clone)")
     return clone
 
 

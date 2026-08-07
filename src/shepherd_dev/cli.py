@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -56,6 +57,71 @@ MAX_REVIEW_PANEL = 5
 #: Same bounded-allowance reasoning as MAX_REVIEW_PANEL, and the catalogue
 #: is this size anyway — naming every lens is the widest panel on offer.
 MAX_REVIEW_LENSES = 5
+
+#: Carrier backends `shepherd init --backend` accepts. Kept as a whitelist so
+#: a typo in the environment is dropped here, where we can say so, instead of
+#: reaching argparse on the other side and failing the run with a message that
+#: reads as ours.
+SUBSTRATE_BACKENDS = ("auto", "clonefile", "fuse", "kernel", "copy")
+
+#: The universal floor (vcs_core.substrates._auto_detect_backend_name): plain
+#: directory copies, no mounts, so nothing can refuse to tear it down.
+FALLBACK_BACKEND = "copy"
+
+
+def _configured_backend() -> str | None:
+    """An explicitly requested carrier, or None for the substrate's `auto`."""
+    name = os.environ.get("SHEPHERD_DEV_BACKEND", "").strip()
+    return name if name in SUBSTRATE_BACKENDS else None
+
+
+def shepherd_init_argv(shepherd_bin, backend: str | None = None) -> list[str]:
+    """`shepherd init` argv, carrying a carrier choice when there is one."""
+    argv = [str(shepherd_bin), "init"]
+    chosen = backend or _configured_backend()
+    if chosen:
+        argv += ["--backend", chosen]
+    return argv
+
+
+def _is_carrier_lifecycle_error(text: str) -> bool:
+    """Does this failure say the CARRIER could not complete its lifecycle?
+
+    The substrate probes for fuse-overlayfs by checking that /dev/fuse,
+    fuse-overlayfs and fusermount3 exist. On a GitHub runner they exist and
+    mounting works — unmounting is refused. `auto` therefore resolves to a
+    carrier that cannot tear itself down, and `shepherd init` reports the
+    workspace as initialized-but-failed. Narrow on purpose: a real init
+    failure (not a git repo, no permission on the path) must be reported,
+    not retried into a second, more confusing failure.
+    """
+    low = (text or "").lower()
+    return ("unmount" in low or "fusermount" in low) and "operation not permitted" in low
+
+
+def run_shepherd_init(shepherd_bin, cwd, *, capture: bool = True) -> str | None:
+    """Run `shepherd init` in `cwd`. None on success, else the error text.
+
+    Retries once on the portable copy carrier when the failure is the
+    platform refusing to tear down its own overlay — but never when the
+    caller named a backend, because then the choice was theirs to see fail.
+    """
+    def _once(argv):
+        return subprocess.run(
+            argv, cwd=str(cwd), capture_output=capture, text=True,
+            env=child_python_env(),  # `shepherd` is a python entry point too
+        )
+
+    proc = _once(shepherd_init_argv(shepherd_bin))
+    if proc.returncode == 0:
+        return None
+    detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip()) if capture else ""
+    if _configured_backend() is None and _is_carrier_lifecycle_error(detail):
+        proc = _once(shepherd_init_argv(shepherd_bin, FALLBACK_BACKEND))
+        if proc.returncode == 0:
+            return None
+        detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip()) if capture else ""
+    return f"shepherd init failed: {detail}" if capture else f"shepherd init failed (exit {proc.returncode})"
 
 
 def _validate_review_rounds(
@@ -439,12 +505,9 @@ def _refresh_substrate(repo_root: Path, fresh: bool = False) -> str | None:
             shutil.rmtree(vcscore)
 
         shepherd_bin = Path(sys.executable).parent / "shepherd"
-        proc = subprocess.run(
-            [str(shepherd_bin), "init"], cwd=repo_root, capture_output=True, text=True,
-            env=child_python_env(),  # `shepherd` is a python entry point too
-        )
-        if proc.returncode != 0:
-            return f"shepherd init failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        failed = run_shepherd_init(shepherd_bin, repo_root)
+        if failed:
+            return failed
         if key is not None:
             try:
                 (repo_root / ".vcscore" / _ADOPT_KEY_FILE).write_text(key, encoding="utf-8")
@@ -1728,12 +1791,11 @@ def cmd_init(args) -> int:
         print(f"error: repo not found: {repo_root}", file=sys.stderr)
         return 2
     shepherd_bin = Path(sys.executable).parent / "shepherd"
-    proc = subprocess.run(
-        [str(shepherd_bin), "init"], cwd=repo_root,
-        env=child_python_env(),  # `shepherd` is a python entry point too
-    )
-    if proc.returncode != 0:
-        return proc.returncode
+    # capture=False: this is the user-facing `init`, whose output is the point.
+    failed = run_shepherd_init(shepherd_bin, repo_root, capture=False)
+    if failed:
+        print(f"error: {failed}", file=sys.stderr)
+        return 1
 
     if args.no_gitignore:
         print("skipped .gitignore (--no-gitignore); add: " + "  ".join(GITIGNORE_ENTRIES))
