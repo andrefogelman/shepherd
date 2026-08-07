@@ -24,6 +24,12 @@ from .supervisor import IGNORED_DIRS
 # exclude them from the pack scan on top of the shared ignore set.
 PACK_IGNORED_DIRS = IGNORED_DIRS | {
     "dist", "build", "out", ".next", "target", "coverage", "vendor", "public",
+    # Elixir. Measured on a real Phoenix repo: 3969 of the 4000 files the scan
+    # is capped at were under deps/, leaving 27 that belonged to the repo — so
+    # the pack described third-party dependency source instead. rglob is
+    # sorted, which is what makes it total rather than partial: `_build/` and
+    # `deps/` are consumed before `lib/` is ever reached.
+    "deps", "_build",
 }
 
 PACK_BUDGET = 25_000          # chars for the whole pack

@@ -209,5 +209,67 @@ class SharedRepoScan(unittest.TestCase):
             build_pack(root, "orders listing", allowed_prefixes=(), scan=scan)
 
 
+class ElixirBuildDirsAreNotContextTests(unittest.TestCase):
+    """Measured on a real Phoenix repo: of the 4000 files the scan is capped
+    at, 3969 were under deps/ and 27 belonged to the repo. The ignore list
+    covered node_modules, vendor and target — Node, PHP, Rust — and nothing
+    for Elixir, so every Elixir pack was third-party dependency source.
+
+    Alphabetical order is what makes it total rather than partial: rglob is
+    sorted, so `_build/` and `deps/` are consumed before `lib/` is reached.
+    """
+
+    def _repo(self, dep_files: int) -> Path:
+        from tmpdirs import mkdtemp
+
+        root = Path(mkdtemp(prefix="shepherd-pack-elixir-"))
+        (root / "lib" / "app_web").mkdir(parents=True)
+        (root / "lib" / "app_web" / "router.ex").write_text(
+            'defmodule AppWeb.Router do\n  scope "/" do\n  end\nend\n'
+        )
+        for name, sub in (("_build", "dev/lib/app/ebin"), ("deps", "phoenix/lib")):
+            d = root / name / sub
+            d.mkdir(parents=True)
+            for i in range(dep_files):
+                (d / f"mod_{i}.ex").write_text(f"defmodule Vendor.M{i} do\nend\n")
+        return root
+
+    def test_both_dirs_are_classified_as_build_output(self):
+        from shepherd_dev.contextpack import PACK_IGNORED_DIRS
+
+        self.assertIn("deps", PACK_IGNORED_DIRS)
+        self.assertIn("_build", PACK_IGNORED_DIRS)
+
+    def test_the_scan_returns_the_repos_own_files_not_its_dependencies(self):
+        root = self._repo(dep_files=5)
+        scanned = {str(p.relative_to(root)) for p in scan_repo(root).files}
+        self.assertIn("lib/app_web/router.ex", scanned)
+        self.assertFalse(
+            [rel for rel in scanned if rel.startswith(("deps/", "_build/"))],
+            "dependency and build-output sources are not this repo's context",
+        )
+
+    def test_a_large_dependency_tree_no_longer_crowds_out_the_repo(self):
+        """The seed failure in miniature: with the scan cap lowered to the
+        size of the dependency tree, the repo's own file survived only
+        because deps/ is skipped before the cap is ever reached."""
+        import shepherd_dev.contextpack as CP
+
+        root = self._repo(dep_files=40)
+        real_cap = CP.SCAN_FILE_CAP
+        CP.SCAN_FILE_CAP = 10
+        try:
+            scanned = {str(p.relative_to(root)) for p in scan_repo(root).files}
+        finally:
+            CP.SCAN_FILE_CAP = real_cap
+        self.assertIn("lib/app_web/router.ex", scanned)
+
+    def test_the_pack_built_from_such_a_repo_talks_about_the_repo(self):
+        root = self._repo(dep_files=5)
+        pack, stats = build_pack(root, "add a route to the router")
+        self.assertIn("router.ex", pack)
+        self.assertNotIn("Vendor.M0", pack)
+
+
 if __name__ == "__main__":
     unittest.main()
