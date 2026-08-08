@@ -360,6 +360,99 @@ def jail_env(repo_root: Path) -> dict[str, str]:
     return out
 
 
+def jail_seed(repo_root: Path) -> dict[str, str]:
+    """The repo's declared `jail_seed`, as {ENV_VAR: warm origin path}.
+
+    jail_env is enough for a cache that is only READ — a dependency tree.
+    A build cache is written, so pointing every run at one shared directory
+    means two writers the moment a human compiles locally while a worker
+    runs. Seeding hands each run its own copy instead, and the origin stays a
+    clean warm baseline nothing writes to.
+    """
+    raw = load_config(repo_root).get("jail_seed")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if key in JAIL_ENV_REFUSED:  # this sets an env var too — same guard
+            continue
+        out[key] = str(Path(value).expanduser())
+    return out
+
+
+def _clone_dir_fast(src: Path, dest: Path) -> bool:
+    """APFS clone of a directory tree: copy-on-write, so a 56M build cache
+    costs half a second and no disk until it diverges. True when it worked.
+
+    Only APFS has clonefile; everywhere else this fails and the caller copies.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["cp", "-c", "-R", str(src), str(dest)],
+            capture_output=True, timeout=300,
+        )
+        return proc.returncode == 0 and dest.exists()
+    except Exception:
+        return False
+
+
+def _copy_tree(src: Path, dest: Path) -> None:
+    """Seed `dest` from `src`, cheaply where the filesystem allows it."""
+    import shutil
+
+    if _clone_dir_fast(src, dest):
+        return
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
+
+
+@contextlib.contextmanager
+def jail_seed_applied(repo_root: Path):
+    """Give this run its own copy of each declared warm cache.
+
+    Each key becomes an environment variable pointing at a fresh copy, and the
+    copy is destroyed when the run ends — so concurrent lanes cannot corrupt
+    each other and the origin is never written. A missing origin yields an
+    empty directory rather than an error: the first run, before any warm cache
+    exists, must still work (the toolchain simply builds cold into it).
+
+    Whether a cache survives being copied to a new path is the toolchain's
+    business, not shepherd's. Measured: an Elixir _build does (4.76s against
+    38.24s cold, source at a new path too). A Python venv does NOT — its
+    shebangs hold absolute paths and keep pointing at the origin. The manual
+    says so; this code stays language-agnostic.
+    """
+    import shutil
+    import tempfile
+
+    origins = jail_seed(repo_root)
+    if not origins:
+        yield
+        return
+    previous = {key: os.environ.get(key) for key in origins}
+    root = Path(tempfile.mkdtemp(prefix="shepherd-seed-"))
+    try:
+        for key, origin in origins.items():
+            target = root / key
+            src = Path(origin)
+            if src.is_dir():
+                _copy_tree(src, target)
+            target.mkdir(parents=True, exist_ok=True)
+            os.environ[key] = str(target)
+        yield
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+        shutil.rmtree(root, ignore_errors=True)
+
+
 @contextlib.contextmanager
 def jail_env_applied(repo_root: Path):
     """Put the repo's jail_env in os.environ for the duration of the block.

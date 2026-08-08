@@ -670,6 +670,33 @@ Mantenha o cache em sincronia com seu lockfile. Um cache defasado quebra o
 build por um motivo que o worker não tem como consertar de dentro do sandbox —
 pior que não compilar.
 
+`jail_env` basta para cache que só é LIDO — uma árvore de dependências. Cache
+de BUILD é escrito, então apontar toda execução para um único diretório
+compartilhado significa dois escritores no instante em que você compila
+localmente com um worker rodando. `jail_seed` dá a cada execução a sua própria
+cópia:
+
+```json
+{ "jail_seed": { "MIX_BUILD_ROOT": "~/.cache/meuapp-build" } }
+```
+
+Cada chave vira uma variável de ambiente apontando para uma cópia fresca
+daquela origem, destruída ao fim da execução. Lanes concorrentes não se
+corrompem, e a origem nunca é escrita — segue como baseline quente limpa.
+Origem inexistente vira diretório vazio em vez de erro, então a primeira
+execução funciona antes de existir cache.
+
+Medido num repo Phoenix: 38,24s a frio; o build quente de 56M clona em 0,49s
+(`cp -c`, cópia-na-escrita do APFS) e compila em 4,76s com o fonte em caminho
+novo — que é o que todo jail é. Fora do APFS não há clonefile e a cópia é
+real: ainda vale, mas a conta muda com o tamanho do seu cache.
+
+**Se um cache sobrevive a mudar de caminho é assunto do seu toolchain, não do
+shepherd.** Um `_build` de Elixir sobrevive — é a medição acima. Um `.venv` de
+Python NÃO: os shebangs guardam caminho absoluto, então a cópia continua
+chamando o interpretador da origem e se ignora em silêncio. Semeie saída de
+build, não ambientes.
+
 ## Portão remoto (build/test em outro host)
 
 Alguns repos só compilam/testam num ambiente que a máquina local não tem — um

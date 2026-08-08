@@ -675,6 +675,33 @@ Keep the cache in sync with your lockfile. A stale one fails the build for a
 reason the worker cannot fix from inside the sandbox, which is worse than not
 compiling at all.
 
+`jail_env` is enough for a cache that is only READ — a dependency tree. A
+BUILD cache is written, so pointing every run at one shared directory means
+two writers the moment you compile locally while a worker is running.
+`jail_seed` gives each run its own copy instead:
+
+```json
+{ "jail_seed": { "MIX_BUILD_ROOT": "~/.cache/myapp-build" } }
+```
+
+Each key becomes an environment variable pointing at a fresh copy of that
+origin, destroyed when the run ends. Concurrent lanes cannot corrupt each
+other, and the origin is never written — it stays a clean warm baseline. A
+missing origin yields an empty directory rather than an error, so the first
+run works before any cache exists.
+
+Measured on a Phoenix repo: 38.24s cold; the 56M warm build clones in 0.49s
+(`cp -c`, APFS copy-on-write) and compiles in 4.76s with the source at a new
+path, which is what every jail is. Outside APFS there is no clonefile and the
+copy is a real one — still worth it, but the arithmetic changes with the size
+of your cache.
+
+**Whether a cache survives being copied to a new path is your toolchain's
+business, not shepherd's.** An Elixir `_build` does — that is the measurement
+above. A Python `.venv` does NOT: its shebangs hold absolute paths, so the
+copy keeps invoking the interpreter at the origin and silently ignores itself.
+Seed build output, not environments.
+
 ## Remote gate (build/test on another host)
 
 Some repos only build/test in an environment the local machine lacks — a

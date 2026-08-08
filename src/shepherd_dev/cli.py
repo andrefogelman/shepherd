@@ -996,7 +996,7 @@ def cmd_run(args) -> int:
         # Around the whole command, not just the worker: the substrate has no
         # per-run env hook, so these reach the worker by being in this
         # process's environment when the provider spawns it.
-        with config.jail_env_applied(repo_root):
+        with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
             return _cmd_run_inner(args, repo_root)
     finally:
         _maybe_optimize_after(args, repo_root)
@@ -1358,7 +1358,7 @@ def cmd_run2(args) -> int:
     if repo_root is None:
         return 2
     try:
-        with config.jail_env_applied(repo_root):
+        with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
             return _cmd_run2_inner(args, repo_root)
     finally:
         _maybe_optimize_after(args, repo_root)
@@ -1724,7 +1724,7 @@ def cmd_runN(args) -> int:
     placement = "jail" if args.provider == "claude" else "advisory"
     reviewer = None if (args.no_review or args.provider == "static") else review
 
-    with config.jail_env_applied(repo_root):
+    with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
         report = develop_many(
             repo_root,
             [_with_hint(f, gate_hint) for f in features],
