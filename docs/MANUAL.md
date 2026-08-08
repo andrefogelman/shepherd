@@ -642,8 +642,8 @@ o worker não consegue compilar, e um erro que o compilador apontaria em
 segundos custa uma tentativa inteira mais o portão — medido num repo Phoenix
 real, cerca de treze minutos cada.
 
-`jail_env` põe variáveis no ambiente da execução, para o toolchain alcançar um
-cache que vive fora do clone:
+`jail_env` põe variáveis no ambiente da execução, para um toolchain alcançar
+um cache que vive fora do clone:
 
 ```json
 { "jail_env": {
@@ -729,6 +729,27 @@ registrado. Nunca pior que não ter.
 Não é lugar para nada que decide. Linter que REPROVA por estilo pertence ao
 portão, onde o veredito é visível; `pre_gate_cmd` é para o corretor que teria
 tornado aquele veredito desnecessário.
+
+**Até onde cada um alcança, medido.** Um worker no jail LÊ fora do seu clone e
+ESCREVE apenas dentro dele. Do journal de uma execução real, com o worker
+sondando o próprio sandbox:
+
+```
+ls    ~/.cache/app-build           → listou
+touch ~/.cache/app-build/probe     → Operation not permitted
+mkdir /tmp/probe-write-test        → Operation not permitted
+```
+
+Então `jail_env` apontando para um cache de dependências funciona no worker —
+ler é tudo de que ele precisa. `jail_seed` não: a cópia semeada é um diretório
+temporário fora de todo clone, e o worker não escreve lá. Ele serve o portão e
+o `pre_gate_cmd`, que rodam fora do jail — **não o worker**.
+
+O que significa que o worker não compila, e nenhuma configuração daqui muda
+isso: compilar exige escrever. Se você ia mandar um worker rodar um formatador,
+use `pre_gate_cmd` — ele roda onde escrever é permitido. Worker mandado formatar
+gasta a tentativa descobrindo o erro de permissão, que foi como este limite
+apareceu.
 
 ## Portão remoto (build/test em outro host)
 

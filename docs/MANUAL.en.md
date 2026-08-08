@@ -646,7 +646,7 @@ worker cannot compile, and an error the compiler would report in seconds
 instead costs a whole attempt plus a gate — measured on a real Phoenix repo,
 about thirteen minutes each.
 
-`jail_env` puts variables in the environment for the run, so the toolchain can
+`jail_env` puts variables in the environment for the run, so a toolchain can
 reach a cache that lives outside the clone:
 
 ```json
@@ -733,6 +733,27 @@ reason is on the record. Never worse than not having it.
 Not a place for anything that decides. A linter that FAILS on style belongs in
 the gate, where its verdict is visible; `pre_gate_cmd` is for the fixer that
 would have made that verdict unnecessary.
+
+**Who these reach, measured.** A jailed worker READS outside its clone and
+WRITES nowhere but inside it. From a real run's journal, the worker probing
+its own sandbox:
+
+```
+ls    ~/.cache/app-build           → listed it
+touch ~/.cache/app-build/probe     → Operation not permitted
+mkdir /tmp/probe-write-test        → Operation not permitted
+```
+
+So `jail_env` pointing at a dependency cache works for the worker — reading is
+all it needs. `jail_seed` does not: the seeded copy is a temp directory outside
+every clone, and the worker cannot write there. It serves the gate and
+`pre_gate_cmd`, which run outside the jail — **not the worker**.
+
+Which means the worker cannot compile, and no configuration here changes that:
+building needs to write. If you were about to tell a worker to run a formatter,
+use `pre_gate_cmd` instead — it runs where writing is allowed. A worker told to
+format spends the attempt discovering the permission error, which is how this
+limit was found.
 
 ## Remote gate (build/test on another host)
 

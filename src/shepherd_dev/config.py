@@ -380,6 +380,14 @@ def jail_seed(repo_root: Path) -> dict[str, str]:
     means two writers the moment a human compiles locally while a worker
     runs. Seeding hands each run its own copy instead, and the origin stays a
     clean warm baseline nothing writes to.
+
+    Reaches the GATE and pre_gate_cmd, NOT the worker. Measured from a real
+    run's journal: a jailed worker reads outside its clone (it listed the
+    cache) but writes nowhere else — `touch` on the cache and `mkdir /tmp/x`
+    both came back "Operation not permitted". The seeded copy is a temp
+    directory outside every clone, so a worker handed this variable finds it
+    unwritable and burns the attempt discovering that. jail_env survives the
+    jail because reading is all it needs; this does not.
     """
     raw = load_config(repo_root).get("jail_seed")
     if not isinstance(raw, dict):
