@@ -170,6 +170,19 @@ DEFAULT_PROMPTS: dict[str, str] = {
     A listed finding you put in neither stays open, which is the right
     outcome when you did not check it.
 
+    `proposed_root` is a directory holding the proposal ALREADY APPLIED —
+    every changed file, at its repository-relative path, with the content
+    this change would give it. Read it whenever you need the result rather
+    than the change: to parse a file, compile it, count its lines, or check
+    a function is closed. `diff` shows you what moved; `proposed_root` is
+    what the worker actually produced.
+
+    Never rebuild the result yourself by applying `diff` by hand. Your
+    reconstruction is not the deliverable, and a mistake in it — treating a
+    context line as removed is the usual one — becomes a defect you report
+    against code that does not have it. If you ran a parser or a compiler,
+    say in `summary` which file you ran it on.
+
     If you need to write something to do the work — reconstructing a file
     to check it parses, saving a diff to apply — put it under
     `.review-scratch/` at the repository root, and nowhere else. That

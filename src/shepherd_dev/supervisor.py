@@ -8,6 +8,7 @@ stays retained; settlement (select/apply/discard) is always a human decision.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import json
 import os
@@ -1017,6 +1018,34 @@ def _is_review_scratch(rel: str) -> bool:
     return rel.startswith(REVIEW_SCRATCH_DIR + "/")
 
 
+@contextlib.contextmanager
+def _proposal_on_disk(entries):
+    """Write the proposal's files to a temporary root, for the length of one
+    review, and hand back that root.
+
+    The reviewer reads the tree as it stands BEFORE the change (the proposal is
+    never applied to it) and receives the change as a unified diff. That is the
+    right shape for seeing WHAT changed, and the wrong shape for any mechanical
+    check: to parse or compile the result, the reviewer has to rebuild it, and
+    a rebuild it got wrong is what it then reports as the worker's defect —
+    observed once, with the gate green on the same proposal.
+
+    Paths come from the worker, so each is confined to the root: `..` in a
+    changeset entry would otherwise write outside it.
+    """
+    root = Path(tempfile.mkdtemp(prefix="shepherd-proposed-"))
+    try:
+        for rel, content in (entries or {}).items():
+            target = (root / rel).resolve()
+            if not target.is_relative_to(root.resolve()):
+                continue  # escapes the root — not ours to write
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _salvage_review_json(entries, salvage_dir: Path | None) -> Path | None:
     """Keep the reviewer's analysis when its verdict is invalidated.
 
@@ -1033,6 +1062,50 @@ def _salvage_review_json(entries, salvage_dir: Path | None) -> Path | None:
         return target
     except Exception:
         return None
+
+
+#: Ways a reviewer says "this would not build". Deliberately about the claim,
+#: not about any one language: the check that follows is a comparison against
+#: the gate, and the gate is whatever the repo configured.
+_NO_BUILD_CLAIM = re.compile(
+    r"does not compile|doesn'?t compile|will not build|won'?t build|fails to compile"
+    r"|compilation (?:error|failure|fails)|syntax ?error|missing terminator"
+    r"|unclosed|left open|permanently unclosed|unexpected token|parse error",
+    re.I,
+)
+
+
+def _claims_it_does_not_build(issues) -> bool:
+    return any(_NO_BUILD_CLAIM.search(str(i or "")) for i in (issues or ()))
+
+
+def flag_gate_contradiction(verdict, gate):
+    """Append a note when a rejection says the change cannot build and the
+    gate — on that same proposal — already built and tested it.
+
+    Observed once: a reviewer rebuilt a patched file by hand, got the rebuild
+    wrong, parsed its own reconstruction, and reported the failure as the
+    worker's. The gate had compiled the proposal and run 952 tests green in
+    the same run. A compiled language compiles before it tests, so those two
+    statements cannot both be true.
+
+    The verdict is NOT overturned. Accusing is the reviewer's job and deciding
+    is the human's; this only makes the contradiction impossible to miss.
+    """
+    if verdict is None or verdict.error or verdict.approved:
+        return verdict
+    if gate is None or not getattr(gate, "passed", False):
+        return verdict
+    if not _claims_it_does_not_build(verdict.issues):
+        return verdict
+    tail = " | ".join((getattr(gate, "output_tail", "") or "").strip().splitlines()[-3:])
+    verdict.issues = list(verdict.issues) + [
+        "[shepherd] this rejection contradicts the gate, which built and tested "
+        f"THIS proposal successfully — gate tail: {tail}. If the claim came from a "
+        "file you reconstructed rather than from proposed_root, it is the "
+        "reconstruction that failed, not the change."
+    ]
+    return verdict
 
 
 def emit_review_verdict(event_log, verdict, *, attempt: int | None = None) -> None:
@@ -1113,55 +1186,58 @@ def run_review(
     verdict is invalidated. Invalidating a verdict is defensible; discarding
     the analysis behind it — the clone is deleted moments later — is not.
     """
+    entries_proposed = read_changeset_entries(changeset) if changeset is not None else {}
     if diff_text is None:
         diff_text = build_diff_text(changeset, repo_root=repo_root)
     workspace.tasks.register(review_task)
-    try:
-        run = workspace.run(
-            review_task,
-            repo=workspace.git_repo(),
-            placement=placement,
-            runtime={"provider": provider},
-            args={
-                "feature": feature,
-                "diff": diff_text,
-                "context": context_pack or "",
-                "findings": findings,
-                "lens": lens,
-            },
-        )
-    except Exception as exc:
-        return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
-
-    output = run.output()
-    try:
-        entries = read_changeset_entries(output.changeset())
-        drift = set(workspace_drift or ())
-        touched = sorted(
-            rel
-            for rel in entries
-            if rel not in drift and not _is_review_scratch(rel)
-        )
-        if touched and touched != ["REVIEW.json"]:
-            kept = _salvage_review_json(entries, salvage_dir)
-            return ReviewVerdict(
-                approved=False,
-                summary="",
-                error=(
-                    f"reviewer touched files beyond REVIEW.json: {touched} — verdict invalidated"
-                    + (f" (its REVIEW.json was kept at {kept})" if kept else "")
-                ),
-            )
-        if "REVIEW.json" not in entries:
-            return ReviewVerdict(approved=False, summary="", error="reviewer produced no REVIEW.json")
-        data = json.loads(entries["REVIEW.json"].decode("utf-8", errors="replace"))
-    except Exception as exc:
-        return ReviewVerdict(approved=False, summary="", error=f"invalid REVIEW.json: {exc}")
-    finally:
+    with _proposal_on_disk(entries_proposed) as proposed_root:
         try:
-            output.discard()
-        except Exception:
-            pass
+            run = workspace.run(
+                review_task,
+                repo=workspace.git_repo(),
+                placement=placement,
+                runtime={"provider": provider},
+                args={
+                    "feature": feature,
+                    "diff": diff_text,
+                    "context": context_pack or "",
+                    "findings": findings,
+                    "lens": lens,
+                    "proposed_root": str(proposed_root),
+                },
+            )
+        except Exception as exc:
+            return ReviewVerdict(approved=False, summary="", error=f"review run failed: {exc}")
+
+        output = run.output()
+        try:
+            entries = read_changeset_entries(output.changeset())
+            drift = set(workspace_drift or ())
+            touched = sorted(
+                rel
+                for rel in entries
+                if rel not in drift and not _is_review_scratch(rel)
+            )
+            if touched and touched != ["REVIEW.json"]:
+                kept = _salvage_review_json(entries, salvage_dir)
+                return ReviewVerdict(
+                    approved=False,
+                    summary="",
+                    error=(
+                        f"reviewer touched files beyond REVIEW.json: {touched} — verdict invalidated"
+                        + (f" (its REVIEW.json was kept at {kept})" if kept else "")
+                    ),
+                )
+            if "REVIEW.json" not in entries:
+                return ReviewVerdict(approved=False, summary="", error="reviewer produced no REVIEW.json")
+            data = json.loads(entries["REVIEW.json"].decode("utf-8", errors="replace"))
+        except Exception as exc:
+            return ReviewVerdict(approved=False, summary="", error=f"invalid REVIEW.json: {exc}")
+        finally:
+            try:
+                output.discard()
+            except Exception:
+                pass
 
     return ReviewVerdict(
         # `is True`, not bool(). bool() fails OPEN on the answer a model most
@@ -1861,6 +1937,10 @@ def develop(
                     workspace_drift=set(entries),
                     salvage_dir=getattr(event_log, "dir", None),
                 )
+        # Before it is recorded or fed to the ledger: a "this cannot build"
+        # rejection against a gate that just built it is a contradiction the
+        # human should not have to spot unaided.
+        verdict = flag_gate_contradiction(verdict, gate)
         report.review = verdict
         if verdict is not None:
             emit_review_verdict(event_log, verdict, attempt=number)
