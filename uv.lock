@@ -352,7 +352,7 @@ provides-extras = ["all", "claude", "openai"]
 
 [[package]]
 name = "shepherd-dev"
-version = "0.1.34"
+version = "0.1.35"
 source = { editable = "." }
 dependencies = [
     { name = "shepherd-ai" },
