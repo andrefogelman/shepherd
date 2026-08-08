@@ -169,6 +169,11 @@ def _propose(model: str) -> Candidate | None:
 #: the parent's own timeout below is computed from the same number (#7).
 REPLAY_GATE_TIMEOUT = 600
 
+#: Turning a fresh worktree into a Shepherd workspace — adoption and one
+#: substrate validation, seconds in practice. Named rather than inline so the
+#: timeout message can quote the budget that actually expired.
+INIT_TIMEOUT = 120
+
 #: Planning, repo scans, workspace init, teardown — everything a replayed `run`
 #: spends outside the worker and the gate.
 REPLAY_STARTUP_SLACK = 300
@@ -211,7 +216,7 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
             # a fresh worktree is not yet a Shepherd workspace
             init = subprocess.run(
                 [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(wt)],
-                capture_output=True, text=True, env=env, timeout=120,
+                capture_output=True, text=True, env=env, timeout=INIT_TIMEOUT,
             )
             if init.returncode != 0:
                 return False
@@ -229,12 +234,19 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
             # `run` exits 0 iff the gate passed (report.succeeded); use the exit
             # code, not a stdout substring, so replay isn't fragile to formatting (#16).
             return proc.returncode == 0
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             # Loud: a replay reaped by the harness is NOT evidence against the
             # candidate, and silently folding it into "failed" biases the whole
             # optimize verdict toward rejecting good prompts.
+            #
+            # Which step expired, and its own budget — both read off the
+            # exception. One except covers two calls with very different
+            # budgets, and quoting the run's for an init timeout sent a reader
+            # looking at worker budgets when the workspace was what got stuck.
+            step = "workspace init" if "init" in (exc.cmd or ()) else "run"
+            budget = int(exc.timeout) if exc.timeout else _replay_timeout(worker_budget)
             print(
-                f"replay timed out after {_replay_timeout(worker_budget)}s "
+                f"replay {step} timed out after {budget}s "
                 f"({case.feature[:60]!r}) — scored as a failure, but this is a "
                 f"harness limit, not a candidate verdict",
                 file=sys.stderr,
