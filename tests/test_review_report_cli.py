@@ -52,7 +52,9 @@ class ReviewReportCliIntegrationTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.tmp, check=True)
         subprocess.run(
             [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(self.tmp), "--test-cmd", "true"],
-            check=True, capture_output=True, text=True,
+            # input="": see test_review_panel — init prompts, and an inherited
+            # stdin that never closes hangs the suite.
+            input="", check=True, capture_output=True, text=True,
         )
 
     def test_review_report_file_is_written_on_a_run(self):

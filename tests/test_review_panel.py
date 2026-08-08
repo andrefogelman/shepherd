@@ -105,7 +105,10 @@ class RunReviewPanelTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
         subprocess.run(
             [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(self.repo)],
-            check=True, capture_output=True, text=True,
+            # input="": init ASKS for the panel size. Without a closed stdin the
+            # child inherits the parent's, and a stdin that never reaches EOF
+            # (a background runner's pipe) hangs the whole suite forever.
+            input="", check=True, capture_output=True, text=True,
         )
         self._orig_run_review = S.run_review
 
