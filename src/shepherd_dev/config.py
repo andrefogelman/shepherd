@@ -360,6 +360,18 @@ def jail_env(repo_root: Path) -> dict[str, str]:
     return out
 
 
+def pre_gate_cmd(repo_root: Path) -> str | None:
+    """A fixer to run over the proposal before the gate judges it.
+
+    For the class of failure a formatter repairs in under a second and a
+    worker keeps reintroducing: observed on a real run where two of three
+    attempts died on `mix format --check-formatted`, the second one AFTER
+    the worker had been told about the first. Guidance does not hold it.
+    """
+    value = load_config(repo_root).get("pre_gate_cmd")
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def jail_seed(repo_root: Path) -> dict[str, str]:
     """The repo's declared `jail_seed`, as {ENV_VAR: warm origin path}.
 

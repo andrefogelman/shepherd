@@ -494,6 +494,52 @@ def _materialize(repo_root: Path, entries: dict[str, bytes], dest: Path) -> None
     materialize_into(dest, entries)
 
 
+def run_pre_gate(
+    repo_root: Path, entries: dict[str, bytes], cmd: str, *, timeout: int = 120
+) -> tuple[dict[str, bytes], str | None]:
+    """Run `cmd` over a materialized copy of the proposal; return the entries
+    it produced, plus an error string when it did not succeed.
+
+    Only the paths the WORKER proposed are read back. A formatter invoked
+    without arguments rewrites the whole project — `mix format`, `cargo fmt`,
+    `prettier --write .` all do — and collecting everything it touched would
+    turn a seven-file proposal into a two-hundred-file one, handing the human
+    a diff nobody asked for. The fixer may change the proposal; it may not
+    widen it.
+
+    Any failure leaves the entries exactly as they came in: a fixer that died
+    halfway must not half-apply. The gate then judges the unfixed proposal and
+    fails as it would have anyway, which is the outcome without this feature —
+    never worse.
+    """
+    dest_root = Path(tempfile.mkdtemp(prefix="shepherd-pregate-"))
+    dest = dest_root / "repo"
+    try:
+        _materialize(repo_root, entries, dest)
+        try:
+            proc = subprocess.run(
+                cmd, shell=True, cwd=str(dest), capture_output=True, text=True,
+                timeout=timeout, env=gate_env(),
+            )
+        except subprocess.TimeoutExpired:
+            return entries, f"pre-gate command timed out after {timeout}s"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+            return entries, f"pre-gate command failed (exit {proc.returncode}): {' | '.join(tail)}"
+        updated: dict[str, bytes] = {}
+        for rel, original in entries.items():
+            produced = dest / rel
+            try:
+                updated[rel] = produced.read_bytes() if produced.is_file() else original
+            except OSError:
+                updated[rel] = original
+        return updated, None
+    except Exception as exc:
+        return entries, f"pre-gate could not run: {exc}"
+    finally:
+        shutil.rmtree(dest_root, ignore_errors=True)
+
+
 class LocalGateStage:
     """Pre-staged pristine repo copy for the LOCAL gate (the local analogue of
     the remote GateWarmup): built once in the background while the worker
@@ -1590,6 +1636,7 @@ def develop(
     review_rounds: int = 1,
     review_panel: int = 1,
     review_lenses: list[str] | None = None,
+    pre_gate_cmd: str | None = None,
     gate_timeout: int = 600,
     policy: ChangesetPolicy | None = None,
     extra_args: dict | None = None,
@@ -1801,6 +1848,22 @@ def develop(
             )
             guidance = _prior_attempt_guidance(entries) + _format_guidance("policy", violations=verdict_policy.violations)
             continue
+
+        # After policy (no point fixing a proposal about to be rejected) and
+        # BEFORE everything downstream: the gate must judge, and the human
+        # must settle, the same bytes the fixer produced.
+        if pre_gate_cmd and test_cmd is not None:
+            reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · pre-gate")
+            entries, pre_gate_error = run_pre_gate(
+                repo_root, entries, pre_gate_cmd, timeout=gate_timeout
+            )
+            last_entries = entries
+            _emit("pre_gate", {"cmd": pre_gate_cmd, "error": pre_gate_error}, attempt=number)
+            if pre_gate_error:
+                # Not fatal: the gate now judges the unfixed proposal and fails
+                # as it would have without this feature. Never worse, and the
+                # reason is on the record rather than silently swallowed.
+                reporter.step(f"pre-gate: {pre_gate_error}")
 
         gate: GateResult | None = None
         # Speculative review (opt-in): the reviewer needs only the proposal —

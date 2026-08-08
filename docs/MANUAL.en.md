@@ -702,6 +702,38 @@ above. A Python `.venv` does NOT: its shebangs hold absolute paths, so the
 copy keeps invoking the interpreter at the origin and silently ignores itself.
 Seed build output, not environments.
 
+## `pre_gate_cmd` (fix it before the gate judges it)
+
+Some gate failures are not information. A formatter check that fails on a
+missing blank line tells you nothing about the change, and costs a whole
+attempt — the worker reruns, the gate re-materialises, and the suite never
+runs. Observed on a real repo: two of three attempts died on `mix format
+--check-formatted`, the second one AFTER the worker had been told about the
+first. Guidance does not hold this class; the worker reintroduces it.
+
+```json
+{ "pre_gate_cmd": "mix format" }
+```
+
+The command runs on a materialised copy of the proposal, after policy and
+before the gate, and whatever it rewrites becomes the proposal. So the gate
+judges the fixed bytes and you settle the fixed bytes — the same tree, all the
+way through. Works for anything that repairs in place: `mix format`,
+`cargo fmt`, `prettier --write .`, `black .`, `gofmt -w .`.
+
+**It may change the proposal; it may not widen it.** A formatter invoked with
+no arguments rewrites the whole project, and collecting everything it touched
+would turn a seven-file proposal into a two-hundred-file one. Only the paths
+the worker proposed are read back.
+
+If the command fails or times out, the run continues with the proposal
+unchanged: the gate then fails as it would have without this feature, and the
+reason is on the record. Never worse than not having it.
+
+Not a place for anything that decides. A linter that FAILS on style belongs in
+the gate, where its verdict is visible; `pre_gate_cmd` is for the fixer that
+would have made that verdict unnecessary.
+
 ## Remote gate (build/test on another host)
 
 Some repos only build/test in an environment the local machine lacks — a

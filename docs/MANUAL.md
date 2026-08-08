@@ -697,6 +697,39 @@ Python NÃO: os shebangs guardam caminho absoluto, então a cópia continua
 chamando o interpretador da origem e se ignora em silêncio. Semeie saída de
 build, não ambientes.
 
+## `pre_gate_cmd` (consertar antes de o portão julgar)
+
+Nem toda falha de portão é informação. Um check de formatação que reprova por
+uma linha em branco faltando não diz nada sobre a mudança, e custa uma
+tentativa inteira — o worker roda de novo, o portão re-materializa, e a suíte
+nunca chega a rodar. Observado num repo real: duas de três tentativas
+morreram em `mix format --check-formatted`, a segunda DEPOIS de o worker ter
+sido avisado da primeira. Orientação não segura essa classe; o worker
+reintroduz.
+
+```json
+{ "pre_gate_cmd": "mix format" }
+```
+
+O comando roda sobre uma cópia materializada da proposta, depois da política e
+antes do portão, e o que ele reescrever vira a proposta. Então o portão julga
+os bytes corrigidos e você liquida os bytes corrigidos — a mesma árvore, do
+começo ao fim. Serve para qualquer coisa que conserta no lugar: `mix format`,
+`cargo fmt`, `prettier --write .`, `black .`, `gofmt -w .`.
+
+**Pode mudar a proposta; não pode alargá-la.** Formatador chamado sem
+argumentos reescreve o projeto inteiro, e recolher tudo que ele tocou
+transformaria uma proposta de sete arquivos numa de duzentos. Só os caminhos
+que o worker propôs são relidos.
+
+Se o comando falhar ou estourar o tempo, a execução segue com a proposta
+intacta: o portão reprova como reprovaria sem esta feature, e o motivo fica
+registrado. Nunca pior que não ter.
+
+Não é lugar para nada que decide. Linter que REPROVA por estilo pertence ao
+portão, onde o veredito é visível; `pre_gate_cmd` é para o corretor que teria
+tornado aquele veredito desnecessário.
+
 ## Portão remoto (build/test em outro host)
 
 Alguns repos só compilam/testam num ambiente que a máquina local não tem — um

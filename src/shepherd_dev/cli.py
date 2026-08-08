@@ -1151,6 +1151,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             review_rounds=args.review_rounds,
             review_panel=args.review_panel,
             review_lenses=args.review_lens,
+            pre_gate_cmd=config.pre_gate_cmd(repo_root),
             gate_timeout=args.gate_timeout,
             policy=policy,
             review_task=reviewer,
