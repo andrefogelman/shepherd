@@ -13,9 +13,14 @@ dependencies = [
 # Patched build of shepherd-ai, from the fork andrefogelman/shepherd-ai
 # (of shepherd-agents/shepherd). Neither fix is reported upstream yet; drop
 # this override once upstream ships them and PyPI's shepherd-ai picks them up.
+# The fork's main tracks upstream — 0.3.3 is upstream@4b44f4e merged in at
+# @5fef8d6, so this wheel is ahead of PyPI's 0.3.0 by five upstream fixes as
+# well as the two below. The two that matter here: FileManifest.created_at is
+# tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
+# workspace carrier by platform instead of hardcoding APFS-only clonefile.
 #
-# Both fixes are the same shape: the substrate walked a real tree and crashed
-# on something ordinary that lives in one.
+# Both local fixes are the same shape: the substrate walked a real tree and
+# crashed on something ordinary that lives in one.
 #
 #   @205f668 — build_tree/insert_tree_entry crashed with pygit2.GitError
 #   whenever a workspace's own .git (root, or nested from a git-sourced
@@ -35,9 +40,10 @@ dependencies = [
 # so a published tag's assets on andrefogelman/shepherd-ai must NEVER be
 # replaced or re-uploaded. Any future change to this wheel — even a trivial
 # one — gets a NEW tag and a corresponding uv.lock update. v0.3.1-dotgit-fix
-# is left published and untouched for exactly that reason.
+# and v0.3.2-symlink-fix are left published and untouched for exactly that
+# reason.
 [tool.uv.sources]
-shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.2-symlink-fix/shepherd_ai-0.3.2-py3-none-any.whl" }
+shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.3-upstream-sync/shepherd_ai-0.3.3-py3-none-any.whl" }
 
 [project.scripts]
 shepherd-dev = "shepherd_dev.cli:entry"
