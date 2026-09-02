@@ -31,6 +31,7 @@ from .supervisor import (
     DevReport,
     GateResult,
     ReviewVerdict,
+    _gate_note,
     _run_gate,
     child_python_env,
     develop,
@@ -388,6 +389,7 @@ def develop_parallel(
                             provider=provider,
                             placement=placement,
                             context_pack=context_pack,
+                            gate=_gate_note(test_cmd, None),
                         )
                 except Exception:
                     pass  # spec failure → the sequential path below reruns it
@@ -483,6 +485,7 @@ def develop_parallel(
                         provider=provider,
                         placement=placement,
                         context_pack=context_pack,
+                        gate=_gate_note(test_cmd, gate),
                     )
             report.review = verdict
             if report.review is not None:
@@ -970,6 +973,7 @@ def develop_best_of(
                             provider=provider,
                             placement=placement,
                             context_pack=context_pack,
+                            gate=_gate_note(test_cmd, gate),
                         )
                 except Exception as exc:
                     review = ReviewVerdict(

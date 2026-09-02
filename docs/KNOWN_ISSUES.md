@@ -10,6 +10,43 @@ None.
 
 ## Fixed
 
+### The worker read its prompt as a source dump and an escaped JSON blob
+
+**Was:** what the jailed Claude actually received was not the task's prompt.
+The substrate's workspace-control lane builds its own envelope
+(`shepherd_dialect.workspace_control.runtime_provider._claude_runtime_prompt`):
+a generic preamble, the ENTIRE source of `tasks.py` as a fenced "task contract"
+(every prompt of every task, for every run), then the run's arguments as one
+`json.dumps(indent=2)` block with `ensure_ascii` on. So the 25k-char context
+pack and the 5k-char feature arrived as single-line strings full of `\n`, with
+every accented character spelled `\u00e7`, and the actual instructions sat
+inside the Python block as a docstring literal. The pack also travelled under
+the argument named `guidance`, whose own prompt text says "feedback from a
+previous failed attempt" — every first attempt was told its repository context
+was a failure report. Nothing pinned the shape, so nothing noticed.
+
+Measured on 182 worker attempts from the event logs: the first tool call was
+`pwd && ls -la` (or a variant) in most of them, and the median attempt spent
+18 tool calls exploring before its first edit, pack or no pack — the pack was
+there, but not in a form a model reads.
+
+**Fix:** `promptrender.render_prompt` renders the prompt as a document — the
+task's own prompt first, then one titled section per argument, long values
+fenced so nothing inside them can pass for a section of the prompt itself —
+and the transport `set_worker_budget` installs sends that instead of the
+envelope. The invocation the substrate hands the transport carries the task id
+and the raw kwargs, which is everything the render needs; a task this module
+does not know keeps the substrate's text untouched. `develop` now passes the
+pack as `context`, the failure feedback as `guidance`, and the gate command as
+`gate`, and the reviewer receives `gate` too (the command that already judged
+the proposal, and its verdict). Each launch records a `worker.prompt` event
+(shape only: task, size, sections present).
+
+Pinned by `tests/test_promptrender.py`: the rendered document (order, fencing,
+no escapes, no envelope), the transport handing it to the provider and
+recording the event, a foreign task keeping the envelope, and `develop`
+passing the three inputs apart.
+
 ### The jailed worker and reviewer could not run a single command
 
 **Was:** on macOS, every `Bash` call inside a run failed and neither agent said

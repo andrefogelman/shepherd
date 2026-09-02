@@ -455,6 +455,18 @@ class WorkerStreamHook:
     def tee_path(self, working_path: Path | str) -> Path:
         return Path(working_path) / TEE_RELPATH
 
+    def emit(self, kind: str, payload: dict | None = None) -> None:
+        """Record an event on whichever log this thread's launches go to —
+        the seam's way of noting something about a launch (the prompt it
+        rendered, say) that is not a tool call. Silent when unbound."""
+        log, attempt = self._current()
+        if log is None:
+            return
+        try:
+            log.emit(kind, payload, attempt=attempt)
+        except Exception:
+            pass
+
     def start(self, working_path: Path | str) -> StreamTailer | None:
         log, attempt = self._current()
         if log is None:

@@ -102,9 +102,19 @@ DEFAULT_PROMPTS: dict[str, str] = {
       reformat, or "improve" unrelated code.
     - Keep the change minimal and complete: no TODOs, no placeholders,
       no dead code, no broken imports.
-    - If `guidance` is non-empty, it contains feedback from a previous
-      failed attempt (test failures or policy violations). Fix the root
-      cause it describes; do not repeat the same mistake.
+    - `context`, when present, is a context pack computed from this very
+      checkout: the file tree, the files most relevant to the feature (whole
+      when small, signatures when large), notes learned from earlier runs,
+      and the repository's own instructions for agents. Trust it and start
+      from it; open additional files only when something you need is
+      missing from it.
+    - `guidance`, when present, is feedback from a previous failed attempt
+      (test failures or policy violations). Fix the root cause it
+      describes; do not repeat the same mistake.
+    - `gate`, when present, is the exact command the supervisor will run
+      to judge your proposal. It must pass. If that toolchain is usable
+      here, run it yourself before you finish; if it is not, do not spend
+      turns discovering that — write the change and stop.
     - Write your changes as regular files in the repository. They will be
       held for human review before anything is applied.
     """,
@@ -117,8 +127,14 @@ DEFAULT_PROMPTS: dict[str, str] = {
       behavior: a test that keeps passing when the rule breaks is wrong.
     - New and updated tests must pass against the current code. Do not
       change production code; only test files.
-    - If `guidance` is non-empty, it contains feedback from a previous
-      failed attempt. Fix the root cause it describes.
+    - `context`, when present, is a context pack computed from this very
+      checkout (file tree, relevant files, notes from earlier runs, the
+      repository's own agent instructions). Trust it and start from it;
+      open additional files only when something you need is missing.
+    - `guidance`, when present, is feedback from a previous failed
+      attempt. Fix the root cause it describes.
+    - `gate`, when present, is the exact command the supervisor will run
+      to judge your proposal. The tests you write must pass under it.
     """,
     "review": """Review a proposed change to this repository.
 
@@ -182,6 +198,11 @@ DEFAULT_PROMPTS: dict[str, str] = {
     context line as removed is the usual one — becomes a defect you report
     against code that does not have it. If you ran a parser or a compiler,
     say in `summary` which file you ran it on.
+
+    `gate`, when present, names the command the supervisor already ran
+    against this exact proposal and how it ended. A gate that passed has
+    compiled and tested the change; weigh any claim that it cannot build
+    or fails its tests against that fact before you make it.
 
     If you need to write something to do the work — reconstructing a file
     to check it parses, saving a diff to apply — put it under

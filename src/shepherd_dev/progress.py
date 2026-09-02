@@ -163,6 +163,10 @@ def format_event(event: dict, live: bool = True) -> str | None:
         return f"· {p.get('text', '')}"
     if kind == "worker.raw":
         return f"⚠ oversized stream line dropped ({p.get('bytes', 0)} bytes)"
+    if kind == "worker.prompt":
+        sections = ", ".join(p.get("sections") or []) or "none"
+        shape = "rendered" if p.get("rendered") else "substrate envelope"
+        return f"✎ prompt {p.get('task', '?')}: {p.get('chars', 0)} chars ({shape}; sections: {sections})"
     if kind == "gate.line":
         return f"┆ {p.get('line', '')}"
     if kind == "gate.test.fail":

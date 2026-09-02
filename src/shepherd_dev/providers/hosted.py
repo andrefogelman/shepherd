@@ -187,6 +187,7 @@ def worker_prompt(
     guidance: str,
     context_pack: str | None,
     mode: str,
+    gate: str | None = None,
 ) -> str:
     role = (
         "Implement the requested feature in this repository."
@@ -201,9 +202,13 @@ def worker_prompt(
         "- Touch only files needed for this request. No drive-by refactors.",
         "- Keep the change minimal and complete: no TODOs, no placeholders.",
         "- Write real files into the working tree (this directory IS the repo clone).",
-        "",
-        f"Feature request:\n{feature}",
     ]
+    if gate:
+        parts.append(
+            f"- The proposal is judged by running: `{gate}`. It must pass; run it "
+            "yourself before finishing if the toolchain is available here."
+        )
+    parts += ["", f"Feature request:\n{feature}"]
     if context_pack:
         parts += ["", "Context pack (prefer this over blind exploration):", context_pack]
     if guidance:
@@ -291,7 +296,9 @@ def develop_hosted(
                 # human makes mid-run enter the changeset with the worker's stale
                 # copy, and settling would revert that edit in silence (#3).
                 base_snapshot = snapshot_tree(clone)
-                prompt = worker_prompt(feature, guidance=guidance, context_pack=context_pack, mode=mode)
+                prompt = worker_prompt(
+                    feature, guidance=guidance, context_pack=context_pack, mode=mode, gate=test_cmd,
+                )
                 result: ExecResult = executor.run(clone, prompt, budget_seconds=worker_budget)
                 if not result.ok:
                     reporter.fail(result.error or f"{provider} worker failed")

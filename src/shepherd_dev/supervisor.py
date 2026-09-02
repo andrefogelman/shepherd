@@ -24,6 +24,7 @@ from pathlib import Path
 from .diffcollect import Entries
 from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
+from .promptrender import fence as _fence, prompt_summary, render_prompt
 
 IGNORED_DIRS = {
     ".vcscore",
@@ -149,15 +150,6 @@ class DevReport:
                 f"  shepherd-dev settle {self.final_run_ref}{repo_arg} --reject  # discard proposal",
             ]
         return "\n".join(lines)
-
-
-def _fence(text: str) -> str:
-    """A backtick fence at least one tick longer than any run already inside
-    `text`, so embedded proposal/gate content can never close the fence early
-    (or, being inside a fenced block at all, be parsed as markdown headings
-    or section boundaries of its own) — see render_review_report."""
-    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
-    return "`" * max(3, longest + 1)
 
 
 def render_review_report(report: DevReport) -> str:
@@ -631,6 +623,23 @@ def _format_guidance(
     raise ValueError(f"unknown guidance kind: {kind}")
 
 
+def _gate_note(test_cmd: str | None, gate: GateResult | None) -> str:
+    """What the reviewer is told about the gate: the command, and its verdict
+    when one exists. Empty when there is no gate at all."""
+    if not test_cmd:
+        return ""
+    if gate is None:
+        return f"{test_cmd}\n(this command judges the proposal; its verdict is not in yet)"
+    if gate.infra_error:
+        return f"{test_cmd}\ncould not run: {gate.infra_error}"
+    state = "PASSED" if gate.passed else "FAILED"
+    tail = (gate.output_tail or "").strip().splitlines()[-3:]
+    note = f"{test_cmd}\n{state} (exit {gate.exit_code})"
+    if tail:
+        note += "\nlast lines: " + " | ".join(tail)
+    return note
+
+
 def _attempt_label(
     attempts_left: int, max_attempts: int, round_no: int, review_rounds: int
 ) -> str:
@@ -859,6 +868,32 @@ class _TailingExecution:
                     pass
 
 
+def _rendered_prompt(invocation, stream_hook=None) -> str:
+    """The prompt the jailed worker actually receives.
+
+    The substrate hands the transport an invocation whose `prompt` is its own
+    workspace-control envelope — the whole of tasks.py as a fenced source
+    block and the arguments as an ASCII-escaped JSON blob (see promptrender).
+    The same invocation also carries the task id and the raw kwargs, which
+    is everything needed to render the prompt as a document instead. Any
+    failure keeps the substrate's text: a prompt the model reads worse is
+    still a launch; no prompt is not.
+    """
+    fallback = str(getattr(invocation, "prompt", "") or "")
+    try:
+        task_id = str(getattr(getattr(invocation, "task_lock", None), "task_id", "") or "")
+        kwargs = getattr(invocation, "kwargs", None) or {}
+        rendered = render_prompt(task_id, kwargs, fallback=fallback)
+    except Exception:
+        return fallback
+    if stream_hook is not None:
+        try:
+            stream_hook.emit("worker.prompt", prompt_summary(task_id, kwargs, rendered))
+        except Exception:
+            pass
+    return rendered
+
+
 def set_worker_budget(seconds: int, stream_hook=None) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
     kill of the whole worker process group (#A). With ``stream_hook`` (a
@@ -915,7 +950,7 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
         def transport(invocation):
             kwargs = dict(
                 provider_id=invocation.provider_id,
-                prompt=invocation.prompt,
+                prompt=_rendered_prompt(invocation, stream_hook),
                 model=invocation.model_name,
                 budget_seconds=seconds,
             )
@@ -1191,11 +1226,16 @@ def run_review(
     lens: str = "",
     workspace_drift=None,
     salvage_dir: Path | None = None,
+    gate: str = "",
 ) -> ReviewVerdict:
     """Run the reviewer against a passing proposal.
 
     `lens`, when non-empty, is the single dimension this reviewer owns (see
     prompts.REVIEW_LENSES). Empty is the ordinary generalist reviewer.
+
+    `gate`, when non-empty, tells the reviewer which command already judged
+    this proposal and how it ended — the fact a "this cannot build" claim
+    has to be weighed against (see flag_gate_contradiction).
 
     `repo_root`, when given, is the worktree the proposal was built against.
     It is the `before` side, so each file reaches the reviewer as a unified
@@ -1250,6 +1290,7 @@ def run_review(
                     "findings": findings,
                     "lens": lens,
                     "proposed_root": str(proposed_root),
+                    "gate": gate,
                 },
             )
         except Exception as exc:
@@ -1354,6 +1395,7 @@ def run_review_panel(
     placement: str = "jail",
     context_pack: str | None = None,
     findings: str = "",
+    gate: str = "",
 ) -> ReviewVerdict:
     """Run `size` independent reviewers in separate clones, aggregate into
     one verdict via _aggregate_review_verdicts.
@@ -1404,6 +1446,7 @@ def run_review_panel(
                     context_pack=context_pack,
                     findings=findings,
                     lens=lens,
+                    gate=gate,
                 )
 
         with ThreadPoolExecutor(max_workers=len(lenses)) as pool:
@@ -1722,9 +1765,15 @@ def develop(
         args = {"repo": repo, **(extra_args or {})}
         if "output_path" not in args:  # real worker takes feature/guidance
             args["feature"] = feature
-            args["guidance"] = (
-                f"{context_pack}\n\n{guidance}".strip() if context_pack else guidance
-            )
+            # Three separate inputs, not one blob. The pack used to ride inside
+            # `guidance`, whose prompt text says "feedback from a previous
+            # failed attempt" — so every first attempt was told its repository
+            # context was a failure report. The gate command is new here: the
+            # worker never knew what would judge it (only the native-gate hint
+            # said so), and it guessed wrong or spent turns finding out.
+            args["guidance"] = guidance
+            args["context"] = context_pack or ""
+            args["gate"] = test_cmd or ""
 
         # #B backstop: hard-kill the worker subtree `grace` past the budget (serial
         # claude runs only — parallel best-of can't tell workers apart by signature).
@@ -1891,6 +1940,7 @@ def develop(
                         repo_root=repo_root,
                         workspace_drift=set(entries),
                         salvage_dir=getattr(event_log, "dir", None),
+                        gate=_gate_note(test_cmd, None),  # verdict not known yet
                     )
                 except Exception:
                     pass  # spec failure → the sequential path below reruns it
@@ -1985,6 +2035,7 @@ def develop(
                     placement=placement,
                     context_pack=context_pack,
                     findings=ledger.guidance() if ledger is not None else "",
+                    gate=_gate_note(test_cmd, gate),
                 )
             else:
                 verdict = run_review(
@@ -1999,6 +2050,7 @@ def develop(
                     repo_root=repo_root,
                     workspace_drift=set(entries),
                     salvage_dir=getattr(event_log, "dir", None),
+                    gate=_gate_note(test_cmd, gate),
                 )
         # Before it is recorded or fed to the ledger: a "this cannot build"
         # rejection against a gate that just built it is a contradiction the
