@@ -1244,6 +1244,8 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             print(f"\n⚠ reviewer REJECTED this proposal — {rev.summary}", file=sys.stderr)
             for issue in rev.issues:
                 print(f"    issue: {issue}", file=sys.stderr)
+            for note in getattr(rev, "advisories", None) or []:
+                print(f"    advisory: {note}", file=sys.stderr)
         return _interactive_settle_run(repo_root, report.final_run_ref)
     return 0 if report.succeeded else 1
 
@@ -1356,6 +1358,8 @@ def _cmd_run_hosted(
             print(f"\n⚠ reviewer REJECTED this proposal — {rev.summary}", file=sys.stderr)
             for issue in rev.issues:
                 print(f"    issue: {issue}", file=sys.stderr)
+            for note in getattr(rev, "advisories", None) or []:
+                print(f"    advisory: {note}", file=sys.stderr)
         return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
 

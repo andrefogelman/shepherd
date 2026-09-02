@@ -208,7 +208,8 @@ def format_event(event: dict, live: bool = True) -> str | None:
     if kind == "review.verdict":
         return f"review: {'APPROVED' if p.get('approved') else 'REJECTED'}"
     if kind == "review.issue":
-        return f"• {p.get('text', '')}"
+        tag = "advisory · " if p.get("severity") == "advisory" else ""
+        return f"• {tag}{p.get('text', '')}"
     if kind == "attempt.diff":
         files = p.get("files") or []
         shown = ", ".join(files[:6]) + ("…" if len(files) > 6 else "")

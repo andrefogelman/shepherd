@@ -160,16 +160,31 @@ DEFAULT_PROMPTS: dict[str, str] = {
     you write anywhere else invalidates the verdict, including a file you
     delete afterwards.
 
+    Every finding carries a severity, and the severity decides the verdict:
+      - "blocking": you would hold the change back for it — wrong behavior,
+        a security hole, a build or test that breaks, scope the request did
+        not ask for, a contract changed for callers who did not ask.
+      - "advisory": you would mention it and ship anyway — style, naming, a
+        comment, an optional improvement, a test you would add. Say it, but
+        it does not block.
+    Do not inflate: a finding you would not hold the change back for is
+    advisory, however much it bothers you. `approved` MUST be true when no
+    finding is blocking, and false when any is — nothing else decides it.
+
     Write EXACTLY ONE file outside it: `REVIEW.json` at the repository root,
     valid JSON with this schema and nothing else. Do not modify any other
     file; any other change invalidates your verdict.
     {
       "approved": true | false,
       "summary": "<one-paragraph overall assessment>",
-      "issues": ["<specific issue with file/line when possible>", ...],
+      "issues": [
+        {"severity": "blocking" | "advisory",
+         "text": "<specific finding with file/line when possible>"},
+        ...
+      ],
       "resolved": ["<id of a listed finding this change actually removes>", ...]
     }
-    An empty issues list is only acceptable with approved=true.
+    A re-raised earlier finding keeps its `[id]` at the start of its `text`.
     """,
     "guidance_policy": (
         "PREVIOUS ATTEMPT: rejected by policy before testing.\n"

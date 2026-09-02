@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..policy import ChangesetPolicy
-from ..supervisor import ReviewVerdict
+from ..supervisor import ReviewVerdict, verdict_from_review_json
 from .codex_exec import build_executor, find_codex_bin
 from .hosted import HostedExecutor, HostedReport, develop_hosted
 
@@ -56,8 +56,14 @@ def _review_prompt(entries: dict[str, bytes], feature: str) -> str:
         "Look for: incomplete implementations, TODO/placeholder code, broken "
         "imports, style inconsistent with the codebase, missing error handling, "
         "and changes unrelated to the request.\n\n"
+        "Classify every finding: \"blocking\" is a defect you would hold the change "
+        "back for (wrong behavior, a security hole, a broken build or test, scope the "
+        "request did not ask for); \"advisory\" is anything you would mention but "
+        "not block on (style, naming, an optional improvement). approved MUST be true "
+        "when no finding is blocking, and false when any is.\n\n"
         "Answer with ONLY a JSON object, no prose, in exactly this shape:\n"
-        '{"approved": true|false, "summary": "<one line>", "issues": ["<issue>", ...]}'
+        '{"approved": true|false, "summary": "<one line>", '
+        '"issues": [{"severity": "blocking"|"advisory", "text": "<issue>"}, ...]}'
     )
 
 
@@ -133,18 +139,15 @@ def _parse_verdict(raw: str) -> ReviewVerdict | None:
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(data, dict) and "approved" in data:
-            issues = data.get("issues") or []
-            return ReviewVerdict(
-                # `is True`, not bool(). bool() fails OPEN on the one answer a
-                # model most plausibly gets wrong: bool("false") is True, and so
-                # is bool("no"). A rejection read as approval feeds
-                # --auto-settle, which applies without asking. Only the JSON
-                # literal `true` is the reviewer saying yes; anything else,
-                # truthy or not, is not.
-                approved=data["approved"] is True,
-                summary=str(data.get("summary", ""))[:500],
-                issues=[str(i)[:300] for i in issues if str(i).strip()][:20],
-            )
+            # Same reading as the Claude reviewer's (verdict_from_review_json):
+            # `approved` is the JSON literal `true` only, findings split into
+            # blocking and advisory, and a rejection naming nothing blocking
+            # is recorded as approved with a note.
+            verdict = verdict_from_review_json(data)
+            verdict.summary = verdict.summary[:500]
+            verdict.issues = [i[:300] for i in verdict.issues][:20]
+            verdict.advisories = [i[:300] for i in verdict.advisories][:20]
+            return verdict
     return None
 
 

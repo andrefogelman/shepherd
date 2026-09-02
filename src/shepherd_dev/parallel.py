@@ -85,6 +85,7 @@ class ParallelReport:
                     f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}"
                 )
                 lines += [f"  issue: {i}" for i in self.review.issues]
+                lines += [f"  advisory: {i}" for i in getattr(self.review, "advisories", None) or []]
         if self.proposal_id:
             lines += [
                 "",
@@ -526,14 +527,9 @@ def develop_parallel(
 
 
 def _review_manifest(review: ReviewVerdict | None) -> dict | None:
-    if review is None:
-        return None
-    return {
-        "approved": review.approved,
-        "summary": review.summary,
-        "issues": review.issues,
-        "error": review.error,
-    }
+    from .history import review_payload
+
+    return review_payload(review)
 
 
 # ── runN: up to 5 INDEPENDENT features in parallel lanes ─────────────────────

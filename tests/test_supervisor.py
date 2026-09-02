@@ -527,6 +527,7 @@ class RendererDriftTests(unittest.TestCase):
     VERDICT_SENTINELS = {
         "summary": "SENTINELSUMMARY the change is unsound",
         "issues": "SENTINELISSUE missing null check",
+        "advisories": "SENTINELADVISORY prefer defp here",
         "error": "SENTINELVERDICTERROR reviewer produced no REVIEW.json",
     }
     #: ReviewVerdict fields neither renderer emits the value of, and why.
@@ -579,6 +580,7 @@ class RendererDriftTests(unittest.TestCase):
                 approved=False,
                 summary=self.VERDICT_SENTINELS["summary"],
                 issues=[self.VERDICT_SENTINELS["issues"]],
+                advisories=[self.VERDICT_SENTINELS["advisories"]],
             )
         report.ledger = Ledger()
         report.ledger.record_round(1, ["SENTINELFINDING cache never invalidated"])

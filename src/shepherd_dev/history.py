@@ -94,16 +94,20 @@ def run_payload(report, repo_root: Path, *, mode: str, test_cmd: str | None, pro
             }
             for a in report.attempts
         ],
-        "review": (
-            None
-            if report.review is None
-            else {
-                "approved": report.review.approved,
-                "summary": report.review.summary,
-                "issues": report.review.issues,
-                "error": report.review.error,
-            }
-        ),
+        "review": review_payload(report.review),
+    }
+
+
+def review_payload(review) -> dict | None:
+    """One shape for a verdict wherever it is stored: history, manifests."""
+    if review is None:
+        return None
+    return {
+        "approved": review.approved,
+        "summary": review.summary,
+        "issues": list(review.issues or []),
+        "advisories": list(getattr(review, "advisories", None) or []),
+        "error": review.error,
     }
 
 
@@ -127,16 +131,7 @@ def parallel_payload(report, repo_root: Path, *, test_cmd: str, provider: str, f
             {"succeeded": w.succeeded, "final_run_ref": w.final_run_ref, "attempts": len(w.attempts)}
             for w in report.workers
         ],
-        "review": (
-            None
-            if report.review is None
-            else {
-                "approved": report.review.approved,
-                "summary": report.review.summary,
-                "issues": report.review.issues,
-                "error": report.review.error,
-            }
-        ),
+        "review": review_payload(report.review),
     }
 
 

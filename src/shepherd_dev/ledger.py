@@ -64,6 +64,25 @@ _SEVERITY_PREFIX = re.compile(
 )
 
 
+#: The labels that mean "I would not hold the change back for this". Everything
+#: else a reviewer writes as a label — blocker, critical, high, major, medium —
+#: holds it back, and so does no label at all: silence about severity is not
+#: a downgrade.
+_ADVISORY_WORDS = re.compile(
+    r"^[\s\[\(\*#>-]*(?:low|baix[oa]|minor|nit|trivial|info|non-?blocking|n[aã]o[- ]bloqueante"
+    r"|optional|opcional|suggestion|sugest[aã]o)\b",
+    re.IGNORECASE,
+)
+
+
+def severity_of(text: str) -> str:
+    """`advisory` when a plain-text finding labels itself as one, else
+    `blocking`. Reads only a LEADING label — a sentence that merely contains
+    the word "minor" somewhere is not labelling itself."""
+    head = split_finding_id(text)[1]
+    return "advisory" if _ADVISORY_WORDS.match(head or "") else "blocking"
+
+
 #: How the reviewer points at an existing finding instead of restating it:
 #: a bracketed id at the very start of the issue text.
 _ID_PREFIX = re.compile(r"^\s*[\[(]([0-9a-f]{12})[\])]\s*")

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from ..diffcollect import DEFAULT_IGNORE_DIRS, collect_changed_entries, snapshot_tree
+from ..history import review_payload as _review_payload
 from ..policy import ChangesetPolicy, check_paths
 from ..staging import PROPOSALS_DIR, stage_proposal
 from ..supervisor import (
@@ -112,6 +113,7 @@ class HostedReport:
                     f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}"
                 )
                 lines += [f"  issue: {i}" for i in self.review.issues]
+                lines += [f"  advisory: {i}" for i in getattr(self.review, "advisories", None) or []]
         if self.proposal_id:
             repo_arg = f" --repo {self.repo}" if self.repo else ""
             lines += [
@@ -394,16 +396,7 @@ def develop_hosted(
                             if gate is None
                             else {"passed": gate.passed, "exit_code": gate.exit_code}
                         ),
-                        "review": (
-                            None
-                            if report.review is None
-                            else {
-                                "approved": report.review.approved,
-                                "summary": report.review.summary,
-                                "issues": report.review.issues,
-                                "error": report.review.error,
-                            }
-                        ),
+                        "review": _review_payload(report.review),
                     },
                 )
                 report.succeeded = True

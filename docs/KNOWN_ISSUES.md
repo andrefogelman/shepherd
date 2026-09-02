@@ -10,6 +10,44 @@ None.
 
 ## Fixed
 
+### Any finding rejected the proposal, so most rejections meant nothing
+
+**Was:** the verdict schema had `approved` and a flat list of `issues`, and the
+prompt said an empty list was the only acceptable companion to an approval.
+So a reviewer that noticed anything — "Minor/non-blocking: prefer `defp`",
+"Nit: trailing whitespace" — put it in `issues` and answered `approved:
+false`. Measured on the 100 verdicts in the history with a real reviewer: 58
+rejections, of which the human then accepted 34. A rejection acted on four
+times in ten is not a verdict. Every one of them also disabled `--auto-settle`
+for that run, and with `--review-rounds` each spent a whole worker attempt
+reworking a quibble.
+
+**Fix:** severity is part of the finding. `issues` is a list of
+`{"severity": "blocking" | "advisory", "text": …}`; the prompt defines both
+("would you hold the change back for it?") and binds `approved` to them —
+true when nothing is blocking, false when anything is. `parse_review_issues`
+splits the list (a bare string, the old shape, is classified by the label it
+gives itself: minor/nit/low/non-blocking read as advisory, anything else and no
+label at all as blocking — fail closed). `ReviewVerdict.issues` now holds only
+blocking findings and a new `advisories` field the rest; the ledger, rework
+rounds, `flag_gate_contradiction` and auto-settle see only the blocking ones,
+while summaries, reports, history, manifests and repo memory carry both.
+
+One correction, in one direction, under three conditions at once: the
+reviewer wrote the JSON literal `false`, listed at least one advisory finding,
+and listed no blocking one. That verdict is recorded as approved, with the
+correction written into the summary the human reads — the reviewer named
+nothing it would hold the change back for. Nothing else moves: a malformed
+`approved` ("false", 1, missing) stays a non-approval, a rejection with no
+finding at all stays a rejection (it reaches the human as "rejected but left
+no actionable finding"), and an approval alongside a blocking finding is never
+overturned. The Codex reviewer's prompt and parser follow the same shape.
+
+Pinned by `tests/test_review_severity.py`: classification of objects and
+labelled strings, the fail-closed defaults, the one-way correction, the
+aggregate, the renderings, and `develop()` spending a rework round on a
+blocking finding and none on an advisory one.
+
 ### The jailed worker reached the user's ssh agent, MCP connectors and sub-agents
 
 **Was:** the jail confines writes to the run's clone and nothing else. The

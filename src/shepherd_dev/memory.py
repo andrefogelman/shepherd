@@ -159,14 +159,22 @@ def learn_from_report(repo_root: Path, report) -> int:
                 facts.append(f"gate gotcha (fixed after retry): {line}")
     review = getattr(report, "review", None)
     if review is not None and getattr(review, "approved", False) and not getattr(review, "error", None):
-        for issue in (review.issues or [])[:3]:
+        for issue in _review_notes(review):
             facts.append(f"reviewer note: {issue}")
     return add_facts(repo_root, facts, getattr(report, "final_run_ref", None))
+
+
+def _review_notes(review, cap: int = 3) -> list[str]:
+    """The notes an approved review leaves for later workers: its blocking
+    findings first (an approval alongside one is still a warning), then its
+    advisories — the nits and suggestions that used to be the whole list."""
+    notes = list(review.issues or []) + list(getattr(review, "advisories", None) or [])
+    return notes[:cap]
 
 
 def learn_from_review(repo_root: Path, review, source: str | None = None) -> int:
     """Curate facts from a standalone (combined / winner) review verdict."""
     if review is None or not getattr(review, "approved", False) or getattr(review, "error", None):
         return 0
-    facts = [f"reviewer note: {issue}" for issue in (review.issues or [])[:3]]
+    facts = [f"reviewer note: {issue}" for issue in _review_notes(review)]
     return add_facts(repo_root, facts, source)

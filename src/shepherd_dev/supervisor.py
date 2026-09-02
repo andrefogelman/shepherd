@@ -62,11 +62,21 @@ class Attempt:
 class ReviewVerdict:
     approved: bool
     summary: str
+    #: BLOCKING findings only — the ones the reviewer would hold the change
+    #: back for. These are what the ledger tracks, what a rework round is
+    #: spent on, and what auto-settle refuses over.
     issues: list[str] = field(default_factory=list)
     #: ids of previously-open findings this review checked and found gone —
     #: the only thing that closes one short of approval (see ledger.py)
     resolved: list[str] = field(default_factory=list)
     error: str | None = None  # review ran but verdict could not be obtained
+    #: Findings the reviewer raised and would NOT hold the change back for —
+    #: a nit, a naming quibble, a test it would add. Shown to the human,
+    #: learned into repo memory, never a reason to reject. Before this field
+    #: existed every such note went into `issues` and every review that
+    #: mentioned one came back REJECTED; the human then accepted 60% of those
+    #: rejections, which is the measure of how little they meant.
+    advisories: list[str] = field(default_factory=list)
     #: True when no model read the diff — the verdict is a deterministic
     #: heuristic over its SHAPE (file count, byte size). Useful as a signal,
     #: never as authority: --auto-settle refuses it, because approving a change
@@ -136,6 +146,7 @@ class DevReport:
             else:
                 lines.append(f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}")
                 lines += [f"  issue: {i}" for i in self.review.issues]
+                lines += [f"  advisory: {i}" for i in self.review.advisories]
         if self.ledger is not None:
             rendered = self.ledger.render()  # unprompted: nobody has to ask
             if rendered:
@@ -204,10 +215,15 @@ def render_review_report(report: DevReport) -> str:
                 # section headings.
                 sf = _fence(report.review.summary)
                 lines += [f"{sf}text", report.review.summary, sf]
-            if report.review.issues:
+            for title, items in (
+                ("Issues (blocking):", report.review.issues),
+                ("Advisory (not blocking):", report.review.advisories),
+            ):
+                if not items:
+                    continue
                 lines.append("")
-                lines.append("Issues:")
-                for issue in report.review.issues:
+                lines.append(title)
+                for issue in items:
                     text = str(issue)
                     if "\n" not in text:
                         # A single-line issue cannot forge anything: the "- "
@@ -1203,6 +1219,78 @@ def flag_gate_contradiction(verdict, gate):
     return verdict
 
 
+def parse_review_issues(raw) -> tuple[list[str], list[str]]:
+    """Split a REVIEW.json `issues` list into (blocking, advisory) texts.
+
+    Two shapes are accepted. The one the prompt asks for is an object per
+    finding, `{"severity": "blocking" | "advisory", "text": "..."}`. A bare
+    string — the old shape, and what a model falls back to — is classified by
+    the label it gives itself (ledger.severity_of): "Minor:", "nit", "non-
+    blocking" read as advisory, anything else as blocking. Fail closed on
+    every doubt: an unknown severity word, a missing one, an object with no
+    text that can still be rendered — blocking. Items with nothing to say
+    are dropped.
+    """
+    from .ledger import severity_of
+
+    blocking: list[str] = []
+    advisory: list[str] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("issue") or item.get("message") or "").strip()
+            if not text:
+                continue
+            sev = str(item.get("severity") or "").strip().lower()
+            (advisory if sev in ("advisory", "minor", "nit", "low", "info", "non-blocking") else blocking).append(text)
+            continue
+        text = str(item or "").strip()
+        if not text:
+            continue
+        (advisory if severity_of(text) == "advisory" else blocking).append(text)
+    return blocking, advisory
+
+
+def verdict_from_review_json(data: dict) -> ReviewVerdict:
+    """A ReviewVerdict from a parsed REVIEW.json.
+
+    `approved` is read as the JSON literal `true` only (bool("false") is
+    True, and an approval feeds --auto-settle). Then one correction, in one
+    direction and under three conditions at once: the reviewer wrote the
+    JSON literal `false` (an explicit rejection, not a malformed field),
+    listed at least one advisory finding, and listed no blocking one. That
+    is a reviewer that named nothing it would hold the change back for, so
+    it is recorded as approved, with the correction written into the
+    summary where the human reads it.
+
+    Nothing else is corrected. A malformed `approved` ("false", 1, missing)
+    stays a non-approval — the field is the reviewer's only way to say yes,
+    and a broken one is not a yes. A rejection with NO finding at all stays
+    a rejection: it reaches the human as "rejected but left no actionable
+    finding", which is the truth of it. And an approval alongside a blocking
+    finding is never overturned (the reviewer weighed it), though the
+    finding is still tracked by the ledger.
+    """
+    blocking, advisory = parse_review_issues(data.get("issues"))
+    raw_approved = data.get("approved")
+    approved = raw_approved is True
+    summary = str(data.get("summary", ""))
+    if raw_approved is False and advisory and not blocking:
+        approved = True
+        note = (
+            "[shepherd] the reviewer marked this REJECTED but listed no blocking "
+            "finding — only advisory notes — so it is recorded as APPROVED; the "
+            "notes are below."
+        )
+        summary = f"{summary}\n{note}".strip()
+    return ReviewVerdict(
+        approved=approved,
+        summary=summary,
+        issues=blocking,
+        advisories=advisory,
+        resolved=[str(i) for i in (data.get("resolved") or [])],
+    )
+
+
 def emit_review_verdict(event_log, verdict, *, attempt: int | None = None) -> None:
     """Record a verdict, keeping "no verdict" distinct from "rejected".
 
@@ -1216,6 +1304,8 @@ def emit_review_verdict(event_log, verdict, *, attempt: int | None = None) -> No
     payload = {
         "approved": None if verdict.error else verdict.approved,
         "summary": verdict.summary,
+        "blocking": len(verdict.issues or []),
+        "advisory": len(getattr(verdict, "advisories", None) or []),
     }
     if verdict.error:
         payload["error"] = verdict.error
@@ -1340,16 +1430,11 @@ def run_review(
             except Exception:
                 pass
 
-    return ReviewVerdict(
-        # `is True`, not bool(). bool() fails OPEN on the answer a model most
-        # plausibly gets wrong — bool("false") is True — and an approval feeds
-        # --auto-settle, which writes without asking. Only the JSON literal
-        # `true` is the reviewer saying yes.
-        approved=data.get("approved") is True,
-        summary=str(data.get("summary", "")),
-        issues=[str(i) for i in data.get("issues", [])],
-        resolved=[str(i) for i in (data.get("resolved") or [])],
-    )
+    # `approved` is read as the JSON literal `true` only (bool("false") is
+    # True, and an approval feeds --auto-settle); the split into blocking and
+    # advisory findings, and the one correction applied to a rejection that
+    # names nothing blocking, live in verdict_from_review_json.
+    return verdict_from_review_json(data)
 
 
 def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
@@ -1385,6 +1470,14 @@ def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
                 seen_resolved.add(fid)
                 resolved.append(fid)
 
+    advisories: list[str] = []
+    seen_adv: set[str] = set()
+    for v in verdicts:
+        for note in getattr(v, "advisories", None) or []:
+            if note not in seen_adv:
+                seen_adv.add(note)
+                advisories.append(note)
+
     summaries = [
         f"[reviewer {i + 1}/{len(verdicts)}] {v.summary}" for i, v in enumerate(verdicts) if v.summary
     ]
@@ -1393,6 +1486,7 @@ def _aggregate_review_verdicts(verdicts: list[ReviewVerdict]) -> ReviewVerdict:
         summary="\n".join(summaries),
         issues=issues,
         resolved=resolved,
+        advisories=advisories,
         advisory=any(v.advisory for v in verdicts),
     )
 
@@ -2074,7 +2168,9 @@ def develop(
         if verdict is not None:
             emit_review_verdict(event_log, verdict, attempt=number)
             for issue in verdict.issues or []:
-                _emit("review.issue", {"text": str(issue)}, attempt=number)
+                _emit("review.issue", {"text": str(issue), "severity": "blocking"}, attempt=number)
+            for note in getattr(verdict, "advisories", None) or []:
+                _emit("review.issue", {"text": str(note), "severity": "advisory"}, attempt=number)
             if not verdict.error and ledger is not None:
                 # Folded in even on approval: approval is the judgement that
                 # closes whatever the reviewer left open. Short of it, only an
