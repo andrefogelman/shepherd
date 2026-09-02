@@ -10,6 +10,22 @@ None.
 
 ## Fixed
 
+### The planner's targets were the first thing the pack dropped
+
+**Was:** `build_pack` filled the budget with keyword-scored files first and
+force-included the planner's targets afterwards, "so the worker always gets
+the files the planner named" — with whatever budget was left, which on a
+real repo was none: the pack hit its 25k ceiling on 100% of recorded runs,
+98 of 120 runs had planned targets, and 1 landed by that path. The tree
+listing (300 entries of arbitrary length) and the instructions file took
+their share before any file did, and nothing kept room for the files the
+pack exists to carry.
+
+**Fix:** the planner's targets go in first; `FILES_RESERVE` (15k of the 25k)
+is kept for file content, and the tree listing is trimmed to what the
+reserve leaves, saying how many entries it dropped; the plan text is capped.
+Pinned by `tests/test_pack_budget.py`.
+
 ### The reviewer read the wrong tree
 
 **Was:** the reviewer ran in the workspace's pre-change tree, with the

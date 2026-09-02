@@ -34,6 +34,13 @@ PACK_IGNORED_DIRS = IGNORED_DIRS | {
 
 PACK_BUDGET = 25_000          # chars for the whole pack
 TREE_LIMIT = 300              # max entries in the tree section
+#: The file sections are the pack's reason to exist: whatever the header,
+#: plan, memory, instructions and tree add up to, this much of the budget is
+#: kept for file content. Measured before this existed: the pack hit its
+#: 25k ceiling on 100% of real runs, and the cut fell wherever the scored
+#: list happened to end, tree and instructions having taken what they liked.
+FILES_RESERVE = 15_000
+PLAN_TEXT_CAP = 2_000         # the planner's sketch, at most
 FULL_FILE_LIMIT = 3_500       # files up to this size go in whole
 SKELETON_LINE_LIMIT = 60      # max signature lines per skeleton
 SCAN_FILE_CAP = 4_000         # max files scored per repo
@@ -224,10 +231,21 @@ def skeleton(text: str, suffix: str) -> str:
     return "\n".join(ln[:160] for ln in kept)
 
 
-def _tree(repo_root: Path, files: list[Path]) -> str:
-    rels = sorted(str(f.relative_to(repo_root)) for f in files)[:TREE_LIMIT]
-    suffix = "" if len(files) <= TREE_LIMIT else f"\n… (+{len(files) - TREE_LIMIT} more files)"
-    return "\n".join(rels) + suffix
+def _tree(repo_root: Path, files: list[Path], room: int | None = None) -> str:
+    """The file listing, capped by entries and — when `room` is given — by
+    characters: entries are dropped from the end until the listing fits, and
+    the count of what was dropped is said in place."""
+    rels = sorted(str(f.relative_to(repo_root)) for f in files)
+    kept = rels[:TREE_LIMIT]
+    if room is not None:
+        while kept and len("\n".join(kept)) + 40 > room:
+            kept = kept[: max(0, len(kept) - max(1, len(kept) // 10))]
+            if len(kept) <= 1 and len("\n".join(kept)) + 40 > room:
+                kept = []
+                break
+    dropped = len(rels) - len(kept)
+    suffix = "" if dropped == 0 else f"\n… (+{dropped} more files)"
+    return "\n".join(kept) + suffix
 
 
 # --- #3 enrichment: import-graph slice + test contract -----------------------
@@ -430,6 +448,8 @@ def build_pack(
     )
     sections: list[str] = [header]
     if plan_text:
+        if len(plan_text) > PLAN_TEXT_CAP:
+            plan_text = plan_text[:PLAN_TEXT_CAP - 20] + "\n[... truncated ...]"
         sections.append(f"== FEATURE PLAN (pre-computed; follow it) ==\n{plan_text}\n")
     if memory_text:
         # Labelled as observations, not as instructions. These lines are
@@ -450,7 +470,11 @@ def build_pack(
             "== WORKSPACE INSTRUCTIONS (the repo's own rules for agents; FOLLOW them) ==\n"
             f"{instructions}\n"
         )
-    sections.append(f"== REPO FILE TREE ==\n{_tree(repo_root, files)}\n")
+    # The tree gets what the reserve leaves: with a long plan, a big
+    # CLAUDE.md and a repo of long paths it used to eat the file budget on
+    # its own, and nothing said so.
+    tree_room = max(0, budget - FILES_RESERVE - sum(len(s) for s in sections))
+    sections.append(f"== REPO FILE TREE ==\n{_tree(repo_root, files, room=tree_room)}\n")
 
     repo_rels = {_norm(str(f.relative_to(repo_root))) for f in files}
     files_by_rel = {_norm(str(f.relative_to(repo_root))): f for f in files}
@@ -459,25 +483,11 @@ def build_pack(
     full_n = 0
     skel_n = 0
     emitted: set[str] = set()
-    for _, rel, path, text in scored:
-        if len(text) <= FULL_FILE_LIMIT:
-            block = f"== FILE: {rel} (full) ==\n{text}\n"
-            kind = "full"
-        else:
-            block = f"== FILE: {rel} (signatures only; open it for bodies) ==\n{skeleton(text, path.suffix.lower())}\n"
-            kind = "skel"
-        if used + len(block) > budget:
-            continue
-        sections.append(block)
-        used += len(block)
-        emitted.add(_norm(rel))
-        if kind == "full":
-            full_n += 1
-        else:
-            skel_n += 1
 
-    # #4 planning prefetch: force-include planned targets that scoring missed, so
-    # the worker always gets the files the planner named.
+    # #4 planning prefetch: the planner's targets go in FIRST. They used to
+    # be appended after the keyword-scored files had taken the budget, so a
+    # file the planner named could be the one that did not fit — measured:
+    # 98 of 120 runs had planned targets, 1 of them landed by this path.
     planned = [n for n in (_norm(t) for t in planned_targets) if n in repo_rels]
     planned_n = 0
     for rel_n in planned:
@@ -501,6 +511,25 @@ def build_pack(
         planned_n += 1
         full_n += int(is_full)
         skel_n += int(not is_full)
+
+    for _, rel, path, text in scored:
+        if _norm(rel) in emitted:
+            continue
+        if len(text) <= FULL_FILE_LIMIT:
+            block = f"== FILE: {rel} (full) ==\n{text}\n"
+            kind = "full"
+        else:
+            block = f"== FILE: {rel} (signatures only; open it for bodies) ==\n{skeleton(text, path.suffix.lower())}\n"
+            kind = "skel"
+        if used + len(block) > budget:
+            continue
+        sections.append(block)
+        used += len(block)
+        emitted.add(_norm(rel))
+        if kind == "full":
+            full_n += 1
+        else:
+            skel_n += 1
 
     # #3 enrichment: for the TARGET files (planned + top keyword-scored), pull
     # import-graph neighbors (what they import + who imports them) and their
