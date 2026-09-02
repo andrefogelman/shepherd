@@ -313,6 +313,19 @@ def run_limits(repo_root: Path) -> dict[str, int]:
     return out
 
 
+def preflight_config(repo_root: Path) -> dict:
+    """`preflight` block: `auth_probe` (bool, default False) runs the auth
+    probe on every claude run instead of only when the token needs a
+    refresh — one short model call that turns a spent allowance into a
+    refusal before the pack, the adoption and the worker are paid for."""
+    out = {"auth_probe": False}
+    for source in (load_global_config(), load_config(repo_root)):  # repo wins
+        block = source.get("preflight")
+        if isinstance(block, dict) and isinstance(block.get("auth_probe"), bool):
+            out["auth_probe"] = block["auth_probe"]
+    return out
+
+
 def auto_optimize_config(repo_root: Path) -> dict | None:
     """auto_optimize settings; per-repo .shepherd-dev.json wins over the global
     ~/.shepherd-dev/config.json. None = feature off (the default)."""

@@ -263,8 +263,17 @@ class RunNPackPipelining(unittest.TestCase):
     feature; the planning calls are independent and network-bound."""
 
     def setUp(self):
+        import os
+        from unittest.mock import patch
+
         self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-runn-pack-")
         self.addCleanup(self.tmp.cleanup)
+        # provider="claude" below is what exercises the pack pipeline; the
+        # auth preflight that a claude run now performs would read this
+        # machine's real credentials (and refuse on a runner that has none).
+        env = patch.dict(os.environ, {"SHEPHERD_DEV_NO_AUTH_PREFLIGHT": "1"})
+        env.start()
+        self.addCleanup(env.stop)
         self.repo = Path(self.tmp.name)
         (self.repo / "src").mkdir()
         (self.repo / "src" / "a.py").write_text("A = 1\n")

@@ -10,6 +10,29 @@ None.
 
 ## Fixed
 
+### A dead login or a spent allowance cost an attempt to discover
+
+**Was:** the substrate seeds the host CLI's subscription login into the
+jailed worker's scratch config and refuses a blob whose `expiresAt` has
+passed. Nothing more could happen from inside the jail: the CLI there holds a
+copy, so a refresh it performs is written nowhere that survives the launch.
+In the history, 8 attempts died on `Not logged in` / `OAuth access token has
+been revoked` and 16 on `You've hit your weekly limit` — each after the pack
+was built, the worktree re-adopted and the workspace forked, and each
+labelled a run failure.
+
+**Fix:** `preflight.auth_preflight` runs before the pack. A missing
+credential fails in zero seconds. A subscription token that is expired or
+expires inside a run's reach (45 minutes: a worker attempt plus its review)
+is refreshed by one unjailed `claude -p ok` with the REAL config dir, where
+the CLI writes the refreshed token back to the store the next seeding reads
+from. The same probe's answer is read for a spent allowance or a dead login,
+either of which stops the run with the reason and, for the allowance, when
+it resets. A probe that merely could not run (network, timeout) is a warning
+and the run proceeds. `preflight.auth_probe: true` in `.shepherd-dev.json`
+runs the probe on every run; `SHEPHERD_DEV_NO_AUTH_PREFLIGHT=1` skips the
+whole check. Pinned by `tests/test_auth_preflight.py`.
+
 ### A worker reaped at its budget was recorded as an unexplained run failure
 
 **Was:** the budget hard-kill has two layers. When the launch perl's alarm

@@ -834,6 +834,25 @@ DEFAULT_LIMITS = {"worker_budget": 900, "gate_timeout": 600}
 DEFAULT_MAX_ATTEMPTS = {"run": 3, "run2": 2, "runN": 2}
 
 
+def _auth_preflight(args, repo_root: Path) -> bool:
+    """Stop a claude-provider run that cannot authenticate BEFORE it spends
+    anything; refresh a subscription token that would not last it. True =
+    proceed. Prints what it found either way."""
+    if getattr(args, "provider", "claude") != "claude":
+        return True
+    from .preflight import auth_preflight
+
+    result = auth_preflight(probe=config.preflight_config(repo_root)["auth_probe"])
+    for warning in result.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if not result.ok:
+        print(f"error: auth preflight: {result.detail}", file=sys.stderr)
+        return False
+    if result.action != "skipped":
+        print(f"auth: {result.detail}")
+    return True
+
+
 def _apply_run_limits(args, repo_root: Path, command: str) -> None:
     """Fill the limits the flags left unset: flag > repo/global `limits` >
     the built-in default. Prints the ones that came from config, so a run
@@ -1067,6 +1086,8 @@ def cmd_run(args) -> int:
 
 def _cmd_run_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run")
+    if not _auth_preflight(args, repo_root):
+        return 2
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -1438,6 +1459,8 @@ def cmd_run2(args) -> int:
 
 def _cmd_run2_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run2")
+    if not _auth_preflight(args, repo_root):
+        return 2
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -1690,6 +1713,8 @@ def cmd_runN(args) -> int:
     if repo_root is None:
         return 2
     _apply_run_limits(args, repo_root, "runN")
+    if not _auth_preflight(args, repo_root):
+        return 2
     features = list(args.features)
     if not 2 <= len(features) <= MAX_LANES:
         print(f"error: runN takes 2..{MAX_LANES} features (got {len(features)})", file=sys.stderr)
