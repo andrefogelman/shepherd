@@ -10,6 +10,27 @@ None.
 
 ## Fixed
 
+### The reviewer read the wrong tree
+
+**Was:** the reviewer ran in the workspace's pre-change tree, with the
+proposal handed to it as a unified diff and, since 0.1.34, as a side
+directory of the changed files. So the tree it could `cd`, `grep` and open —
+the natural thing for a code reviewer to do — was the one tree the proposal
+was NOT in. Measured on 102 real reviews: a median 29 tool calls, 18 of them
+Bash navigating that tree. Once it reported an entire feature "missing" that
+the diff in front of it added; the prompt had to grow a paragraph forbidding
+that inference.
+
+**Fix:** the proposal is written into the reviewer's working copy before its
+CLI starts (`_PreparingExecution` on the launch seam, fed the applied
+proposal's path from the invocation's own kwargs), so the working directory
+IS the tree under judgment and the prompt says so. Custody got stronger, not
+weaker: the proposal's paths come back in the reviewer's changeset, and
+instead of being exempted by path they are compared by BYTES — a proposal
+file the reviewer edited now invalidates the verdict, which the old
+drift-by-path subtraction could not detect. Pinned by
+`tests/test_review_overlay.py`.
+
 ### A dead login or a spent allowance cost an attempt to discover
 
 **Was:** the substrate seeds the host CLI's subscription login into the

@@ -50,8 +50,9 @@ CLOSING: dict[str, str] = {
         "as files under the repository and stop when they are complete."
     ),
     "review": (
-        "The current working directory is the repository BEFORE the change. Begin the "
-        "review now and finish by writing REVIEW.json at the repository root."
+        "The current working directory is the repository WITH the proposal applied: "
+        "every changed file is at its path with its proposed content. Begin the review "
+        "now and finish by writing REVIEW.json at the repository root."
     ),
 }
 

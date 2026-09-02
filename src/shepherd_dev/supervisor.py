@@ -906,6 +906,65 @@ def _swap_perl_teepump(argv: list, tee_path) -> list:
     return argv
 
 
+def overlay_tree(source: Path, working_path: Path) -> int:
+    """Copy every regular file under `source` to the same relative path under
+    `working_path`, creating directories as needed and keeping the exec bit.
+    Returns how many files landed. Paths are confined to `working_path`."""
+    source = Path(source)
+    root = Path(working_path).resolve()
+    if not source.is_dir():
+        return 0
+    landed = 0
+    for path in sorted(source.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(source)
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+        if path.stat().st_mode & 0o111:
+            target.chmod(0o755)
+        landed += 1
+    return landed
+
+
+class _PreparingExecution:
+    """Proxy around the substrate ExecutionCapability that readies the
+    working copy for the launch it is about to make.
+
+    `overlay_from`, when given, is a directory whose files are written into
+    the working path before the launch — the reviewer's proposal, applied,
+    so the tree the reviewer reads and greps IS the tree it is judging.
+    Before this the reviewer sat in the pre-change tree with the proposal
+    as a diff and a side directory, and spent a median 18 Bash calls per
+    review navigating the wrong one; once it reported a whole feature
+    "missing" that the diff in front of it added.
+
+    Failures here never cost the launch: an overlay that could not be
+    written leaves the reviewer in the pre-change tree it always had.
+    """
+
+    def __init__(self, inner, *, overlay_from: Path | str | None = None, hook=None):
+        self._inner = inner
+        self._overlay_from = overlay_from
+        self._hook = hook
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def launch_confined(self, command, confinement):
+        if self._overlay_from:
+            try:
+                landed = overlay_tree(Path(self._overlay_from), Path(self._inner.working_path))
+                if self._hook is not None:
+                    self._hook.emit("worker.overlay", {"files": landed, "role": "reviewer"})
+            except Exception:
+                pass
+        return self._inner.launch_confined(command, confinement)
+
+
 class _TailingExecution:
     """Proxy around the substrate ExecutionCapability (private seam, same
     degrade contract as set_worker_budget): starts the stream tailer just
@@ -1031,6 +1090,9 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -
                 return _swap_perl_killtree(argv)
 
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
+                overlay_from = getattr(self, "_overlay_from", None)
+                if execution is not None and overlay_from:
+                    execution = _PreparingExecution(execution, overlay_from=overlay_from, hook=stream_hook)
                 if stream_hook is not None and execution is not None:
                     execution = _TailingExecution(execution, stream_hook)
                     try:
@@ -1062,6 +1124,16 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -
             # Frozen dataclass: the role rides as a private attribute set past
             # __init__, read by command_argv for --effort/--fallback-model.
             object.__setattr__(provider, "_role", role)
+            # A review launch gets the proposal written into its working copy
+            # before the CLI starts: the invocation's kwargs carry the path
+            # of the applied proposal, and the tree the reviewer greps must be
+            # the tree it judges.
+            try:
+                kwargs_in = getattr(invocation, "kwargs", None) or {}
+                overlay_from = kwargs_in.get("proposed_root") if task_id.endswith(".review") else None
+            except Exception:
+                overlay_from = None
+            object.__setattr__(provider, "_overlay_from", overlay_from or None)
             return provider
 
         rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
@@ -1481,10 +1553,20 @@ def run_review(
         try:
             entries = read_changeset_entries(output.changeset())
             drift = set(workspace_drift or ())
+            # The proposal's own paths are in the reviewer's working copy —
+            # written there before the launch, so it reads the tree it
+            # judges — and they come back in its changeset. They are not an
+            # accusation unless their BYTES moved: a proposal file the
+            # reviewer edited is tampering, and it is now caught, which the
+            # old drift subtraction could not do.
             touched = sorted(
                 rel
                 for rel in entries
-                if rel not in drift and not _is_review_scratch(rel)
+                if not _is_review_scratch(rel)
+                and not (
+                    rel in entries_proposed and entries[rel] == entries_proposed[rel]
+                )
+                and not (rel in drift and rel not in entries_proposed)
             )
             if touched and touched != ["REVIEW.json"]:
                 kept = _salvage_review_json(entries, salvage_dir)

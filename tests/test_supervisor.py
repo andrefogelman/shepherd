@@ -223,10 +223,14 @@ class RenderEntriesAsDiffTextTests(unittest.TestCase):
         or it can still sign off on a change it only partly read."""
         from shepherd_dev.prompts import get_prompt
 
-        prompt = get_prompt("review")
+        prompt = " ".join(get_prompt("review").split())
         self.assertIn("CHANGED FILES", prompt)
         self.assertIn("not shown", prompt)
-        self.assertIn("must NOT approve", prompt)
+        # The proposal is now applied in the reviewer's working copy, so the
+        # instruction is to read the trimmed file THERE — and still never to
+        # approve a file it did not fully read.
+        self.assertIn("open the file in the working directory", prompt)
+        self.assertIn("not one you may approve", prompt)
 
     def test_the_prompt_forbids_reading_absence_out_of_the_worktree(self):
         """Observed on a real run: the reviewer could not find a new
@@ -237,9 +241,14 @@ class RenderEntriesAsDiffTextTests(unittest.TestCase):
         from shepherd_dev.prompts import get_prompt
 
         # Collapsed, so the assertion survives the paragraph being rewrapped.
+        # Since the proposal is applied into the working copy before the
+        # reviewer starts, the ban is stated the other way round: every
+        # listed path IS there, and absence may not be concluded from a
+        # search — the inference itself stays banned.
         prompt = " ".join(get_prompt("review").split())
-        self.assertIn("is a NEW file the proposal creates", prompt)
+        self.assertIn("exists in the working directory with its proposed content", prompt)
         self.assertIn('"does not exist"', prompt)
+        self.assertIn("never a reason to reject", prompt)
 
 
 class UnifiedDiffTests(unittest.TestCase):

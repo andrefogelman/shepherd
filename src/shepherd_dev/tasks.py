@@ -87,29 +87,29 @@ DEFAULT_PROMPTS: dict[str, str] = {
     """,
     "review": """Review a proposed change to this repository.
 
-    The repository contains the CURRENT (pre-change) code; read whatever
-    you need for context. `context`, when non-empty, is a pre-computed
-    context pack (file tree, relevant files, repo memory) — trust it and
-    open additional files only if something you need is missing. `diff`
-    contains the full proposed change (per-file new contents and
-    deletions) for the feature described in `feature`. The proposal is
-    NOT applied to the files you see.
+    The working directory holds the repository WITH the proposal applied:
+    every file the proposal touches is at its path with its proposed
+    content, and everything else is as it was. Read whatever you need for
+    context. `context`, when non-empty, is a pre-computed context pack
+    (file tree, relevant files, repo memory) — trust it and open additional
+    files only if something you need is missing. `diff` is the change
+    itself for the feature described in `feature`: its `-` lines are what
+    the pre-change file said, its `+` lines what the working directory now
+    says.
 
     `diff` opens with `=== CHANGED FILES (n) ===` listing EVERY path the
     proposal touches, then a body per file — a unified diff where the file
     already existed, its full content where it is new. That list is the
-    authoritative scope: if a body says some of it was `not shown`, you are
-    judging that file on partial evidence and must NOT approve it on that
-    basis. Say plainly in `summary` which files you could not fully read,
-    and put the gap in `issues`.
+    authoritative scope: if a body says some of it was `not shown`, open the
+    file in the working directory and read it there before judging it; a
+    file you did not fully read is not one you may approve. Say plainly in
+    `summary` which files you could not fully read, and put the gap in
+    `issues`.
 
-    A path in that list which you cannot find in the repository is a NEW
-    file the proposal creates — the tree you are reading is the state
-    BEFORE this change. Never report that it "does not exist", is
-    "missing", or was not written: searching a pre-change tree cannot tell
-    you what the proposal adds, and `diff` already gave you its content.
-    Not finding something is not evidence of its absence, and never a
-    reason to reject.
+    Every path in that list exists in the working directory with its
+    proposed content. Never report that one "does not exist", is "missing"
+    or was not written without opening it there: not finding something in
+    a search is not evidence of its absence, and never a reason to reject.
 
     Assess: correctness, hidden bugs, security issues, scope discipline
     (does it touch only what the feature needs?), convention adherence,
@@ -135,12 +135,11 @@ DEFAULT_PROMPTS: dict[str, str] = {
     A listed finding you put in neither stays open, which is the right
     outcome when you did not check it.
 
-    `proposed_root` is a directory holding the proposal ALREADY APPLIED —
-    every changed file, at its repository-relative path, with the content
-    this change would give it. Read it whenever you need the result rather
-    than the change: to parse a file, compile it, count its lines, or check
-    a function is closed. `diff` shows you what moved; `proposed_root` is
-    what the worker actually produced.
+    `proposed_root` is a directory holding ONLY the changed files, at their
+    repository-relative paths, with the content this change gives them — a
+    second copy of what is already applied in the working directory, handy
+    for listing exactly what the worker produced. Parse, compile or count
+    in the working directory, where the changed files sit among the rest.
 
     Never rebuild the result yourself by applying `diff` by hand. Your
     reconstruction is not the deliverable, and a mistake in it — treating a
