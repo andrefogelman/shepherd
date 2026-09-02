@@ -834,6 +834,33 @@ DEFAULT_LIMITS = {"worker_budget": 900, "gate_timeout": 600}
 DEFAULT_MAX_ATTEMPTS = {"run": 3, "run2": 2, "runN": 2}
 
 
+def _resolve_speculative_review(args, repo_root: Path) -> bool:
+    """Flag > repo config > auto. Auto reads the repo's own track record:
+    the reviewer overlaps the gate when the gate has been passing, because
+    then the tokens a failed gate would waste are the rare case and the
+    review latency hidden is the common one. Says which way it went."""
+    explicit = getattr(args, "speculative_review", None)
+    if explicit is not None:
+        return bool(explicit)
+    setting = config.speculative_review_config(repo_root)
+    if setting == "on":
+        print("speculative review: on (speculative_review=on in config)")
+        return True
+    if setting == "off":
+        return False
+    if getattr(args, "no_review", False) or getattr(args, "provider", "claude") != "claude":
+        return False
+    rate = history.gate_pass_rate(repo_root)
+    if rate is None:
+        return False
+    fraction, judged = rate
+    if fraction >= config.SPECULATIVE_REVIEW_THRESHOLD:
+        print(f"speculative review: on (gate passed {fraction:.0%} of the last {judged} judged attempts here)")
+        return True
+    print(f"speculative review: off (gate passed {fraction:.0%} of the last {judged} judged attempts here)")
+    return False
+
+
 def _auth_preflight(args, repo_root: Path) -> bool:
     """Stop a claude-provider run that cannot authenticate BEFORE it spends
     anything; refresh a subscription token that would not last it. True =
@@ -1248,7 +1275,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
             worker_budget=(None if getattr(args, "no_watchdog", False) else args.worker_budget),
             event_log=event_log,
             stream_hook=stream_hook,
-            speculative_review=getattr(args, "speculative_review", False),
+            speculative_review=_resolve_speculative_review(args, repo_root),
         )
     reporter.close(ok=report.succeeded)
     if args.review_report:
@@ -1521,7 +1548,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         event_logs=event_logs,
         event_log_main=event_log_main,
         stream_hook=stream_hook,
-        speculative_review=getattr(args, "speculative_review", False),
+        speculative_review=_resolve_speculative_review(args, repo_root),
     )
     if event_log_main is not None:
         event_log_main.emit(
@@ -2268,9 +2295,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--speculative-review",
+        dest="speculative_review",
         action="store_true",
+        default=None,
         help="run the reviewer in parallel with the gate (hides review latency; "
-             "spends review tokens even when the gate fails)",
+             "spends review tokens even when the gate fails). Default: on when this "
+             "repo's recent gate-pass rate is high (speculative_review in .shepherd-dev.json)",
+    )
+    p_run.add_argument(
+        "--no-speculative-review",
+        dest="speculative_review",
+        action="store_false",
+        help="never overlap the reviewer with the gate on this run",
     )
     p_run.add_argument(
         "--optimize-after",
@@ -2400,10 +2436,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run2.add_argument(
         "--speculative-review",
+        dest="speculative_review",
         action="store_true",
+        default=None,
         help="run the reviewer in parallel with the combined gate (hides review "
              "latency; spends review tokens when the gate fails, and re-reviews "
-             "if a repair round changes the proposal)",
+             "if a repair round changes the proposal). Default: on when this repo's "
+             "recent gate-pass rate is high",
+    )
+    p_run2.add_argument(
+        "--no-speculative-review",
+        dest="speculative_review",
+        action="store_false",
+        help="never overlap the reviewer with the combined gate on this run",
     )
     p_run2.add_argument("--max-attempts", type=int, default=None, help="attempts per worker (default: limits.max_attempts, else 2)")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")

@@ -137,6 +137,44 @@ def parallel_payload(report, repo_root: Path, *, test_cmd: str, provider: str, f
     }
 
 
+def gate_pass_rate(repo_root, *, last_n: int = 10, events: list[dict] | None = None) -> tuple[float, int] | None:
+    """(rate, attempts) over the gate verdicts of this repo's most recent
+    `last_n` claude runs: attempts that passed the gate over attempts the
+    gate judged (`passed` + `tests_failed`; run failures and policy
+    rejections never reached it). None below three judged attempts — a rate
+    off one or two runs is a coin toss, not a track record."""
+    if events is None:
+        events = load_events(("run",))
+
+    def _canon(value) -> str:
+        # Recorded repos are resolved paths, but a tmp path on macOS reads
+        # /var/… before resolution and /private/var/… after; compare both
+        # sides the same way, and fall back to the raw text for a path that
+        # no longer exists.
+        try:
+            return str(Path(str(value)).resolve())
+        except Exception:
+            return str(value)
+
+    repo = _canon(repo_root) if repo_root is not None else None
+    mine = [
+        e for e in events
+        if e.get("provider") == "claude" and (repo is None or _canon(e.get("repo") or "") == repo)
+    ]
+    passed = judged = 0
+    for event in mine[-last_n:]:
+        for attempt in event.get("attempts") or []:
+            verdict = attempt.get("verdict")
+            if verdict == "passed":
+                passed += 1
+                judged += 1
+            elif verdict == "tests_failed":
+                judged += 1
+    if judged < 3:
+        return None
+    return passed / judged, judged
+
+
 def failures_since_last_optimize(events: list[dict] | None = None) -> int:
     """Count claude-provider development failures recorded after the most
     recent 'optimize' event — the trigger counter for auto-optimize. Prompt

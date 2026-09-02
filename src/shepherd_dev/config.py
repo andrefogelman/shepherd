@@ -313,6 +313,26 @@ def run_limits(repo_root: Path) -> dict[str, int]:
     return out
 
 
+#: The gate-pass rate at which running the reviewer alongside the gate pays:
+#: above it, the review tokens a failed gate would waste are the rare case
+#: and the review latency hidden behind the gate is the common one.
+SPECULATIVE_REVIEW_THRESHOLD = 0.7
+
+
+def speculative_review_config(repo_root: Path) -> str:
+    """`speculative_review`: "on", "off" or "auto" (default). Auto turns it
+    on when this repo's recent gate-pass rate (history.gate_pass_rate) is at
+    least SPECULATIVE_REVIEW_THRESHOLD over at least three judged attempts."""
+    out = "auto"
+    for source in (load_global_config(), load_config(repo_root)):
+        value = source.get("speculative_review")
+        if isinstance(value, bool):
+            out = "on" if value else "off"
+        elif isinstance(value, str) and value.strip().lower() in ("on", "off", "auto"):
+            out = value.strip().lower()
+    return out
+
+
 def preflight_config(repo_root: Path) -> dict:
     """`preflight` block: `auth_probe` (bool, default False) runs the auth
     probe on every claude run instead of only when the token needs a
