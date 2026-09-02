@@ -32,7 +32,7 @@ import shepherd as sp
 from . import config, history, memory as repo_memory
 from .contextpack import build_pack
 from .diffcollect import Entries
-from .launch import LaunchPolicy
+from .launch import LaunchPolicy, RoleModels
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .staging import PROPOSALS_DIR, is_proposal_id
@@ -744,7 +744,7 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         if args.provider == "claude":
             set_worker_budget(
                 args.worker_budget, stream_hook=stream_hook,
-                launch=LaunchPolicy.from_config(repo_root),
+                launch=LaunchPolicy.from_config(repo_root), roles=_role_models(args, repo_root),
             )
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
@@ -816,6 +816,26 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
     if _wants_interactive(args) and report.proposal_id:
         return _interactive_settle_proposal(repo_root, report.proposal_id)
     return 0 if report.succeeded else 1
+
+
+def _role_models(args, repo_root: Path) -> RoleModels:
+    """Model/effort/fallback per role: flags over repo config over global
+    config over the CLI default. Warnings (an unknown effort level) are
+    printed once here, where the human is watching."""
+    roles = RoleModels.from_config(
+        repo_root,
+        worker_model=getattr(args, "model", None),
+        reviewer_model=getattr(args, "reviewer_model", None),
+        effort=getattr(args, "effort", None),
+    )
+    for warning in roles.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    chosen = roles.describe()
+    if chosen:
+        print("models: " + "; ".join(
+            f"{role} " + " ".join(f"{k}={v}" for k, v in spec.items()) for role, spec in chosen.items()
+        ))
+    return roles
 
 
 def _run_planning(
@@ -1118,6 +1138,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     if args.provider == "claude":
         set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+            roles=_role_models(args, repo_root),
         )
 
     policy = ChangesetPolicy(
@@ -1411,6 +1432,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
     if args.provider == "claude":
         set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+            roles=_role_models(args, repo_root),
         )
 
     policy = ChangesetPolicy(
@@ -1730,6 +1752,7 @@ def cmd_runN(args) -> int:
     if args.provider == "claude":
         set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+            roles=_role_models(args, repo_root),
         )
 
     policy = ChangesetPolicy(
@@ -2230,6 +2253,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="wall-clock seconds each worker attempt may use (claude provider)",
     )
+    p_run.add_argument(
+        "--model", default=None, metavar="MODEL",
+        help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
+             "default: the claude CLI's own default)",
+    )
+    p_run.add_argument(
+        "--reviewer-model", default=None, metavar="MODEL",
+        help="model for the reviewer (overrides models.reviewer.model in .shepherd-dev.json)",
+    )
+    p_run.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "max"],
+        help="effort level for worker AND reviewer (overrides models.*.effort in .shepherd-dev.json)",
+    )
     p_run.add_argument("--max-changed-paths", type=int, default=40)
     p_run.add_argument(
         "--allowed-prefix",
@@ -2305,6 +2341,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")
     p_run2.add_argument("--gate-timeout", type=int, default=600)
     p_run2.add_argument("--worker-budget", type=_positive_seconds, default=900)
+    p_run2.add_argument(
+        "--model", default=None, metavar="MODEL",
+        help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
+             "default: the claude CLI's own default)",
+    )
+    p_run2.add_argument(
+        "--reviewer-model", default=None, metavar="MODEL",
+        help="model for the reviewer (overrides models.reviewer.model in .shepherd-dev.json)",
+    )
+    p_run2.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "max"],
+        help="effort level for worker AND reviewer (overrides models.*.effort in .shepherd-dev.json)",
+    )
     p_run2.add_argument("--max-changed-paths", type=int, default=40)
     p_run2.add_argument("--allowed-prefix", action="append", default=[])
     p_run2.set_defaults(func=cmd_run2)
@@ -2328,6 +2377,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_runN.add_argument("--max-attempts", type=int, default=2, help="attempts per lane (default 2)")
     p_runN.add_argument("--gate-timeout", type=int, default=600)
     p_runN.add_argument("--worker-budget", type=_positive_seconds, default=900)
+    p_runN.add_argument(
+        "--model", default=None, metavar="MODEL",
+        help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
+             "default: the claude CLI's own default)",
+    )
+    p_runN.add_argument(
+        "--reviewer-model", default=None, metavar="MODEL",
+        help="model for the reviewer (overrides models.reviewer.model in .shepherd-dev.json)",
+    )
+    p_runN.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "max"],
+        help="effort level for worker AND reviewer (overrides models.*.effort in .shepherd-dev.json)",
+    )
     p_runN.add_argument("--max-changed-paths", type=int, default=40)
     p_runN.add_argument("--allowed-prefix", action="append", default=[])
     p_runN.add_argument("--no-context-pack", action="store_true")

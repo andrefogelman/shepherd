@@ -308,6 +308,17 @@ def planning_config(repo_root: Path) -> dict:
 
     out = {"enabled": True, "model": DEFAULT_PLAN_MODEL}
     for source in (load_global_config(), load_config(repo_root)):  # repo wins (last)
+        # `models.planner.model` is the same choice under the per-role key the
+        # worker and reviewer use (see launch.RoleModels); `planning.model`
+        # stays honoured and, being the specific key, wins within one file.
+        models = source.get("models")
+        planner = models.get("planner") if isinstance(models, dict) else None
+        if isinstance(planner, str):
+            planner = {"model": planner}
+        if isinstance(planner, dict):
+            model = planner.get("model")
+            if isinstance(model, str) and model.strip():
+                out["model"] = model.strip()
         cfg = source.get("planning")
         if isinstance(cfg, dict):
             if "enabled" in cfg:

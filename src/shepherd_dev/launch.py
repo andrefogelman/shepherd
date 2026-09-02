@@ -249,3 +249,152 @@ def describe(policy: LaunchPolicy, environ: Mapping[str, str] | None = None) -> 
         "env_scrubbed": policy.scrub_names(env),
         "flags": [f for f in HARDENING_FLAGS if f.startswith("--")],
     }
+
+
+# ── Which model serves which role ───────────────────────────────────────────
+# Nothing pinned the model before: the provider passed no `--model`, so the
+# worker and the reviewer ran on whatever the CLI defaulted to that day, and
+# no run recorded which. `--effort` and `--fallback-model` were never passed
+# at all. The task id the substrate hands the transport names the role, so
+# the choice can be made per role in one place.
+
+#: The CLI's effort levels. An unknown value would fail the launch itself, so
+#: config is validated here and an unknown level is dropped with a warning.
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
+
+ROLE_BY_TASK: dict[str, str] = {
+    "implement": "worker",
+    "write_tests": "worker",
+    "review": "reviewer",
+}
+
+
+@dataclass(frozen=True)
+class RoleModel:
+    model: str | None = None
+    effort: str | None = None
+    fallback: str | None = None
+
+    @property
+    def empty(self) -> bool:
+        return not (self.model or self.effort or self.fallback)
+
+
+@dataclass(frozen=True)
+class RoleModels:
+    """Per-role model choices, resolved once per command.
+
+    Precedence, highest first: explicit CLI flags, the repo's
+    `.shepherd-dev.json`, the global `~/.shepherd-dev/config.json`, nothing
+    (the CLI's own default, which is what every run used until now).
+
+        "models": {
+          "worker":   {"model": "claude-opus-4-8", "effort": "high"},
+          "reviewer": {"model": "claude-sonnet-5", "effort": "max",
+                       "fallback": "claude-opus-4-8"},
+          "planner":  {"model": "claude-haiku-4-5-20251001"}
+        }
+    """
+
+    worker: RoleModel = RoleModel()
+    reviewer: RoleModel = RoleModel()
+    planner: RoleModel = RoleModel()
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def from_config(
+        cls,
+        repo_root: Path | None,
+        *,
+        config: Mapping | None = None,
+        global_config: Mapping | None = None,
+        worker_model: str | None = None,
+        reviewer_model: str | None = None,
+        effort: str | None = None,
+    ) -> "RoleModels":
+        if config is None or global_config is None:
+            from .config import load_config, load_global_config
+
+            if config is None:
+                config = load_config(repo_root) if repo_root is not None else {}
+            if global_config is None:
+                global_config = load_global_config()
+        warnings: list[str] = []
+        merged: dict[str, dict] = {}
+        for source in (global_config, config):  # repo wins: applied last
+            block = source.get("models") if isinstance(source, Mapping) else None
+            if not isinstance(block, Mapping):
+                continue
+            for role in ("worker", "reviewer", "planner"):
+                raw = block.get(role)
+                if isinstance(raw, str):
+                    raw = {"model": raw}
+                if not isinstance(raw, Mapping):
+                    continue
+                target = merged.setdefault(role, {})
+                for key in ("model", "effort", "fallback"):
+                    value = raw.get(key)
+                    if isinstance(value, str) and value.strip():
+                        target[key] = value.strip()
+        if worker_model:
+            merged.setdefault("worker", {})["model"] = worker_model.strip()
+        if reviewer_model:
+            merged.setdefault("reviewer", {})["model"] = reviewer_model.strip()
+        if effort:
+            for role in ("worker", "reviewer"):
+                merged.setdefault(role, {})["effort"] = effort.strip()
+
+        def _role(name: str) -> RoleModel:
+            raw = merged.get(name, {})
+            level = raw.get("effort")
+            if level is not None and level.lower() not in EFFORT_LEVELS:
+                warnings.append(
+                    f"models.{name}.effort={level!r} is not one of {', '.join(EFFORT_LEVELS)}; ignored"
+                )
+                level = None
+            return RoleModel(
+                model=raw.get("model"),
+                effort=level.lower() if level else None,
+                fallback=raw.get("fallback"),
+            )
+
+        return cls(
+            worker=_role("worker"),
+            reviewer=_role("reviewer"),
+            planner=_role("planner"),
+            warnings=tuple(warnings),
+        )
+
+    def for_task(self, task_id: str) -> RoleModel:
+        """The role's choices for a substrate task id; empty for a task that
+        is not one of ours (the static smoke task, say)."""
+        key = str(task_id or "").rsplit(".", 1)[-1] if str(task_id or "").startswith("shepherd_dev.tasks.") else ""
+        role = ROLE_BY_TASK.get(key)
+        if role == "worker":
+            return self.worker
+        if role == "reviewer":
+            return self.reviewer
+        return RoleModel()
+
+    def describe(self) -> dict:
+        out: dict = {}
+        for name, role in (("worker", self.worker), ("reviewer", self.reviewer), ("planner", self.planner)):
+            if not role.empty:
+                out[name] = {k: v for k, v in (("model", role.model), ("effort", role.effort), ("fallback", role.fallback)) if v}
+        return out
+
+
+def model_argv(argv: list, role: RoleModel) -> list:
+    """Append the role's `--effort` and `--fallback-model` to a Claude CLI
+    argv. `--model` is NOT added here: the provider already emits it from
+    its `model` field, which the transport fills from the role (see
+    supervisor.set_worker_budget), so it is never added twice."""
+    if role.empty or not _is_claude_body(argv):
+        return list(argv)
+    out = list(argv)
+    present = {str(a) for a in out}
+    if role.effort and "--effort" not in present:
+        out += ["--effort", role.effort]
+    if role.fallback and "--fallback-model" not in present:
+        out += ["--fallback-model", role.fallback]
+    return out

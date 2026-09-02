@@ -943,14 +943,18 @@ def _rendered_prompt(invocation, stream_hook=None) -> str:
     return rendered
 
 
-def set_worker_budget(seconds: int, stream_hook=None, launch=None) -> bool:
+def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
     kill of the whole worker process group (#A). With ``stream_hook`` (a
     ``events.WorkerStreamHook``), the launch perl additionally tees the worker's
     stream-json to a scratch file that the hook tails live (verbose mode).
     ``launch`` (a ``launch.LaunchPolicy``, default: the built-in policy) decides
     what the jailed CLI may reach — denied tools, no MCP servers, no repo
-    settings, credential variables unset — see launch.py for why.
+    settings, credential variables unset — see launch.py for why. ``roles``
+    (a ``launch.RoleModels``) picks the model, effort and fallback model per
+    role; the task id the substrate hands the transport says which role a
+    launch is. Unset: the CLI's own default, which is what every run used
+    before and which no run recorded.
 
     Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
     runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
@@ -974,9 +978,17 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None) -> bool:
             f"worker budget must be positive (got {seconds}); "
             "a budget of 0 disables the hard kill instead of enforcing it"
         )
-    from .launch import LaunchPolicy, describe as _describe_launch, harden_argv
+    from .launch import (
+        LaunchPolicy,
+        RoleModel,
+        RoleModels,
+        describe as _describe_launch,
+        harden_argv,
+        model_argv,
+    )
 
     policy = launch if launch is not None else LaunchPolicy()
+    role_models = roles if roles is not None else RoleModels()
     try:
         from shepherd_dialect import providers
         from shepherd_dialect.workspace_control import runtime_provider as rp
@@ -990,6 +1002,7 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None) -> bool:
                 argv = _with_sandbox_tmpdir(super().command_argv(working_path, cli, prompt))
                 try:
                     argv = harden_argv(argv, policy)
+                    argv = model_argv(argv, getattr(self, "_role", None) or RoleModel())
                 except Exception:
                     pass  # a hardening failure must not cost the launch
                 if stream_hook is not None:
@@ -1011,16 +1024,27 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None) -> bool:
                 )
 
         def transport(invocation):
+            task_id = str(getattr(getattr(invocation, "task_lock", None), "task_id", "") or "")
+            try:
+                role = role_models.for_task(task_id)
+            except Exception:
+                role = RoleModel()
             kwargs = dict(
                 provider_id=invocation.provider_id,
                 prompt=_rendered_prompt(invocation, stream_hook),
-                model=invocation.model_name,
+                # A model the caller named on the run itself outranks the role's;
+                # the role's outranks the CLI default.
+                model=invocation.model_name or role.model,
                 budget_seconds=seconds,
             )
             try:
-                return _KillTreeProvider(**kwargs)
+                provider = _KillTreeProvider(**kwargs)
             except Exception:
                 return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
+            # Frozen dataclass: the role rides as a private attribute set past
+            # __init__, read by command_argv for --effort/--fallback-model.
+            object.__setattr__(provider, "_role", role)
+            return provider
 
         rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
             claude=transport
