@@ -118,7 +118,10 @@ def render_prompt(task_id: str, kwargs: Mapping[str, object], *, fallback: str) 
         if section is not None:
             parts.append(section)
     parts.append(CLOSING[key])
-    return "\n\n".join(parts) + "\n"
+    # The prompt travels as ONE argv element. A NUL anywhere in it — binary
+    # content that slipped into a value — is `embedded null byte` from
+    # subprocess and a launch that never happens. Spell it out instead.
+    return ("\n\n".join(parts) + "\n").replace("\x00", "\\x00")
 
 
 def prompt_summary(task_id: str, kwargs: Mapping[str, object], rendered: str) -> dict:

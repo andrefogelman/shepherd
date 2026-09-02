@@ -10,6 +10,49 @@ None.
 
 ## Fixed
 
+### Bytecode the worker's own test run left behind became part of the proposal
+
+**Was:** with the gate command in its prompt, the worker runs the suite before
+finishing — which is the point — and Python leaves `__pycache__/*.pyc` in the
+working copy. The substrate captures every changed path, and
+`read_changeset_entries` read them all: on the first real run after the prompt
+change, a two-file proposal came back as four "changed files", two of them
+bytecode. Their binary content then reached the reviewer's diff, where
+`decode(errors="replace")` keeps a NUL as a real character, and the reviewer's
+launch died before it started: `ProviderInvocationError: embedded null byte`
+— a str with a NUL cannot be an argv element. `IGNORED_DIRS` had
+`__pycache__` in it all along; nothing on the changeset path consulted it.
+
+**Fix:** `read_changeset_entries` skips build residue before reading it —
+any path with a segment in `CHANGESET_NOISE_DIRS` (`IGNORED_DIRS` plus the
+usual tool caches) or a bytecode suffix. `_one_file_text` names a binary file
+and its size instead of rendering it, and `render_prompt` spells out any NUL
+that still reaches it, so no value can take a launch down. Pinned by
+`tests/test_changeset_noise.py` and `tests/test_promptrender.py`.
+
+### A stale credentials file shadowed a live keychain login
+
+**Was:** established on the first real run after the auth preflight shipped.
+The substrate's credential lookup reads `~/.claude/.credentials.json` before
+the macOS keychain. On this machine that file dated from a month earlier and
+its token had expired 690 hours before; the keychain held the login the CLI
+actually uses, good for another six hours. So the CLI worked, the preflight's
+probe succeeded, and the substrate still seeded the dead token and refused
+the launch. This is the shape behind the history's `Not logged in` failures:
+nothing else on the machine complains about a file the CLI no longer reads.
+
+**Fix:** `auth_preflight` reads the expiry of each source the substrate might
+seed from (the file, and on macOS the keychain) and, when the token is still
+expired after the probe, names this case outright — which file, how long
+expired, which live login it shadows, and the two remedies (refresh or remove
+the file; or point `CLAUDE_CONFIG_DIR` at a directory holding a current copy,
+which is how the smoke run itself proceeded without touching the user's
+file). A token still expired after the probe now stops the run before the
+pack rather than warning and letting the substrate refuse it. Not changed:
+the substrate's lookup order, which lives in the fork of shepherd-ai and
+would be the right place for "prefer the freshest non-expired source".
+Pinned by `tests/test_auth_preflight.py`.
+
 ### The worker had no toolchain, and went looking for one elsewhere
 
 **Was:** the jail's working copy is materialized from a git tree, so

@@ -322,6 +322,13 @@ def read_changeset_entries(changeset, ignore: tuple[str, ...] = ()) -> Entries:
     symlinks `jail_seed_links` plants for a launch's toolchain (seed.py).
     They are skipped by exact path and by prefix, before anything is read.
 
+    Paths with a segment in IGNORED_DIRS are skipped too. A worker that runs
+    the suite it was told about — which it now is, the gate command being in
+    its prompt — leaves `__pycache__/*.pyc` behind, and those rode into the
+    proposal: four "changed files" of which two were bytecode, binary content
+    that then reached the reviewer's prompt and killed its launch with
+    `embedded null byte`. Build residue is not a proposal.
+
     v0.3.0 lane reality (verified on 3 workspaces): runs fork from the
     workspace's ORIGINAL adoption basis, not from later settlements, so
     changed_paths can list stale-basis artifacts whose content is
@@ -341,6 +348,8 @@ def read_changeset_entries(changeset, ignore: tuple[str, ...] = ()) -> Entries:
     for rel in changeset.changed_paths:
         if ignore and any(rel == ign or rel.startswith(ign + "/") for ign in ignore):
             continue
+        if _is_changeset_noise(rel):
+            continue
         entry = changeset.read_file(rel)  # (bytes, mode) | None
         if entry is not None:
             content, mode = entry
@@ -349,6 +358,20 @@ def read_changeset_entries(changeset, ignore: tuple[str, ...] = ()) -> Entries:
                 executable.add(rel)
     entries.executable = frozenset(executable)
     return entries
+
+
+#: Residue a worker's own tool runs leave behind, never a proposal: bytecode
+#: caches and the like. Segment-matched, so `pkg/__pycache__/x.pyc` and a
+#: top-level `__pycache__/x.pyc` are both skipped.
+CHANGESET_NOISE_DIRS = frozenset(IGNORED_DIRS) | {".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
+CHANGESET_NOISE_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_changeset_noise(rel: str) -> bool:
+    parts = rel.split("/")
+    if any(part in CHANGESET_NOISE_DIRS for part in parts[:-1]):
+        return True
+    return parts[-1].endswith(CHANGESET_NOISE_SUFFIXES)
 
 
 #: Environment the gate must NOT inherit (#4). The gate exists to judge the
@@ -1226,6 +1249,11 @@ def _one_file_text(rel: str, content: bytes, repo_root: Path | None) -> str:
     lines costs a fraction of the file. Measured on a real commit here: 12%
     of the full-content size.
     """
+    if b"\x00" in content:
+        # Binary: a decoded NUL is a real character in a str, and a str with
+        # one cannot be an argv element — the reviewer's launch died on it.
+        # Name the file and its size; there is nothing to read in it anyway.
+        return f"=== FILE: {rel} (binary, {len(content)} bytes; not shown) ===\n"
     after = content.decode("utf-8", errors="replace")
     if repo_root is not None:
         current = Path(repo_root) / rel

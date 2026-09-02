@@ -139,6 +139,18 @@ class RenderPromptTests(unittest.TestCase):
         self.assertIn("-old\n+new", out)
         self.assertTrue(out.rstrip().endswith(CLOSING["review"]))
 
+    def test_a_nul_in_a_value_cannot_reach_the_argv(self):
+        # Observed: a .pyc the worker left behind reached the reviewer's diff,
+        # its NULs survived decode(errors="replace"), and the launch died with
+        # `embedded null byte`.
+        out = render_prompt(
+            "shepherd_dev.tasks.review",
+            {"feature": "f", "diff": "=== FILE: x.pyc ===\nabc\x00def\n"},
+            fallback="",
+        )
+        self.assertNotIn("\x00", out)
+        self.assertIn("abc\\x00def", out)
+
     def test_a_task_that_is_not_ours_keeps_the_substrate_prompt(self):
         self.assertEqual(
             render_prompt("shepherd_dev.tasks.smoke_change", {"output_path": "x"}, fallback="ENVELOPE"),
