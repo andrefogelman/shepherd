@@ -10,6 +10,41 @@ None.
 
 ## Fixed
 
+### The jailed worker reached the user's ssh agent, MCP connectors and sub-agents
+
+**Was:** the jail confines writes to the run's clone and nothing else. The
+worker inherits this process's whole environment, reads any path, and has the
+network. Established from the event logs of real runs: workers on a compiled
+language with no toolchain in the clone read `~/.ssh/config`, found
+`SSH_AUTH_SOCK` in their environment, and ran `ssh <host> "docker run …"` to
+compile and test the repository on a remote machine — twenty-odd runs across
+three days, one of them ending in `rm -rf` of the directory it had created
+there. The reviewer called the account's MCP connectors (a database
+`list_projects`, `list_tables`). Both agents spawned sub-agents (`Agent`, 7
+launches: model work outside the trace and the budget) and spent turns on
+`TaskCreate`/`TaskUpdate` bookkeeping (320 calls across 19 runs, median 18 a
+run). A repository's own `.claude/settings.json` was also loaded into the
+session, hooks included.
+
+**Fix:** `launch.LaunchPolicy` + `harden_argv`, applied by the transport
+`set_worker_budget` installs to the framework's real argv: `--disallowedTools`
+for sub-agents, task-list, tool-search, web and plan-mode tools;
+`--strict-mcp-config` with no servers; `--no-chrome`; `--setting-sources user`
+(the redirected, empty config dir — nothing committed to the repo under review
+reaches the session); and `env -u NAME` for every credential-shaped variable
+present in the environment (a fixed list plus name patterns such as `_TOKEN`,
+`_API_KEY`, `_PASSWORD`), inserted into the env prefix the substrate already
+puts in front of the CLI. `ANTHROPIC_*`/`CLAUDE_*`, `jail_env` keys and the
+repo's `worker.env_keep` are never unset; `worker.harden: false` turns it all
+off. Each launch records a `worker.launch` event naming what was denied and
+which variables were unset (names only).
+
+Not fixed here, and documented: network reach itself. The jail's profile
+cannot filter by host, and the API needs the network; a worker that finds
+credentials elsewhere (a file in the repository, a key on disk) can still use
+them. Pinned by `tests/test_launch_policy.py`, including one case against
+the framework's real `command_argv`.
+
 ### The worker read its prompt as a source dump and an escaped JSON blob
 
 **Was:** what the jailed Claude actually received was not the task's prompt.

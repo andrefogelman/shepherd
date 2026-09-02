@@ -32,6 +32,7 @@ import shepherd as sp
 from . import config, history, memory as repo_memory
 from .contextpack import build_pack
 from .diffcollect import Entries
+from .launch import LaunchPolicy
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
 from .staging import PROPOSALS_DIR, is_proposal_id
@@ -741,7 +742,10 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
-            set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+            set_worker_budget(
+                args.worker_budget, stream_hook=stream_hook,
+                launch=LaunchPolicy.from_config(repo_root),
+            )
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
 
@@ -1112,7 +1116,9 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+        set_worker_budget(
+            args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1399,7 +1405,9 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+        set_worker_budget(
+            args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1716,7 +1724,9 @@ def cmd_runN(args) -> int:
               file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(args.worker_budget, stream_hook=stream_hook)
+        set_worker_budget(
+            args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,

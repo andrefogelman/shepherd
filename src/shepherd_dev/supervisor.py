@@ -894,11 +894,14 @@ def _rendered_prompt(invocation, stream_hook=None) -> str:
     return rendered
 
 
-def set_worker_budget(seconds: int, stream_hook=None) -> bool:
+def set_worker_budget(seconds: int, stream_hook=None, launch=None) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
     kill of the whole worker process group (#A). With ``stream_hook`` (a
     ``events.WorkerStreamHook``), the launch perl additionally tees the worker's
     stream-json to a scratch file that the hook tails live (verbose mode).
+    ``launch`` (a ``launch.LaunchPolicy``, default: the built-in policy) decides
+    what the jailed CLI may reach — denied tools, no MCP servers, no repo
+    settings, credential variables unset — see launch.py for why.
 
     Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
     runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
@@ -922,6 +925,9 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
             f"worker budget must be positive (got {seconds}); "
             "a budget of 0 disables the hard kill instead of enforcing it"
         )
+    from .launch import LaunchPolicy, describe as _describe_launch, harden_argv
+
+    policy = launch if launch is not None else LaunchPolicy()
     try:
         from shepherd_dialect import providers
         from shepherd_dialect.workspace_control import runtime_provider as rp
@@ -933,6 +939,10 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
                 # no-op if the shape is ever not `perl -e`. With a stream hook the
                 # swap is the killtree+pump variant (tee for the live tailer).
                 argv = _with_sandbox_tmpdir(super().command_argv(working_path, cli, prompt))
+                try:
+                    argv = harden_argv(argv, policy)
+                except Exception:
+                    pass  # a hardening failure must not cost the launch
                 if stream_hook is not None:
                     try:
                         return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
@@ -943,6 +953,10 @@ def set_worker_budget(seconds: int, stream_hook=None) -> bool:
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
                 if stream_hook is not None and execution is not None:
                     execution = _TailingExecution(execution, stream_hook)
+                    try:
+                        stream_hook.emit("worker.launch", _describe_launch(policy))
+                    except Exception:
+                        pass
                 return super().execute(
                     task_body, stack, context, args, execution=execution, confinement=confinement
                 )

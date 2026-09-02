@@ -163,6 +163,15 @@ def format_event(event: dict, live: bool = True) -> str | None:
         return f"· {p.get('text', '')}"
     if kind == "worker.raw":
         return f"⚠ oversized stream line dropped ({p.get('bytes', 0)} bytes)"
+    if kind == "worker.launch":
+        if not p.get("enabled", True):
+            return "⚑ launch hardening OFF (worker.harden=false)"
+        scrubbed = p.get("env_scrubbed") or []
+        denied = p.get("disallowed_tools") or []
+        return (
+            f"⚑ launch hardened: {len(denied)} tool(s) denied, no MCP, repo settings ignored"
+            + (f", env unset: {', '.join(scrubbed)}" if scrubbed else "")
+        )
     if kind == "worker.prompt":
         sections = ", ".join(p.get("sections") or []) or "none"
         shape = "rendered" if p.get("rendered") else "substrate envelope"
