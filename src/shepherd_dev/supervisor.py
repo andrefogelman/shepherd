@@ -56,6 +56,11 @@ class Attempt:
     verdict: str  # run_failed | no_change | policy_rejected | tests_failed | passed | timed_out
     error: str | None = None
     duration_s: float | None = None  # worker wall-clock (cost/speed telemetry)
+    #: What the launch cost, as the CLI reported it in its `result` event:
+    #: tokens in/out (+ cache), turns, API time, dollars, and the model that
+    #: served it (from the session's init event). None when the stream was
+    #: not tailed (verbose off) or the launch died before a result.
+    usage: dict | None = None
 
 
 @dataclass
@@ -77,6 +82,9 @@ class ReviewVerdict:
     #: mentioned one came back REJECTED; the human then accepted 60% of those
     #: rejections, which is the measure of how little they meant.
     advisories: list[str] = field(default_factory=list)
+    #: The reviewer launch's telemetry (see Attempt.usage). None for a panel
+    #: or a hosted reviewer, whose launches run on threads develop does not own.
+    usage: dict | None = None
     #: True when no model read the diff — the verdict is a deterministic
     #: heuristic over its SHAPE (file count, byte size). Useful as a signal,
     #: never as authority: --auto-settle refuses it, because approving a change
@@ -140,6 +148,8 @@ class DevReport:
             if a.gate and not a.gate.passed:
                 reason = a.gate.infra_error or a.gate.output_tail[-500:]
                 lines.append(f"    gate: exit={a.gate.exit_code} {reason}")
+            if a.usage:
+                lines.append(f"    usage: {_format_usage(a.usage)}")
         if self.review:
             if self.review.error:
                 lines.append(f"review: UNAVAILABLE ({self.review.error})")
@@ -147,6 +157,8 @@ class DevReport:
                 lines.append(f"review: {'APPROVED' if self.review.approved else 'REJECTED'} — {self.review.summary}")
                 lines += [f"  issue: {i}" for i in self.review.issues]
                 lines += [f"  advisory: {i}" for i in self.review.advisories]
+            if self.review.usage:
+                lines.append(f"  usage: {_format_usage(self.review.usage)}")
         if self.ledger is not None:
             rendered = self.ledger.render()  # unprompted: nobody has to ask
             if rendered:
@@ -161,6 +173,12 @@ class DevReport:
                 f"  shepherd-dev settle {self.final_run_ref}{repo_arg} --reject  # discard proposal",
             ]
         return "\n".join(lines)
+
+
+def _format_usage(usage: dict | None) -> str:
+    from .events import format_usage
+
+    return format_usage(usage)
 
 
 def render_review_report(report: DevReport) -> str:
@@ -198,11 +216,16 @@ def render_review_report(report: DevReport) -> str:
             lines.append(f"    {gf}text")
             lines.extend(f"    {ln}" for ln in reason.splitlines())
             lines.append(f"    {gf}")
+        if a.usage:
+            lines.append(f"  - usage: {_format_usage(a.usage)}")
     lines.append("")
 
     if report.review is not None:
         lines.append("## Review")
         lines.append("")
+        if report.review.usage:
+            lines.append(f"- usage: {_format_usage(report.review.usage)}")
+            lines.append("")
         if report.review.error:
             lines.append(f"UNAVAILABLE: {report.review.error}")
         else:
@@ -637,6 +660,16 @@ def _format_guidance(
         assert ledger is not None
         return get_prompt("guidance_review").replace("{FINDINGS}", ledger.guidance())
     raise ValueError(f"unknown guidance kind: {kind}")
+
+
+def _take_usage(stream_hook) -> dict | None:
+    """The telemetry of the launch this thread just finished, or None."""
+    if stream_hook is None:
+        return None
+    try:
+        return stream_hook.take_result()
+    except Exception:
+        return None
 
 
 def _gate_note(test_cmd: str | None, gate: GateResult | None) -> str:
@@ -1307,6 +1340,8 @@ def emit_review_verdict(event_log, verdict, *, attempt: int | None = None) -> No
         "blocking": len(verdict.issues or []),
         "advisory": len(getattr(verdict, "advisories", None) or []),
     }
+    if getattr(verdict, "usage", None):
+        payload["usage"] = dict(verdict.usage)
     if verdict.error:
         payload["error"] = verdict.error
     try:
@@ -1951,11 +1986,12 @@ def develop(
                 guidance = _TIMEOUT_GUIDANCE
                 continue
         duration = round(_time.monotonic() - started, 1)
+        usage = _take_usage(stream_hook)
         output = run.output()
         changeset = output.changeset()
         entries = read_changeset_entries(changeset)
         changed = list(entries)
-        reporter.note(worker_activity_summary(run, entries))  # post-hoc #B
+        reporter.note(worker_activity_summary(run, entries, usage=usage))  # post-hoc #B
         _emit("attempt.diff", {"files": changed, "run_ref": run.run_ref}, attempt=number)
 
         if not changed:
@@ -1966,7 +2002,7 @@ def develop(
                 warmup.teardown()
             reporter.fail("no file changes")
             _emit("phase.fail", {"label": "worker", "reason": "no file changes"}, attempt=number)
-            report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration))
+            report.attempts.append(Attempt(number, run.run_ref, changed, [], None, "no_change", duration_s=duration, usage=usage))
             guidance = (
                 "PREVIOUS ATTEMPT: you produced no file changes at all. "
                 "If the feature genuinely already exists, say so by making the "
@@ -1988,7 +2024,7 @@ def develop(
             reporter.fail("no progress (identical changeset)")
             _emit("attempt.no_progress", {"attempt": number, "files": changed}, attempt=number)
             report.attempts.append(
-                Attempt(number, run.run_ref, changed, [], None, "no_progress", duration_s=duration)
+                Attempt(number, run.run_ref, changed, [], None, "no_progress", duration_s=duration, usage=usage)
             )
             return report
         last_entries = entries
@@ -2001,7 +2037,7 @@ def develop(
             reporter.fail(f"policy: {len(verdict_policy.violations)} violation(s)")
             _emit("policy.reject", {"violations": verdict_policy.violations}, attempt=number)
             report.attempts.append(
-                Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration)
+                Attempt(number, run.run_ref, changed, verdict_policy.violations, None, "policy_rejected", duration_s=duration, usage=usage)
             )
             guidance = _prior_attempt_guidance(entries) + _format_guidance("policy", violations=verdict_policy.violations)
             continue
@@ -2050,6 +2086,7 @@ def develop(
                         salvage_dir=getattr(event_log, "dir", None),
                         gate=_gate_note(test_cmd, None),  # verdict not known yet
                     )
+                    spec_result["usage"] = _take_usage(stream_hook)
                 except Exception:
                     pass  # spec failure → the sequential path below reruns it
 
@@ -2068,7 +2105,10 @@ def develop(
             exits jump straight over."""
             if spec_thread is not None:
                 spec_thread.join()
-            return spec_result.get("verdict")
+            verdict = spec_result.get("verdict")
+            if verdict is not None and spec_result.get("usage") and getattr(verdict, "usage", None) is None:
+                verdict.usage = spec_result["usage"]
+            return verdict
 
         if test_cmd is not None:
             reporter.step(f"{_attempt_label(attempts_left, max_attempts, round_no, review_rounds)} · gate")
@@ -2099,7 +2139,7 @@ def develop(
                 # with no visible ref (#9).
                 _reap_spec()
                 reporter.fail(f"gate infra: {gate.infra_error[:80]}")
-                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration, usage=usage))
                 report.final_run_ref = run.run_ref
                 report.entries = entries
                 report.settlement_hint = f"gate infra error: {gate.infra_error}"
@@ -2109,11 +2149,11 @@ def develop(
                 _reap_spec()  # before discard(): the reviewer is still reading it
                 output.discard()
                 reporter.fail(f"gate failed (exit {gate.exit_code})")
-                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration))
+                report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "tests_failed", duration_s=duration, usage=usage))
                 guidance = _prior_attempt_guidance(entries) + _format_guidance("gate", gate=gate)
                 continue
 
-        report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed", duration_s=duration))
+        report.attempts.append(Attempt(number, run.run_ref, changed, [], gate, "passed", duration_s=duration, usage=usage))
         report.succeeded = True
         report.final_run_ref = run.run_ref
         report.entries = entries
@@ -2160,6 +2200,8 @@ def develop(
                     salvage_dir=getattr(event_log, "dir", None),
                     gate=_gate_note(test_cmd, gate),
                 )
+                if verdict is not None and verdict.usage is None:
+                    verdict.usage = _take_usage(stream_hook)
         # Before it is recorded or fed to the ledger: a "this cannot build"
         # rejection against a gate that just built it is a contradiction the
         # human should not have to spot unaided.

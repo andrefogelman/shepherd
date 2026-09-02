@@ -61,6 +61,7 @@ def runs_status(root: Path | None = None, limit: int = 10) -> list[dict]:
             "elapsed_s": round((last_ts if summary else now) - first_ts, 1),
             "phase": phase,
             "attempt": attempt,
+            **run_telemetry(events),
         }
         if summary is not None:
             payload = summary.get("payload") or {}
@@ -80,6 +81,42 @@ def runs_status(root: Path | None = None, limit: int = 10) -> list[dict]:
             row["elapsed_s"] = round(last_ts - first_ts, 1)
         rows.append(row)
     return rows
+
+
+def run_telemetry(events: list[dict]) -> dict:
+    """Tokens, cost, launches and models summed over a run's `worker.result`
+    events (worker attempts and reviewer alike). Empty when none were
+    recorded — a run whose stream was not tailed, or one killed mid-launch."""
+    tokens_in = tokens_out = cached = 0
+    cost = 0.0
+    launches = 0
+    models: set[str] = set()
+    for event in events:
+        if event.get("kind") != "worker.result":
+            continue
+        p = event.get("payload") or {}
+        launches += 1
+        tokens_in += int(p.get("input_tokens") or 0)
+        tokens_out += int(p.get("output_tokens") or 0)
+        cached += int(p.get("cache_read_input_tokens") or 0)
+        try:
+            cost += float(p.get("total_cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        if p.get("model"):
+            models.add(str(p["model"]))
+        for name in p.get("models") or []:
+            models.add(str(name))
+    if not launches:
+        return {}
+    return {
+        "launches": launches,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tokens_cached": cached,
+        "cost_usd": round(cost, 4),
+        "models": sorted(models),
+    }
 
 
 def render_status(rows: list[dict]) -> list[str]:
@@ -103,5 +140,12 @@ def render_status(rows: list[dict]) -> list[str]:
             head += f" · {str(feature)[:60]!r}"
         if row.get("final_run_ref"):
             head += f" · ref {row['final_run_ref']}"
+        if row.get("launches"):
+            head += (
+                f" · {row['tokens_in']:,} in / {row['tokens_out']:,} out"
+                f" · ${row['cost_usd']:.2f} · {row['launches']} launch(es)"
+            )
+            if row.get("models"):
+                head += f" · {', '.join(row['models'])}"
         lines.append(head)
     return lines

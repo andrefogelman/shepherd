@@ -269,6 +269,7 @@ class StreamTailer(threading.Thread):
         poll_interval: float = 0.1,
         max_line_bytes: int = 2_000_000,
         attempt: int | None = None,
+        slot: dict | None = None,
     ):
         super().__init__(daemon=True, name="shepherd-stream-tailer")
         self._path = Path(path)
@@ -277,6 +278,12 @@ class StreamTailer(threading.Thread):
         self._poll = poll_interval
         self._max = max_line_bytes
         self._attempt = attempt
+        #: Where the launch's telemetry lands for the thread that started
+        #: this tailer (see WorkerStreamHook.take_result): the init event's
+        #: model, and the result event's usage/cost/turns. A dict, not an
+        #: attribute, because the tailer writes it from ITS thread and the
+        #: supervisor reads it from the worker's.
+        self._slot = slot if slot is not None else {}
         # NB: named _stopping, not _stop — Thread has an internal _stop()
         # method that join() calls on Python ≤3.12; shadowing it breaks join.
         self._stopping = threading.Event()
@@ -338,10 +345,32 @@ class StreamTailer(threading.Thread):
         if not isinstance(event, dict):
             return
         try:
+            self._handle_envelope(event)
             for block in _content_blocks(event):
                 self._handle_block(block)
         except Exception:
             pass  # observability never breaks the run
+
+    def _handle_envelope(self, event: dict) -> None:
+        """The two stream events that are about the SESSION rather than a
+        turn: `system/init` (which model, which tools, which MCP servers —
+        the hardening, as the CLI itself reports it) and `result` (tokens,
+        cost, turns, wall and API time). Before this, both flowed through
+        the tee and were dropped, so no run had a record of what it cost or
+        what model produced it."""
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            info = session_init_info(event)
+            self._slot["init"] = info
+            self._log.emit("worker.init", info, attempt=self._attempt)
+        elif kind == "result":
+            info = session_result_info(event)
+            if "model" not in info and isinstance(self._slot.get("init"), dict):
+                model = self._slot["init"].get("model")
+                if model:
+                    info["model"] = model
+            self._slot["result"] = info
+            self._log.emit("worker.result", info, attempt=self._attempt)
 
     def _handle_block(self, block: dict) -> None:
         kind = block.get("type")
@@ -409,6 +438,104 @@ class StreamTailer(threading.Thread):
         self._log.emit("worker.write", payload, attempt=self._attempt)
 
 
+_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def session_init_info(event: dict) -> dict:
+    """What a `system/init` stream event says about the session. Names only."""
+    servers = event.get("mcp_servers")
+    names: list[str] = []
+    if isinstance(servers, list):
+        for item in servers:
+            if isinstance(item, dict) and item.get("name"):
+                names.append(str(item["name"]))
+            elif isinstance(item, str):
+                names.append(item)
+    tools = event.get("tools")
+    info: dict = {
+        "model": str(event.get("model") or "") or None,
+        "tools": len(tools) if isinstance(tools, list) else None,
+        "mcp_servers": names,
+    }
+    version = event.get("claude_code_version")
+    if version:
+        info["cli_version"] = str(version)
+    return info
+
+
+def session_result_info(event: dict) -> dict:
+    """What a `result` stream event says the session cost. Numbers only —
+    the result text itself is not recorded here."""
+    usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    info: dict = {}
+    for key in _USAGE_KEYS:
+        value = _int(usage.get(key))
+        if value is not None:
+            info[key] = value
+    cost = _float(event.get("total_cost_usd"))
+    if cost is not None:
+        info["total_cost_usd"] = cost
+    for key in ("num_turns", "duration_ms", "duration_api_ms"):
+        value = _int(event.get(key))
+        if value is not None:
+            info[key] = value
+    by_model = event.get("modelUsage")
+    if isinstance(by_model, dict) and by_model:
+        # The served model is the key; a session that fell back to another
+        # model lists both, largest spend first is not guaranteed — keep them.
+        info["models"] = sorted(str(k) for k in by_model)
+        if len(by_model) == 1:
+            info["model"] = next(iter(info["models"]))
+    if event.get("is_error") is True:
+        info["is_error"] = True
+    subtype = event.get("subtype")
+    if isinstance(subtype, str) and subtype:
+        info["subtype"] = subtype
+    return info
+
+
+def format_usage(usage: dict | None) -> str:
+    """One human line for a launch's telemetry, empty when there is none."""
+    if not usage:
+        return ""
+    parts: list[str] = []
+    tokens_in = usage.get("input_tokens")
+    tokens_out = usage.get("output_tokens")
+    if tokens_in is not None or tokens_out is not None:
+        cached = usage.get("cache_read_input_tokens") or 0
+        head = f"{tokens_in or 0:,} in / {tokens_out or 0:,} out"
+        if cached:
+            head += f" (+{cached:,} cached)"
+        parts.append(head)
+    if usage.get("num_turns") is not None:
+        parts.append(f"{usage['num_turns']} turns")
+    model = usage.get("model") or ", ".join(usage.get("models") or [])
+    if model:
+        parts.append(str(model))
+    if usage.get("total_cost_usd") is not None:
+        parts.append(f"${usage['total_cost_usd']:.2f}")
+    return " · ".join(parts)
+
+
 class WorkerStreamHook:
     """Per-launch tailer factory handed to the supervisor's launch seam.
 
@@ -471,14 +598,39 @@ class WorkerStreamHook:
         log, attempt = self._current()
         if log is None:
             return None
+        # A fresh slot per launch, filed under THIS thread: the tailer fills
+        # it from its own thread, and take_result() reads it from this one
+        # once the launch returns.
+        slot: dict = {}
+        self._local.slot = slot
         tailer = StreamTailer(
             self.tee_path(working_path),
             log,
             read_baseline=self.read_baseline,
             attempt=attempt,
+            slot=slot,
         )
         tailer.start()
         return tailer
+
+    def take_result(self) -> dict | None:
+        """The telemetry of the launch this thread most recently started —
+        the `result` event's usage/cost/turns, with the init event's model
+        folded in — and clear it, so a later launch on this thread cannot
+        report the previous one's numbers. None when no result was seen (a
+        killed launch, a thread that never launched, verbose off)."""
+        slot = getattr(self._local, "slot", None)
+        if not isinstance(slot, dict):
+            return None
+        result = slot.get("result")
+        init = slot.get("init")
+        self._local.slot = {}
+        if not isinstance(result, dict):
+            return None
+        out = dict(result)
+        if "model" not in out and isinstance(init, dict) and init.get("model"):
+            out["model"] = init["model"]
+        return out
 
     def drain(self, tailer: StreamTailer | None, timeout: float = 2.0) -> None:
         if tailer is None:

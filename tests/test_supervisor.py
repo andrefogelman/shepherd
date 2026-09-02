@@ -522,6 +522,10 @@ class RendererDriftTests(unittest.TestCase):
         "changed_paths": "both render len(), deliberately — the paths are in the diff section",
         "gate": "composite; its exit_code and tail are covered by GATE_TAIL_SENTINEL below",
         "duration_s": "telemetry for the history file, not part of either human-facing report",
+        "usage": (
+            "a dict, rendered as derived numbers (events.format_usage) by BOTH "
+            "renderers — pinned by tests/test_telemetry.py, not by a string sentinel"
+        ),
     }
     #: ReviewVerdict fields whose value must survive into both renderings.
     VERDICT_SENTINELS = {
@@ -538,6 +542,10 @@ class RendererDriftTests(unittest.TestCase):
             "KNOWN GAP, not drift: neither renderer surfaces it, so an unread "
             "(heuristic) verdict prints as a bare APPROVED. Only reachable via "
             "the hosted providers, which do not reach these renderers today."
+        ),
+        "usage": (
+            "a dict, rendered as derived numbers (events.format_usage) by BOTH "
+            "renderers — pinned by tests/test_telemetry.py, not by a string sentinel"
         ),
     }
     GATE_TAIL_SENTINEL = "SENTINELGATE assert 1 == 2"

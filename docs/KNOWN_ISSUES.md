@@ -10,6 +10,34 @@ None.
 
 ## Fixed
 
+### No run recorded what it cost or which model produced it
+
+**Was:** the worker's stream-json ends with a `result` event carrying token
+usage, dollar cost, turn count and API time, and opens with a `system/init`
+event naming the model, the tools and the MCP servers of the session. The
+stream tailer translated tool calls into events and dropped both of those.
+The substrate parses them too, but its durable trace is discarded at the next
+run's re-adoption. So across 274 recorded runs there was not one token count,
+no cost, and no evidence of which model had served a single attempt —
+duration was the only proxy, and `--model`/`--effort` were never passed, so
+the model was whatever the CLI defaulted to that day.
+
+**Fix:** the tailer records `worker.init` (model, tool count, MCP server
+names, CLI version) and `worker.result` (tokens in/out, cache reads and
+writes, cost, turns, wall and API time, the models that served the session),
+and files the result under the thread that launched it, so `develop` can
+read it back — `Attempt.usage` per attempt, `ReviewVerdict.usage` for the
+reviewer (the speculative one included). It reaches the console summary,
+`--review-report`, the history file, the proposal manifests and `status`,
+which sums tokens, cost and launches per run and names the models. A panel
+reviewer's launches run on threads `develop` does not own and are recorded
+in the event log only.
+
+Pinned by `tests/test_telemetry.py`: extraction from both events, the
+tailer's slot, the hook handing the result back once to the launching thread,
+`develop` recording per-attempt and review usage, both renderers and the
+history showing it, and `status` summing a run.
+
 ### Any finding rejected the proposal, so most rejections meant nothing
 
 **Was:** the verdict schema had `approved` and a flat list of `issues`, and the

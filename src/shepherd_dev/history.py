@@ -88,6 +88,7 @@ def run_payload(report, repo_root: Path, *, mode: str, test_cmd: str | None, pro
                 "policy_violations": a.policy_violations,
                 "error": a.error,
                 "duration_s": a.duration_s,
+                "usage": (dict(a.usage) if getattr(a, "usage", None) else None),
                 "gate_exit": a.gate.exit_code if a.gate else None,
                 "gate_tail": (a.gate.output_tail[-GATE_TAIL_LIMIT:] if a.gate else None),
                 "gate_infra_error": (a.gate.infra_error if a.gate else None),
@@ -108,6 +109,7 @@ def review_payload(review) -> dict | None:
         "issues": list(review.issues or []),
         "advisories": list(getattr(review, "advisories", None) or []),
         "error": review.error,
+        "usage": (dict(review.usage) if getattr(review, "usage", None) else None),
     }
 
 

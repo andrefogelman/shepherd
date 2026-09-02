@@ -172,6 +172,16 @@ def format_event(event: dict, live: bool = True) -> str | None:
             f"⚑ launch hardened: {len(denied)} tool(s) denied, no MCP, repo settings ignored"
             + (f", env unset: {', '.join(scrubbed)}" if scrubbed else "")
         )
+    if kind == "worker.init":
+        servers = p.get("mcp_servers") or []
+        return (
+            f"⚙ session: model {p.get('model') or '?'} · {p.get('tools') if p.get('tools') is not None else '?'} tools"
+            f" · MCP servers: {', '.join(servers) if servers else 'none'}"
+        )
+    if kind == "worker.result":
+        from .events import format_usage
+
+        return f"Σ {format_usage(p) or 'no usage reported'}"
     if kind == "worker.prompt":
         sections = ", ".join(p.get("sections") or []) or "none"
         shape = "rendered" if p.get("rendered") else "substrate envelope"
@@ -265,13 +275,19 @@ def render_trace(events: list[dict], full: bool = False) -> list[str]:
 _TOOL_KINDS = {"tool.call", "tool.call.started"}
 
 
-def worker_activity_summary(run, entries: dict[str, bytes]) -> str:
+def worker_activity_summary(run, entries: dict[str, bytes], usage: dict | None = None) -> str:
     """Post-hoc one-liner of the worker's activity: a tool tally from the run
-    trace (best-effort — the trace may be absent) plus the files it touched."""
+    trace (best-effort — the trace may be absent) plus the files it touched,
+    and what the launch cost when its stream was tailed."""
+    from .events import format_usage
+
     names = sorted(entries)
     shown = ", ".join(names[:6]) + ("…" if len(names) > 6 else "")
     files = f"{len(entries)} file(s): {shown}" if names else "no files"
     tools = ""
+    spent = format_usage(usage)
+    if spent:
+        tools = f" · {spent}"
     try:
         trace = getattr(run, "trace", None)
         if trace is not None:
@@ -283,7 +299,7 @@ def worker_activity_summary(run, entries: dict[str, bytes]) -> str:
                     tally[name] = tally.get(name, 0) + 1
             if tally:
                 top = sorted(tally.items(), key=lambda kv: -kv[1])[:6]
-                tools = " · tools: " + ", ".join(f"{v}×{k}" for k, v in top)
+                tools += " · tools: " + ", ".join(f"{v}×{k}" for k, v in top)
     except Exception:
         pass
     return f"worker: {files}{tools}"
