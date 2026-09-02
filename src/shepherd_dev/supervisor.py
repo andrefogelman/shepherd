@@ -315,8 +315,12 @@ def materialize_into(
     return written
 
 
-def read_changeset_entries(changeset) -> Entries:
+def read_changeset_entries(changeset, ignore: tuple[str, ...] = ()) -> Entries:
     """Snapshot a retained changeset's content entries into memory.
+
+    `ignore` names tree paths that are never part of a proposal — the
+    symlinks `jail_seed_links` plants for a launch's toolchain (seed.py).
+    They are skipped by exact path and by prefix, before anything is read.
 
     v0.3.0 lane reality (verified on 3 workspaces): runs fork from the
     workspace's ORIGINAL adoption basis, not from later settlements, so
@@ -335,6 +339,8 @@ def read_changeset_entries(changeset) -> Entries:
     entries: Entries = Entries()
     executable: set[str] = set()
     for rel in changeset.changed_paths:
+        if ignore and any(rel == ign or rel.startswith(ign + "/") for ign in ignore):
+            continue
         entry = changeset.read_file(rel)  # (bytes, mode) | None
         if entry is not None:
             content, mode = entry
@@ -946,23 +952,50 @@ class _PreparingExecution:
     written leaves the reviewer in the pre-change tree it always had.
     """
 
-    def __init__(self, inner, *, overlay_from: Path | str | None = None, hook=None):
+    def __init__(self, inner, *, overlay_from: Path | str | None = None, hook=None, seed=None):
         self._inner = inner
         self._overlay_from = overlay_from
         self._hook = hook
+        #: a seed.LaunchSeed: per-launch writable toolchain copies (item 2 of
+        #: the study). Dealt out here, taken back in the finally below.
+        self._seed = seed
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
     def launch_confined(self, command, confinement):
+        working = Path(self._inner.working_path)
         if self._overlay_from:
             try:
-                landed = overlay_tree(Path(self._overlay_from), Path(self._inner.working_path))
+                landed = overlay_tree(Path(self._overlay_from), working)
                 if self._hook is not None:
                     self._hook.emit("worker.overlay", {"files": landed, "role": "reviewer"})
             except Exception:
                 pass
-        return self._inner.launch_confined(command, confinement)
+        plan = None
+        if self._seed is not None and not getattr(self._seed, "empty", True):
+            from .seed import seed_argv, widen_confinement
+
+            try:
+                plan = self._seed.prepare(working)
+                command = seed_argv(list(command), plan.env)
+                confinement = widen_confinement(confinement, plan.roots)
+                if self._hook is not None:
+                    self._hook.emit("worker.seed", plan.describe())
+            except Exception:
+                # A seed that could not be dealt is the launch it always was:
+                # the toolchain absent, the worker told nothing new.
+                if plan is not None:
+                    plan.cleanup(working)
+                plan = None
+        try:
+            return self._inner.launch_confined(command, confinement)
+        finally:
+            if plan is not None:
+                try:
+                    plan.cleanup(working)
+                except Exception:
+                    pass
 
 
 class _TailingExecution:
@@ -1020,7 +1053,7 @@ def _rendered_prompt(invocation, stream_hook=None) -> str:
     return rendered
 
 
-def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -> bool:
+def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, seed=None) -> bool:
     """Raise the Claude workspace provider's wall-clock budget AND make it a hard
     kill of the whole worker process group (#A). With ``stream_hook`` (a
     ``events.WorkerStreamHook``), the launch perl additionally tees the worker's
@@ -1031,7 +1064,9 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -
     (a ``launch.RoleModels``) picks the model, effort and fallback model per
     role; the task id the substrate hands the transport says which role a
     launch is. Unset: the CLI's own default, which is what every run used
-    before and which no run recorded.
+    before and which no run recorded. ``seed`` (a ``seed.LaunchSeed``) deals
+    each launch its own writable copy of the repo's `jail_seed` /
+    `jail_seed_links` caches — the toolchain the jail otherwise lacks.
 
     Alpha workaround for shepherd-ai 0.3.0: `budget`/`timeout` are reserved
     runtime fields and ClaudeHeadlessProvider hardcodes budget_seconds=240,
@@ -1091,8 +1126,11 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -
 
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
                 overlay_from = getattr(self, "_overlay_from", None)
-                if execution is not None and overlay_from:
-                    execution = _PreparingExecution(execution, overlay_from=overlay_from, hook=stream_hook)
+                launch_seed = getattr(self, "_seed", None)
+                if execution is not None and (overlay_from or (launch_seed is not None and not launch_seed.empty)):
+                    execution = _PreparingExecution(
+                        execution, overlay_from=overlay_from, hook=stream_hook, seed=launch_seed,
+                    )
                 if stream_hook is not None and execution is not None:
                     execution = _TailingExecution(execution, stream_hook)
                     try:
@@ -1134,6 +1172,7 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None) -
             except Exception:
                 overlay_from = None
             object.__setattr__(provider, "_overlay_from", overlay_from or None)
+            object.__setattr__(provider, "_seed", seed)
             return provider
 
         rp._WORKSPACE_RUNTIME_PROVIDER_TRANSPORTS = rp._WorkspaceRuntimeProviderTransports(
@@ -2006,6 +2045,15 @@ def develop(
 
     ledger = Ledger() if review_task is not None else None
     report.ledger = ledger
+    # The symlinks a launch's toolchain seed plants in the working copy come
+    # back in the changeset as changed paths; they are the run's furniture,
+    # never the worker's proposal.
+    try:
+        from .config import jail_seed_links
+
+        seed_links = tuple(jail_seed_links(repo_root))
+    except Exception:
+        seed_links = ()
     # Two budgets, deliberately not shared: attempts absorb failures (a broken
     # run, a policy violation, a red suite), rounds absorb objections. Letting
     # them draw on each other would mean a run that failed the gate twice can
@@ -2129,7 +2177,13 @@ def develop(
         usage = _take_usage(stream_hook)
         output = run.output()
         changeset = output.changeset()
-        entries = read_changeset_entries(changeset)
+        # Positional-compatible: every fake of read_changeset_entries in the
+        # tests takes the changeset alone, and a repo with no links has
+        # nothing to ignore.
+        entries = (
+            read_changeset_entries(changeset, ignore=seed_links) if seed_links
+            else read_changeset_entries(changeset)
+        )
         changed = list(entries)
         reporter.note(worker_activity_summary(run, entries, usage=usage))  # post-hoc #B
         _emit("attempt.diff", {"files": changed, "run_ref": run.run_ref}, attempt=number)

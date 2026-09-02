@@ -469,6 +469,29 @@ def jail_seed(repo_root: Path) -> dict[str, str]:
     return out
 
 
+def jail_seed_links(repo_root: Path) -> dict[str, str]:
+    """`jail_seed_links`: {path inside the tree: warm origin}. For the
+    caches a toolchain wants IN the tree rather than named by a variable —
+    `node_modules` is the case — each launch gets its own copy of the origin,
+    reached through a symlink at that path (see seed.py). The path must be
+    relative and stay inside the tree; anything else is ignored."""
+    raw = load_config(repo_root).get("jail_seed_links")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for rel, origin in raw.items():
+        if not isinstance(rel, str) or not isinstance(origin, str):
+            continue
+        raw_rel = rel.strip()
+        if not raw_rel or raw_rel.startswith(("/", "~", "\\")):
+            continue
+        clean = raw_rel.strip("/")
+        if not clean or ".." in Path(clean).parts:
+            continue
+        out[clean] = str(Path(origin).expanduser())
+    return out
+
+
 def _clone_dir_fast(src: Path, dest: Path) -> bool:
     """APFS clone of a directory tree: copy-on-write, so a 56M build cache
     costs half a second and no disk until it diverges. True when it worked.

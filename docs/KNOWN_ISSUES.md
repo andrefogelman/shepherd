@@ -10,6 +10,32 @@ None.
 
 ## Fixed
 
+### The worker had no toolchain, and went looking for one elsewhere
+
+**Was:** the jail's working copy is materialized from a git tree, so
+everything the repository gitignores is absent by construction — `deps/`,
+`_build/`, `node_modules/`, `target/`. `jail_env` and `jail_seed` gave the
+GATE a warm cache (it runs unjailed, from the parent); the worker could read
+that cache and write nowhere, since the jail denies every write outside its
+working copy. A worker on a compiled language therefore could not compile,
+burned turns discovering that (`which mix elixir`, `ls _build`), and a defect
+the compiler names in seconds cost a whole attempt plus a gate: 35
+`tests_failed` attempts at a median 888 s. Twenty-odd workers then found a
+way: they shipped the repository to a remote host over ssh and compiled it
+there — the escape the launch policy now closes, but the need was real.
+
+**Fix:** the jail accepts more than one writable root, and the launch seam
+already sees the confinement spec. `seed.LaunchSeed` deals each launch —
+every worker attempt, and the reviewer — its own copy of each `jail_seed`
+origin (copy-on-write where the filesystem has it), adds that copy to the
+launch's writable roots, and names it in the variable for that launch only,
+through the env prefix the substrate puts before the CLI. `jail_seed_links`
+does the same for caches that must sit IN the tree (`node_modules`): a copy,
+a symlink at the path, and the path kept out of the changeset. The copies
+are destroyed when the launch returns, so two lanes, a worker and a gate, or
+an attempt and its retry never share a directory. The gate keeps the
+command-level copy it had. Pinned by `tests/test_launch_seed.py`.
+
 ### The planner's targets were the first thing the pack dropped
 
 **Was:** `build_pack` filled the budget with keyword-scored files first and

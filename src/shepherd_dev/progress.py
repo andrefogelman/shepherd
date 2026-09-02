@@ -182,6 +182,10 @@ def format_event(event: dict, live: bool = True) -> str | None:
         from .events import format_usage
 
         return f"Σ {format_usage(p) or 'no usage reported'}"
+    if kind == "worker.seed":
+        env = ", ".join(p.get("env") or []) or "none"
+        links = ", ".join(p.get("links") or [])
+        return f"⚙ toolchain seeded for this launch: env {env}" + (f" · links {links}" if links else "")
     if kind == "worker.prompt":
         sections = ", ".join(p.get("sections") or []) or "none"
         shape = "rendered" if p.get("rendered") else "substrate envelope"
