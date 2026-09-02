@@ -309,7 +309,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `init --repo P` | Initializes the repo (once). |
 | `optimize [--apply]` | Improves the worker prompts from run history, validated by replay. |
 | `trace [run-id\|last] [--full] [--json]` | Replays the step-by-step timeline of a run recorded with `-v`. |
-| `status [--json] [--limit N]` | Ground-truth state of recent runs (running/succeeded/failed/stale, live phase and attempt) + pending staged proposals. `--json` for external UIs. |
+| `status [--json] [--limit N]` | Ground-truth state of recent runs (running/succeeded/failed/stale, live phase and attempt), tokens/cost/models per run, exploring calls before the first edit and the reviewer's tool calls + pending staged proposals. `--json` for external UIs. |
 | `update [--force]` | Updates to the published version (explicit, via uv — never self-updates silently). |
 
 ## Useful flags
@@ -324,16 +324,18 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--no-context-pack` | run · run2 | Turns off the context pack (worker explores the repo itself — more expensive). |
 | `--no-review` | run · run2 | Skips the reviewer. Incompatible with `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confines changes to a prefix (repeatable). |
-| `--max-attempts` | run · run2 | Attempts per worker (default 3). |
+| `--max-attempts` | run · run2 | Attempts per worker (default 3; `limits.max_attempts` in `.shepherd-dev.json` changes the repo's default). |
 | `--review-rounds N` | run | Extra passes spent on a proposal that passed the gate but the reviewer REJECTED (default 1 = hand it to the human, as before; capped at 5). |
-| `--worker-budget` | run · run2 | Seconds per attempt (default 900). |
+| `--worker-budget` | run · run2 | Seconds per attempt (default 900; `limits.worker_budget` in config changes the repo's default, as `limits.gate_timeout` does for `--gate-timeout`). |
 | `--max-repairs` | run2 | Repair rounds on the combined gate (default 2). |
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
 | `--no-plan` | run · run2 | Turns off the planning prefetch (no target/plan hints). |
 | `--quiet` | run | Silences ALL live feedback (progress and verbose). |
 | `--fresh-adopt` | run | Forces a full worktree re-adoption (skips the unchanged-worktree cache). |
-| `--speculative-review` | run | Runs the reviewer in parallel with the gate (hides review latency; spends review tokens even when the gate fails). |
+| `--speculative-review` / `--no-speculative-review` | run · run2 | Force the reviewer to overlap the gate, or never to. Without the flag, `speculative_review` in `.shepherd-dev.json` (`on`/`off`/`auto`, default `auto`) decides: `auto` overlaps when the gate passed ≥ 70% of this repo's recent judged attempts (at least 3). |
+| `--model` · `--reviewer-model` | run · run2 · runN | The worker's / the reviewer's model. Without the flag, `models.worker` / `models.reviewer` in `.shepherd-dev.json`; with neither, the `claude` CLI's own default (what every run used, unrecorded). |
+| `--effort low\|medium\|high\|max` | run · run2 · runN | Effort for worker AND reviewer. Without the flag, `models.*.effort` in config. |
 | `--json` | run | Machine-readable final report as the LAST stdout line (no interactive prompt) — for orchestrators composing shepherd as a step. |
 | `--no-verbose` | run · run2 | Turns off the step-by-step feed (phase progress only, no event log). |
 | `--no-watchdog` | run | Turns off the worker budget hard-kill backstop. |
@@ -377,9 +379,96 @@ in an open-ended wait. Disable the backstop with `--no-watchdog`.
 `--fresh-adopt` forces it), the pre-staged local gate (the base copy is built in
 the background while the worker runs — via the filesystem's clonefile/reflink —
 and each attempt only overlays the proposal's files), concurrent clone creation
-in best-of/run2, and the opt-in speculative review (`--speculative-review`) that
-runs the reviewer in parallel with the gate. Everything degrades cleanly: any
-failure falls back to the full path.
+in best-of/run2, and the speculative review that runs the reviewer in parallel
+with the gate — switched on by itself where this repo's history shows the gate
+passing (see `--speculative-review`). Everything degrades cleanly: any failure
+falls back to the full path.
+
+**Pack budget.** The context pack (25k chars) keeps 15k for file content: the
+tree, the instructions and the plan share the rest, and the tree shrinks
+(saying how many entries it dropped) before it takes room from a file. The
+targets the planning step named go in FIRST, ahead of keyword-scored files.
+
+## What the worker receives, what it can reach, and on which model
+
+Five things that hold for every `run`, `run2` and `runN` with `--provider
+claude`. None needs setup; each has a config key to adjust it.
+
+**The prompt is a document.** The worker and the reviewer receive the task's
+prompt (the text in `prompts.py`) followed by one section per input —
+`context` (the pack), `feature`, `guidance` (the previous attempt's feedback),
+`gate` (the command that will judge the proposal) and, for the reviewer,
+`diff`, `findings`, `lens`, `proposed_root` — long values fenced, accents and
+line breaks intact. Before this the substrate sent the whole source of
+`tasks.py` and the arguments as ASCII-escaped JSON on one line. Each launch
+records a `worker.prompt` event (size and sections, never the content).
+
+**The reviewer reads the tree it judges.** The proposal is written into the
+reviewer's working copy before its CLI starts: the directory it `cd`s into,
+greps and opens IS the repository with the change applied. Custody got
+stronger: the proposal's files come back in the reviewer's changeset and are
+compared **byte for byte** — a proposal file the reviewer edited invalidates
+the verdict.
+
+**The jail is closed from the outside.** The jail confines writes only; the
+launch policy closes the rest on the argv: tools a worker has no business
+using (`Agent`, `TaskCreate`/`TaskUpdate`, `ToolSearch`, `WebSearch`/`WebFetch`,
+plan mode, questions to the human) are denied, no MCP server is loaded, the
+repo's own settings (`.claude/settings.json`, hooks included) are ignored, the
+browser bridge is off, and credential-shaped variables (`SSH_AUTH_SOCK`,
+`AWS_*`, `GH_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`…) are unset for the
+worker. `ANTHROPIC_*`/`CLAUDE_*`, `jail_env` keys and `worker.env_keep` are
+never unset. A `worker.launch` event records what was denied and which names
+were unset.
+
+```json
+{ "worker": {
+  "harden": true,
+  "disallowed_tools": ["Agent", "TaskCreate"],
+  "env_scrub": ["MY_SECRET"],
+  "env_keep": ["MY_TOOL_TOKEN"]
+} }
+```
+
+Documented limit: the network itself stays open (the API needs it, and the
+jail's profile does not filter by host). A credential the worker finds in a
+file is still within its reach.
+
+**Model, effort and fallback per role.** No run passed `--model`; worker and
+reviewer ran on the day's default, unrecorded. Now:
+
+```json
+{ "models": {
+  "worker":   { "model": "claude-opus-4-8", "effort": "high" },
+  "reviewer": { "model": "claude-sonnet-5", "effort": "max", "fallback": "claude-opus-4-8" },
+  "planner":  "claude-haiku-4-5-20251001"
+} }
+```
+
+Flag (`--model`, `--reviewer-model`, `--effort`) beats the repo config, which
+beats the global one (`~/.shepherd-dev/config.json`), which beats the CLI's
+default. An unknown `effort` is dropped with a warning instead of failing the
+launch.
+
+**Auth preflight.** Before the pack and the adoption, shepherd resolves the
+worker's credential: none at all fails in zero seconds. A subscription token
+that is expired or expires within 45 minutes (an attempt plus its review) is
+refreshed by one `claude -p ok` OUTSIDE the jail, where the CLI can write the
+new token where the substrate reads it. The probe's answer also names a spent
+allowance (with its reset time) and a dead login, and the run stops there,
+before a worker is paid for. `preflight.auth_probe: true` in config runs the
+probe on every run; `SHEPHERD_DEV_NO_AUTH_PREFLIGHT=1` skips the check.
+
+**Token telemetry.** Each launch records `worker.init` (model, tools, MCP
+servers) and `worker.result` (input/output/cache tokens, cost, turns, API
+time). The run summary, `--review-report`, the history and `status` show
+tokens, cost and model per attempt and for the reviewer.
+
+**An honest budget.** A worker reaped at its budget reads `timed_out` (naming
+the budget it exceeded) and the next attempt receives the timeout guidance;
+it used to be a generic `run_failed`. `limits.worker_budget`,
+`limits.gate_timeout` and `limits.max_attempts` in config change the repo's
+defaults; flags still win.
 
 ## Verbose mode & trace (step by step)
 
@@ -477,7 +566,20 @@ the prose summary and in the `--json` envelope:
 | `failed` | The gate never passed. |
 | `blocked` | The cycle stopped for something iterating cannot fix (an identical proposal again, a rejection with no actionable finding). `blocked_reason` says which. |
 
-**Findings ledger.** Every issue the reviewer raises gets a stable id and stays
+**A finding has a severity.** The reviewer returns `issues` as objects
+`{"severity": "blocking" | "advisory", "text": …}`: `blocking` is what it would
+hold the change back for (wrong behavior, a security hole, a build or test that
+breaks, scope nobody asked for); `advisory` is what it would mention and ship
+anyway (style, naming, a suggestion, a test it would add). `approved` follows
+from that: true with nothing blocking, false with anything. Only blocking
+findings enter the ledger, the rework rounds and `--auto-settle`; advisories
+show as `advisory:` in the summary, the report, the history and the repo
+memory. An explicit `false` that lists only advisories is recorded as approved,
+with the correction written into `summary`. Measured before this: the reviewer
+rejected 58% of proposals that passed the gate, and the human accepted 60% of
+those rejections.
+
+**Findings ledger.** Every blocking issue the reviewer raises gets a stable id and stays
 in the ledger until it leaves through a terminal state: `fixed`, `blocked` or
 `refused` (the last two demand a reason). The ledger prints at the end of every
 run **without anyone having to ask**, and ships in `--json` as `findings`.
@@ -701,6 +803,25 @@ business, not shepherd's.** An Elixir `_build` does — that is the measurement
 above. A Python `.venv` does NOT: its shebangs hold absolute paths, so the
 copy keeps invoking the interpreter at the origin and silently ignores itself.
 Seed build output, not environments.
+
+**The worker compiles too.** The jail accepts more than one writable root.
+Each launch — every worker attempt, and the reviewer — receives ITS OWN copy
+of each `jail_seed` origin, added to that launch's writable roots and named in
+the variable for that launch only (through the `env` prefix the substrate
+already puts before the CLI). The gate keeps the command-level copy. For a
+cache that must sit IN the tree — `node_modules` — there is `jail_seed_links`:
+its own copy, a symlink at the path, and the path never enters the proposal:
+
+```json
+{ "jail_seed":       { "MIX_BUILD_PATH": "~/.cache/myapp-build" },
+  "jail_seed_links": { "node_modules": "~/.cache/myapp-node_modules" } }
+```
+
+The copies are destroyed when the launch returns; two lanes, a worker and a
+gate, an attempt and its retry never write to one directory. A `worker.seed`
+event records what each launch was given. Before this, 35 attempts died at the
+gate on an error the compiler names in seconds, and twenty-odd workers shipped
+the repository over ssh to another machine to compile it there.
 
 ## `pre_gate_cmd` (fix it before the gate judges it)
 
@@ -953,6 +1074,13 @@ Opt-out: `--no-context-pack`.
   replay across sessions, ~95%) requires the framework's low-level lane +
   the per-token API — outside the subscription model; the context pack is
   this layer's answer.
+
+### What each launch cost
+
+Since 0.1.39 the run itself says: every attempt and the review carry `usage`
+(input/output/cache tokens, turns, model, dollar cost as the CLI reports it)
+in the summary, the `--review-report` and the history; `status` sums per run.
+Duration is no longer the only proxy.
 
 ### How to control it
 

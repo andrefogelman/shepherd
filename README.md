@@ -40,7 +40,8 @@ shepherd-dev run2 "feature A" "feature B"
 shepherd-dev settle-par <proposal-id> [--reject]
 ```
 
-Useful flags: `--mode tests` (only write tests), `--no-review`, `--provider static` (offline
+Useful flags: `--model` / `--reviewer-model` / `--effort` (model and effort per role; also
+`models` in `.shepherd-dev.json`), `--mode tests` (only write tests), `--no-review`, `--provider static` (offline
 dry-run of the machinery), `--provider grok` (worker via Grok CLI — **no Claude**; L1 host
 clone + gate + stage; see `docs/2026-07-14-grok-provider-l1-l2.md`), `--provider codex`
 (worker via OpenAI Codex CLI — **no Claude**; double isolation via `codex exec --sandbox`
@@ -49,7 +50,12 @@ works; see `docs/2026-07-19-codex-provider.md`), `--allowed-prefix src/`
 (scope confinement), `--max-attempts`, `--worker-budget` (wall-clock seconds per attempt),
 `--max-repairs` (run2), `--no-plan`, `--quiet`, `--no-watchdog`.
 
-Every run also ships four zero-setup mechanisms (each degrades cleanly and can be turned off):
+Every run renders the worker's prompt as a document (task prompt + one section per
+input), closes the jail from the outside (denied tools, no MCP servers, no repo
+settings, credential variables unset), gives the reviewer the proposal applied in its
+own working copy, records tokens/cost/model per launch, and can hand each launch a
+writable copy of the repo's toolchain caches (`jail_seed`, `jail_seed_links`) — see
+`docs/MANUAL.en.md`. It also ships four zero-setup mechanisms (each degrades cleanly and can be turned off):
 a **planning prefetch** (a cheap model names the target files + plan up front, feeding the
 context pack), **live progress** (per-phase spinner + a post-hoc summary of the worker's
 files/tools), a **remote-gate warmup** (pre-stages the remote copy + service while the worker

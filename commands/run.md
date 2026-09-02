@@ -1,6 +1,6 @@
 ---
 description: Develop a feature with a supervised sandboxed worker (test gate + review, human settlement)
-argument-hint: "<feature>" [--repo P] [--test-cmd "…"] [--best-of K] [--mode tests] [--auto-settle] [--no-review] [--allowed-prefix P] [--max-attempts N] [--worker-budget S]
+argument-hint: "<feature>" [--repo P] [--test-cmd "…"] [--best-of K] [--mode tests] [--auto-settle] [--no-review] [--allowed-prefix P] [--max-attempts N] [--worker-budget S] [--model M] [--reviewer-model M] [--effort L]
 ---
 
 Use the shepherd-dev skill (invoke it first if not loaded) to run ONE supervised
@@ -24,6 +24,7 @@ Flags for `run`:
 - `--no-review` — skip the reviewer (faster/cheaper).
 - `--allowed-prefix <p>` — confine changes to a path prefix (repeatable).
 - `--max-attempts N` — attempts before giving up (default 3).
-- `--worker-budget S` — wall-clock seconds per attempt (default 900); raise for large features.
+- `--worker-budget S` — wall-clock seconds per attempt (default 900, or `limits.worker_budget` in `.shepherd-dev.json`); raise for large features.
+- `--model M` / `--reviewer-model M` / `--effort low|medium|high|max` — model and effort per role (default: `models` in `.shepherd-dev.json`, else the claude CLI's default).
 - `--provider static` — offline dry-run of the machinery, no LLM, no cost.
 - `--optimize-after` — run `optimize` after this run (dry-run; `--optimize-apply` persists a passing edit).

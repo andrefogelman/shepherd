@@ -32,8 +32,9 @@ shepherd-dev run "<feature in natural language>"
 shepherd-dev run "<feature>" --repo <path> --test-cmd "<suite cmd>"
 ```
 
-Options: `--mode tests` (only write/update tests), `--no-review`, `--max-attempts N`
-(default 3), `--worker-budget SECONDS` (default 900), `--allowed-prefix src/`
+Options: `--model M` / `--reviewer-model M` / `--effort low|medium|high|max` (model and
+effort per role; else `models` in `.shepherd-dev.json`), `--mode tests` (only write/update
+tests), `--no-review`, `--max-attempts N` (default 3), `--worker-budget SECONDS` (default 900), `--allowed-prefix src/`
 (repeatable scope confinement), `--provider static` (offline dry-run of the machinery),
 `--provider grok` / `--provider codex` (worker via the Grok or OpenAI Codex CLI — no
 Claude subprocess; codex adds a real LLM review of the proposal).

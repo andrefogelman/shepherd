@@ -307,7 +307,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `init --repo P` | Inicializa o repo (uma vez). |
 | `optimize [--apply]` | Melhora os prompts a partir do histórico, validando por replay. |
 | `trace [run-id\|last] [--full] [--json]` | Reproduz a timeline passo a passo de um run gravado com `-v`. |
-| `status [--json] [--limit N]` | Estado real dos runs recentes (rodando/sucesso/falha/stale, fase e tentativa ao vivo) + propostas staged pendentes. `--json` para UIs externas. |
+| `status [--json] [--limit N]` | Estado real dos runs recentes (rodando/sucesso/falha/stale, fase e tentativa ao vivo), tokens/custo/modelos por run, chamadas de exploração antes do primeiro edit e chamadas do revisor + propostas staged pendentes. `--json` para UIs externas. |
 | `update [--force]` | Atualiza para a versão publicada (explícito, via uv — nunca atualiza sozinho). |
 
 ## Flags úteis
@@ -322,16 +322,18 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--no-context-pack` | run · run2 | Desliga o context pack (worker explora o repo sozinho — mais caro). |
 | `--no-review` | run · run2 | Pula o revisor. Incompatível com `--auto-settle`. |
 | `--allowed-prefix` | run · run2 | Confina mudanças a um prefixo (repetível). |
-| `--max-attempts` | run · run2 | Tentativas por worker (padrão 3). |
+| `--max-attempts` | run · run2 | Tentativas por worker (padrão 3; `limits.max_attempts` no `.shepherd-dev.json` muda o padrão do repo). |
 | `--review-rounds N` | run | Rodadas extras gastas numa proposta que passou no portão mas o revisor REJEITOU (padrão 1 = entrega ao humano, como antes; teto 5). |
-| `--worker-budget` | run · run2 | Segundos por tentativa (padrão 900). |
+| `--worker-budget` | run · run2 | Segundos por tentativa (padrão 900; `limits.worker_budget` na config muda o padrão do repo, assim como `limits.gate_timeout` para `--gate-timeout`). |
 | `--max-repairs` | run2 | Rodadas de reparo no portão combinado (padrão 2). |
 | `--provider static` | run · run2 | Ensaio offline sem LLM (custo zero). |
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
 | `--no-plan` | run · run2 | Desliga o planejamento prévio (sem dicas de alvos/plano). |
 | `--quiet` | run | Silencia todo o feedback vivo (progresso e verbose). |
 | `--fresh-adopt` | run | Força re-adoção completa da worktree (ignora o cache de worktree-inalterada). |
-| `--speculative-review` | run | Roda o revisor em paralelo com o portão (esconde a latência do review; gasta tokens de review mesmo se o portão falhar). |
+| `--speculative-review` / `--no-speculative-review` | run · run2 | Força ligar/desligar o revisor em paralelo com o portão. Sem a flag, `speculative_review` no `.shepherd-dev.json` (`on`/`off`/`auto`, padrão `auto`) decide: `auto` liga quando o portão passou em ≥ 70% das últimas tentativas julgadas neste repo (mínimo 3). |
+| `--model` · `--reviewer-model` | run · run2 · runN | Modelo do worker / do revisor. Sem a flag, `models.worker` / `models.reviewer` no `.shepherd-dev.json`; sem nada, o default do `claude` CLI (que é o que todo run usava, sem registrar). |
+| `--effort low\|medium\|high\|max` | run · run2 · runN | Esforço do worker E do revisor. Sem a flag, `models.*.effort` na config. |
 | `--json` | run | Relatório final em JSON como ÚLTIMA linha do stdout (sem prompt interativo) — para orquestradores compondo o shepherd como um passo. |
 | `--no-verbose` | run · run2 | Desliga o feed passo a passo (fica só o progresso por fase, sem log de eventos). |
 | `--no-watchdog` | run | Desliga o backstop de hard-kill do budget do worker. |
@@ -375,8 +377,93 @@ adoção (worktree inalterada desde o último run → pula a re-adoção; `--fre
 força), portão local pré-staged (a base é copiada em background enquanto o worker
 roda — via clonefile/reflink do filesystem — e cada tentativa só sobrepõe os
 arquivos da proposta), clones paralelos no best-of/run2, e o review especulativo
-opt-in (`--speculative-review`) que roda o revisor em paralelo com o portão.
+que roda o revisor em paralelo com o portão — ligado sozinho quando o histórico
+deste repo mostra o portão passando (ver `--speculative-review`).
 Tudo degrada limpo: qualquer falha volta ao caminho completo.
+
+**Orçamento do pack.** O context pack (25k chars) reserva 15k para conteúdo de
+arquivo: árvore, instruções e plano dividem o resto, e a árvore encolhe (dizendo
+quantas entradas cortou) antes de tirar espaço de um arquivo. Os alvos que o
+planejamento nomeou entram PRIMEIRO, antes dos arquivos por palavra-chave.
+
+## O que o worker recebe, o que alcança, e com que modelo
+
+Cinco coisas que valem para todo `run`, `run2` e `runN` com `--provider claude`.
+Nenhuma precisa de setup; cada uma tem sua chave na config para ajustar.
+
+**O prompt é um documento.** O worker e o revisor recebem o prompt da task
+(o texto de `prompts.py`) seguido de uma seção por entrada — `context` (o
+pack), `feature`, `guidance` (feedback da tentativa anterior), `gate` (o comando
+que vai julgar a proposta) e, para o revisor, `diff`, `findings`, `lens`,
+`proposed_root` — valores longos em bloco cercado, acentos e quebras de linha
+intactos. Antes disso o substrato mandava o fonte inteiro de `tasks.py` e os
+argumentos como JSON escapado numa linha só. Cada launch grava um evento
+`worker.prompt` (tamanho e seções, nunca o conteúdo) no log do run.
+
+**O revisor lê a árvore que julga.** A proposta é escrita no working copy do
+revisor antes de o CLI começar: o diretório onde ele faz `cd`, `grep` e abre
+arquivos É o repositório com a mudança aplicada. A custódia ficou mais forte:
+os arquivos da proposta voltam no changeset do revisor e são comparados **byte
+a byte** — um arquivo da proposta que o revisor editou invalida o veredito.
+
+**O jail é fechado por fora.** O jail confina só a escrita; o resto a política
+de lançamento fecha no argv: ferramentas que um worker não tem por que usar
+(`Agent`, `TaskCreate`/`TaskUpdate`, `ToolSearch`, `WebSearch`/`WebFetch`, modo
+plano, perguntas ao humano) são negadas, nenhum servidor MCP é carregado, as
+settings do repo (`.claude/settings.json`, hooks incluídos) são ignoradas, o
+browser é desligado, e variáveis com cara de credencial (`SSH_AUTH_SOCK`,
+`AWS_*`, `GH_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`…) são removidas do
+ambiente do worker. `ANTHROPIC_*`/`CLAUDE_*`, as chaves de `jail_env` e
+`worker.env_keep` nunca são removidas. Evento `worker.launch` registra o que foi
+negado e quais nomes foram removidos.
+
+```json
+{ "worker": {
+  "harden": true,
+  "disallowed_tools": ["Agent", "TaskCreate"],
+  "env_scrub": ["MEU_SEGREDO"],
+  "env_keep": ["MEU_TOOL_TOKEN"]
+} }
+```
+
+Limite documentado: a rede em si continua aberta (a API precisa dela, e o
+perfil do jail não filtra por host). Uma credencial que o worker encontre em
+arquivo continua ao alcance dele.
+
+**Modelo, esforço e fallback por papel.** Nenhum run passava `--model`; o
+worker e o revisor rodavam no default do dia, sem registro. Agora:
+
+```json
+{ "models": {
+  "worker":   { "model": "claude-opus-4-8", "effort": "high" },
+  "reviewer": { "model": "claude-sonnet-5", "effort": "max", "fallback": "claude-opus-4-8" },
+  "planner":  "claude-haiku-4-5-20251001"
+} }
+```
+
+Flag (`--model`, `--reviewer-model`, `--effort`) vence config do repo, que vence
+a global (`~/.shepherd-dev/config.json`), que vence o default do CLI. Um
+`effort` desconhecido é descartado com aviso em vez de derrubar o launch.
+
+**Pré-voo de autenticação.** Antes do pack e da adoção, o shepherd resolve a
+credencial do worker: sem nenhuma, falha em zero segundos. Um token de
+assinatura vencido ou vencendo em 45 min (uma tentativa mais sua revisão) é
+renovado por um `claude -p ok` FORA do jail, onde o CLI consegue gravar o token
+novo no lugar de onde o substrato lê. A resposta desse probe também acusa cota
+esgotada (com a hora do reset) e login morto, e o run para ali, antes de gastar
+um worker. `preflight.auth_probe: true` na config roda o probe em todo run;
+`SHEPHERD_DEV_NO_AUTH_PREFLIGHT=1` pula a checagem.
+
+**Telemetria de tokens.** Cada launch grava `worker.init` (modelo, ferramentas,
+servidores MCP) e `worker.result` (tokens de entrada/saída/cache, custo, turnos,
+tempo de API). O resumo do run, o `--review-report`, o histórico e o `status`
+mostram tokens, custo e modelo por tentativa e para o revisor.
+
+**Budget honesto.** Um worker morto no budget aparece como `timed_out` (com o
+budget que estourou) e a próxima tentativa recebe a orientação de timeout; antes
+era um `run_failed` genérico. `limits.worker_budget`, `limits.gate_timeout` e
+`limits.max_attempts` na config mudam os padrões do repo; as flags continuam
+vencendo.
 
 ## Modo verbose & trace (passo a passo)
 
@@ -474,7 +561,20 @@ declara um `outcome`, no resumo em texto e no envelope `--json`:
 | `failed` | O portão nunca passou. |
 | `blocked` | O ciclo parou por algo que iterar não conserta (proposta idêntica de novo, rejeição sem achado acionável). `blocked_reason` diz qual. |
 
-**Ledger de achados.** Cada issue que o revisor levanta ganha um id estável e
+**Achado tem severidade.** O revisor devolve `issues` como objetos
+`{"severity": "blocking" | "advisory", "text": …}`: `blocking` é o que ele
+seguraria a mudança por (comportamento errado, brecha de segurança, build ou
+teste que quebra, escopo que ninguém pediu); `advisory` é o que ele
+mencionaria e embarcaria mesmo assim (estilo, nome, sugestão, teste que
+acrescentaria). `approved` é decidido por isso: verdadeiro sem bloqueante,
+falso com qualquer um. Só os bloqueantes entram no ledger, nas rodadas de
+rework e no `--auto-settle`; os advisory aparecem como `advisory:` no resumo,
+no relatório, no histórico e na memória do repo. Um `false` explícito que lista
+só advisory é registrado como aprovado, com a correção escrita no `summary`.
+Medido antes disso: o revisor rejeitava 58% das propostas que passavam no
+portão e o humano aceitava 60% dessas rejeições.
+
+**Ledger de achados.** Cada issue bloqueante que o revisor levanta ganha um id estável e
 fica no ledger até sair por um estado terminal: `fixed`, `blocked` ou `refused`
 (os dois últimos exigem razão). O ledger é impresso no fim de todo run, **sem
 ninguém precisar perguntar**, e vai no `--json` como `findings`. A severidade é
@@ -696,6 +796,25 @@ shepherd.** Um `_build` de Elixir sobrevive — é a medição acima. Um `.venv`
 Python NÃO: os shebangs guardam caminho absoluto, então a cópia continua
 chamando o interpretador da origem e se ignora em silêncio. Semeie saída de
 build, não ambientes.
+
+**O worker também compila.** O jail aceita mais de uma raiz gravável. Cada
+launch — cada tentativa do worker, e o revisor — recebe a SUA cópia de cada
+origem de `jail_seed`, adicionada às raízes graváveis daquele launch e nomeada
+na variável só para ele (pelo prefixo `env` que o substrato já põe antes do
+CLI). O portão continua com a cópia do comando. Para cache que precisa estar
+NA árvore — `node_modules` — há `jail_seed_links`: cópia própria, symlink no
+caminho, e o caminho nunca entra na proposta:
+
+```json
+{ "jail_seed":       { "MIX_BUILD_PATH": "~/.cache/meuapp-build" },
+  "jail_seed_links": { "node_modules": "~/.cache/meuapp-node_modules" } }
+```
+
+As cópias são destruídas quando o launch volta; dois lanes, worker e portão,
+tentativa e retry nunca escrevem no mesmo diretório. Evento `worker.seed`
+registra o que cada launch recebeu. Antes disso, 35 tentativas morreram no
+portão por erro que o compilador aponta em segundos, e vinte e tantos workers
+levaram o repositório por ssh a outra máquina para compilar lá.
 
 ## `pre_gate_cmd` (consertar antes de o portão julgar)
 
@@ -941,6 +1060,13 @@ Opt-out: `--no-context-pack`.
   da Anthropic. O que o paper faz além disso (replay byte-idêntico entre
   sessões, ~95%) exige a lane baixa do framework + API por token — fora do
   modelo de assinatura; o context pack é a resposta desta camada.
+
+### O que cada launch custou
+
+Desde 0.1.39 o próprio run diz: cada tentativa e a revisão trazem `usage`
+(tokens de entrada/saída e cache, turnos, modelo, custo em dólar conforme o
+CLI reporta) no resumo, no `--review-report` e no histórico; `status` soma por
+run. A duração deixou de ser o único proxy.
 
 ### Como controlar
 
