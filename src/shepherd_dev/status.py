@@ -107,16 +107,64 @@ def run_telemetry(events: list[dict]) -> dict:
             models.add(str(p["model"]))
         for name in p.get("models") or []:
             models.add(str(name))
-    if not launches:
+    out: dict = {}
+    if launches:
+        out.update({
+            "launches": launches,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_cached": cached,
+            "cost_usd": round(cost, 4),
+            "models": sorted(models),
+        })
+    out.update(behaviour_metrics(events))
+    return out
+
+
+_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def behaviour_metrics(events: list[dict]) -> dict:
+    """How the agents spent their turns, from the tool events:
+
+    - `explore_calls`: tool calls in the FIRST worker attempt before its
+      first edit — the "where do I even start" cost the context pack exists
+      to remove (median 18 before the prompt was rendered as a document);
+    - `review_tools`: tool calls made by the reviewer across the run — the
+      cost of a reviewer navigating a tree instead of reading a diff.
+
+    Empty when the run recorded no worker tools (verbose off)."""
+    phase = None
+    first_worker_seen = False
+    counting_explore = False
+    explore = 0
+    review_tools = 0
+    any_tools = False
+    for event in events:
+        kind = event.get("kind")
+        payload = event.get("payload") or {}
+        if kind == "phase.start":
+            phase = payload.get("label")
+            if phase == "worker" and not first_worker_seen:
+                first_worker_seen = True
+                counting_explore = True
+            elif phase != "worker":
+                counting_explore = False
+            continue
+        if kind != "worker.tool":
+            continue
+        any_tools = True
+        tool = str(payload.get("tool") or "")
+        if phase == "review":
+            review_tools += 1
+        elif counting_explore:
+            if tool in _EDIT_TOOLS:
+                counting_explore = False
+            else:
+                explore += 1
+    if not any_tools:
         return {}
-    return {
-        "launches": launches,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "tokens_cached": cached,
-        "cost_usd": round(cost, 4),
-        "models": sorted(models),
-    }
+    return {"explore_calls": explore, "review_tools": review_tools}
 
 
 def render_status(rows: list[dict]) -> list[str]:
@@ -147,5 +195,7 @@ def render_status(rows: list[dict]) -> list[str]:
             )
             if row.get("models"):
                 head += f" · {', '.join(row['models'])}"
+        if "explore_calls" in row:
+            head += f" · explore {row['explore_calls']} · review tools {row['review_tools']}"
         lines.append(head)
     return lines
