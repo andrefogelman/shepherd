@@ -59,11 +59,14 @@ class ReplayInvocation(unittest.TestCase):
             if isinstance(argv, list) and "run" in argv and "--test-cmd" in argv:
                 seen["argv"] = list(argv)
                 seen["timeout"] = kw.get("timeout")
+                seen["run_stdin"] = kw.get("stdin")
 
                 class _P:
                     returncode = 0
 
                 return _P()
+            if isinstance(argv, list) and "init" in argv and "shepherd_dev.cli" in argv:
+                seen["init_stdin"] = kw.get("stdin")
             return real_run(argv, **kw)
 
         repo = Path(mkdtemp())
@@ -94,6 +97,12 @@ class ReplayInvocation(unittest.TestCase):
         argv = seen["argv"]
         self.assertEqual(argv[argv.index("--gate-timeout") + 1], str(REPLAY_GATE_TIMEOUT))
         self.assertEqual(seen["timeout"], _replay_timeout(120))
+        # Neither replay subprocess may inherit stdin: an open one that never
+        # closes parked `init` on its review-panel question for the whole
+        # INIT_TIMEOUT, and this very test failed by exactly 120 s whenever
+        # the runner held the pipe open (#19).
+        self.assertIs(seen["init_stdin"], subprocess.DEVNULL)
+        self.assertIs(seen["run_stdin"], subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

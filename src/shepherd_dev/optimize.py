@@ -214,11 +214,27 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
             # history off during replay so validation runs don't pollute the store
             env["SHEPHERD_DEV_HISTORY_DIR"] = str(Path(tmp) / "nohist")
             # a fresh worktree is not yet a Shepherd workspace
+            # stdin=DEVNULL on both calls: a replay is never interactive, and
+            # an inherited stdin that stays open (a terminal, a harness's pipe)
+            # made `init` block on its review-panel question for the whole
+            # INIT_TIMEOUT before being scored as a failed workspace (#19).
             init = subprocess.run(
                 [sys.executable, "-m", "shepherd_dev.cli", "init", "--repo", str(wt)],
                 capture_output=True, text=True, env=env, timeout=INIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
             if init.returncode != 0:
+                # Loud, like the timeout below: a workspace that could not be
+                # initialized is a harness failure, not a candidate verdict,
+                # and a silent False here scored the candidate on it — and
+                # left no trace of WHY the init failed for anyone to read.
+                detail = ((init.stderr or "") + (init.stdout or "")).strip()[-400:]
+                print(
+                    f"replay workspace init failed (exit {init.returncode}) "
+                    f"({case.feature[:60]!r}) — scored as a failure, but this is a "
+                    f"harness limit, not a candidate verdict: {detail}",
+                    file=sys.stderr,
+                )
                 return False
             proc = subprocess.run(
                 [
@@ -230,6 +246,7 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
                 ],
                 capture_output=True, text=True, env=env,
                 timeout=_replay_timeout(worker_budget),
+                stdin=subprocess.DEVNULL,
             )
             # `run` exits 0 iff the gate passed (report.succeeded); use the exit
             # code, not a stdout substring, so replay isn't fragile to formatting (#16).

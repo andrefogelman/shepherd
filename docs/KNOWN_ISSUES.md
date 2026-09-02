@@ -10,6 +10,29 @@ None.
 
 ## Fixed
 
+### `optimize` hung two minutes per replay case, then scored the case as a failure
+
+**Was:** `optimize._replay` turns a pinned worktree into a workspace with
+`shepherd-dev init` in a subprocess that inherited the parent's stdin.
+`cmd_init` asks the review-panel size with `input()` unless `--review-panel`
+is passed. On a closed stdin `input()` raises EOF and the default is kept —
+the case every test exercised. On an OPEN stdin that never closes — a
+terminal, or the pipe a harness holds — `input()` blocks until the init's
+120-second timeout, `_replay` returns False, and the candidate prompt is
+scored on a workspace that never existed. Six replay cases is twelve minutes
+of hanging per `optimize`, every one of them counted against the candidate.
+Reproduced: the replay test passes in 1.7 s with stdin from `/dev/null` and
+fails after exactly 120 s with stdin from a pipe held open. Nothing said
+why: an init that exited non-zero returned False in silence.
+
+**Fix:** both replay subprocesses run with `stdin=DEVNULL` — a replay is
+never interactive — and `_ask_review_panel` asks only when stdin is a
+terminal, taking the default otherwise, so no caller of `init` can block on
+it again. An init that fails now says so on stderr with the tail of its
+output, the same way a timed-out one already did. Pinned by
+`tests/test_optimize_replay.py` (stdin on both calls) and
+`tests/test_review_panel.py` (no prompt off a terminal).
+
 ### No run recorded what it cost or which model produced it
 
 **Was:** the worker's stream-json ends with a `result` event carrying token

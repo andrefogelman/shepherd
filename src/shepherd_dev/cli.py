@@ -576,7 +576,17 @@ def _ask_decision(prompt: str) -> str:
 def _ask_review_panel(default: int = 1) -> int:
     """Ask how many independent reviewers judge each proposal at init time.
     Empty answer, EOF (non-interactive stdin), or anything unparsable/out of
-    range keeps `default` — today's single-reviewer behavior."""
+    range keeps `default` — today's single-reviewer behavior.
+
+    Asked only on a terminal. EOF was handled, but a stdin that is open and
+    never closes — a harness's pipe, a parent that forgot to redirect —
+    is not EOF: `input()` blocks on it, and `optimize`'s replay sat on this
+    question for its whole init timeout, once per case (#19)."""
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return default
+    except Exception:
+        return default
     try:
         ans = input(
             f"\nReview panel size — independent reviewers per proposal, "

@@ -377,6 +377,32 @@ class ReviewPanelCliTests(unittest.TestCase):
 class AskReviewPanelTests(unittest.TestCase):
     """No substrate needed — this is a pure input()-wrapping function."""
 
+    def setUp(self):
+        # The question is asked only on a terminal (#19); the test runner's
+        # stdin is not one, so pretend it is for the tests that exercise the
+        # answers. The off-terminal test below replaces sys.stdin outright.
+        import sys as _sys
+        from unittest.mock import patch
+
+        tty = patch.object(_sys.stdin, "isatty", return_value=True)
+        tty.start()
+        self.addCleanup(tty.stop)
+
+    def test_off_a_terminal_the_default_is_taken_without_asking(self):
+        """EOF was handled; a stdin that is open and never closes is not
+        EOF — input() blocks on it (#19). So the question is only asked on
+        a tty, and input() must not be reached otherwise."""
+        import io
+        from unittest.mock import patch
+
+        from shepherd_dev.cli import _ask_review_panel
+
+        def _never(*_a, **_k):
+            raise AssertionError("input() must not be called off a terminal")
+
+        with patch("sys.stdin", io.StringIO("3\n")), patch("builtins.input", _never):
+            self.assertEqual(_ask_review_panel(default=1), 1)
+
     def test_empty_answer_keeps_the_default(self):
         from unittest.mock import patch
 
