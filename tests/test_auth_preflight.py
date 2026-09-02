@@ -47,7 +47,7 @@ class QuotaReading(unittest.TestCase):
 
 
 class Decisions(unittest.TestCase):
-    def _run(self, *, mode, blob=None, probe_answers=None, probe=False, blob_after=None, env=None):
+    def _run(self, *, mode, blob=None, probe_answers=None, probe=False, blob_after=None, env=None, sources=None):
         calls = {"probe": 0, "resolve": 0}
 
         def _resolve():
@@ -64,7 +64,10 @@ class Decisions(unittest.TestCase):
         from unittest.mock import patch
 
         with patch.object(_time, "time", lambda: NOW):
-            result = auth_preflight(probe=probe, resolve=_resolve, run_probe=_probe, environ=env or {})
+            result = auth_preflight(
+                probe=probe, resolve=_resolve, run_probe=_probe, environ=env or {},
+                sources=(lambda: sources) if sources is not None else (lambda: {}),
+            )
         return result, calls
 
     def test_no_credential_fails_in_zero_seconds(self):
@@ -95,13 +98,43 @@ class Decisions(unittest.TestCase):
         self.assertIn("8.0 h", result.detail)
         self.assertLess(10 * 60, AUTH_REFRESH_WINDOW_S)
 
-    def test_an_expired_token_that_the_probe_could_not_refresh_warns_but_proceeds(self):
+    def test_a_token_still_expired_after_the_probe_stops_the_run(self):
+        # The substrate refuses to seed an expired blob before launch, so
+        # proceeding here is a launch that cannot happen: stop with the remedy.
         result, calls = self._run(
             mode="subscription_login", blob=_blob(-5, NOW), blob_after=_blob(-5, NOW),
         )
+        self.assertFalse(result.ok)
+        self.assertEqual(calls["probe"], 1)
+        self.assertIn("claude login", result.detail)
+
+    def test_a_stale_file_shadowing_a_live_keychain_login_is_named(self):
+        # Observed on a real machine: ~/.claude/.credentials.json from a month
+        # earlier, 690 h past expiry, in front of a keychain login good for
+        # another six — the substrate seeds the file, the CLI uses the keychain.
+        result, _ = self._run(
+            mode="subscription_login", blob=_blob(-690 * 3600, NOW), blob_after=_blob(-690 * 3600, NOW),
+            sources={"file": -690 * 3600, "keychain": 6.6 * 3600},
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("stale ~/.claude/.credentials.json", result.detail)
+        self.assertIn("keychain login (expires in 6.6 h)", result.detail)
+        self.assertIn("CLAUDE_CONFIG_DIR", result.detail)
+
+    def test_shadowing_needs_both_sources_and_a_live_keychain(self):
+        from shepherd_dev.preflight import stale_file_shadowing
+
+        self.assertIsNone(stale_file_shadowing({"file": -5}))
+        self.assertIsNone(stale_file_shadowing({"file": -5, "keychain": -5}))
+        self.assertIsNone(stale_file_shadowing({"file": 3600, "keychain": 3600}))
+        self.assertIsNotNone(stale_file_shadowing({"file": -5, "keychain": 3600}))
+
+    def test_a_token_refreshed_only_a_little_warns_but_proceeds(self):
+        result, _ = self._run(
+            mode="subscription_login", blob=_blob(5 * 60, NOW), blob_after=_blob(20 * 60, NOW),
+        )
         self.assertTrue(result.ok)
-        self.assertEqual(result.action, "probed")
-        self.assertTrue(any("still expires" in w for w in result.warnings))
+        self.assertEqual(result.action, "refreshed")
 
     def test_a_spent_allowance_stops_the_run_before_the_worker(self):
         result, calls = self._run(

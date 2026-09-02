@@ -111,6 +111,64 @@ def _default_resolve():
         return "unknown", None, f"could not resolve auth: {type(exc).__name__}"
 
 
+def credential_sources(now: float | None = None) -> dict[str, float | None]:
+    """Seconds-to-expiry of each host credential store the substrate might
+    seed from, keyed by source: `file` (`$CLAUDE_CONFIG_DIR/.credentials.json`
+    or `~/.claude/.credentials.json`) and, on macOS, `keychain`. A source that
+    is absent or unreadable is simply not listed. Values are expiries only;
+    the secrets never leave the store."""
+    import subprocess as _sp
+    import sys as _sys
+    from pathlib import Path
+
+    out: dict[str, float | None] = {}
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    candidates = []
+    if config_dir:
+        candidates.append(Path(config_dir) / ".credentials.json")
+    candidates.append(Path.home() / ".claude" / ".credentials.json")
+    for path in candidates:
+        try:
+            if path.is_file():
+                out["file"] = credential_expires_in(path.read_bytes(), now=now)
+                break
+        except Exception:
+            continue
+    if _sys.platform == "darwin":
+        try:
+            proc = _sp.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, timeout=10, check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                out["keychain"] = credential_expires_in(proc.stdout.strip(), now=now)
+        except Exception:
+            pass
+    return out
+
+
+def stale_file_shadowing(sources: dict[str, float | None], window_s: int = 0) -> str | None:
+    """The one shape the substrate's lookup order gets wrong, named: a
+    credentials FILE that is expired (or inside the window) while the
+    keychain holds a login that is not. The file is read first, so the dead
+    token is what gets seeded — and the CLI, which uses the keychain, keeps
+    working, which is why nothing else complains. Observed on a real
+    machine: a file from a month earlier, 690 hours past expiry, in front of
+    a keychain login good for another six."""
+    file_exp = sources.get("file")
+    key_exp = sources.get("keychain")
+    if file_exp is None or key_exp is None:
+        return None
+    if file_exp < window_s <= key_exp:
+        return (
+            f"a stale ~/.claude/.credentials.json (expired {_fmt(-file_exp)} ago) shadows a live "
+            f"keychain login (expires in {_fmt(key_exp)}): the substrate seeds the file first. "
+            "Remove or refresh that file, or point CLAUDE_CONFIG_DIR at a directory holding a "
+            "current copy"
+        )
+    return None
+
+
 def _default_run_probe(timeout: int) -> tuple[bool, str]:
     """One unjailed `claude -p ok` with the REAL config dir. Returns (ran,
     text): `ran` False when the CLI could not be executed at all; `text` is
@@ -159,6 +217,7 @@ def auth_preflight(
     resolve: Callable[[], tuple] | None = None,
     run_probe: Callable[[int], tuple[bool, str]] | None = None,
     environ=None,
+    sources: Callable[[], dict] | None = None,
 ) -> PreflightResult:
     """Decide whether a claude-provider run may start, refreshing a
     subscription token that would not last it.
@@ -173,6 +232,7 @@ def auth_preflight(
         return PreflightResult(True, "skipped", f"{_OPT_OUT_VAR} is set")
     resolve = resolve or _default_resolve
     run_probe = run_probe or _default_run_probe
+    sources = sources or credential_sources
 
     mode, blob, status = resolve()
     if mode is None:
@@ -214,6 +274,22 @@ def auth_preflight(
                 f"subscription token refreshed (expires in {_fmt(expires_after)})",
                 expires_in_s=expires_after,
             )
+        if expires_after is not None and expires_after <= 0:
+            # Still expired after a probe that ran: the substrate refuses to
+            # seed an expired blob before launch (its own preflight), so the
+            # run is known-doomed — say so here, before the pack and the
+            # adoption, and name the cause when it is the one we know: a
+            # stale credentials file read ahead of a live keychain login.
+            try:
+                shadow = stale_file_shadowing(sources() or {})
+            except Exception:
+                shadow = None
+            detail = shadow or (
+                "the seeded `claude` subscription login is expired and the probe could not "
+                "refresh the store the substrate reads from — run `claude login`, or set "
+                "CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)"
+            )
+            return PreflightResult(False, "failed", detail, expires_in_s=expires_after)
         result = PreflightResult(True, "probed", _describe(mode2, expires_after), expires_in_s=expires_after)
         result.warnings.append(
             f"the subscription token still expires in {_fmt(expires_after)}; a run longer than that "
