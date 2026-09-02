@@ -748,6 +748,24 @@ def _quota_exhausted(exc: BaseException) -> str | None:
     return reason
 
 
+#: How a budget kill surfaces when the run itself raises rather than the
+#: watchdog firing. Our killtree/teepump perl exits 124 on the alarm and the
+#: substrate wraps that as `ProviderInvocationError("confined body refused
+#: (rc=124): …")`; the framework's own alarm path raises `BudgetExhausted`.
+#: Neither was recognised: both were recorded as `run_failed` with a generic
+#: "the agent run itself failed" and the timeout guidance never reached the
+#: retry. Measured on the history: 13 attempts of ~915 s, every one labelled
+#: run_failed, 3.3 hours whose cause the record did not name.
+_BUDGET_KILL_RE = re.compile(r"\brc=124\b|budget exceeded|BudgetExhausted", re.IGNORECASE)
+
+
+def _budget_killed(exc: BaseException) -> bool:
+    """True when `exc` is the worker dying at its wall-clock budget."""
+    if type(exc).__name__ == "BudgetExhausted":
+        return True
+    return bool(_BUDGET_KILL_RE.search(str(exc)))
+
+
 _TIMEOUT_GUIDANCE = (
     "PREVIOUS ATTEMPT: you exceeded the wall-clock budget and were stopped "
     "mid-run. Be far more direct — make the minimal change and write it now; "
@@ -1968,6 +1986,22 @@ def develop(
                     number, "(timed out)", [], [], None, "timed_out",
                     error="worker exceeded budget and was hard-killed",
                     duration_s=round(_time.monotonic() - started, 1)))
+                guidance = _TIMEOUT_GUIDANCE
+                continue
+            if _budget_killed(exc):
+                # The launch perl reaped the worker at the budget and the
+                # substrate reported the exit code, so the watchdog never
+                # fired — the same event as `wd.fired` above, seen from the
+                # other side. Same verdict, same guidance.
+                reporter.fail("worker timed out (budget hard-kill)")
+                report.attempts.append(Attempt(
+                    number, "(timed out)", [], [], None, "timed_out",
+                    error=(
+                        f"worker exceeded budget ({worker_budget or 'framework default'}s) "
+                        f"and was hard-killed: {type(exc).__name__}"
+                    ),
+                    duration_s=round(_time.monotonic() - started, 1)))
+                _emit("phase.fail", {"label": "worker", "reason": "budget hard-kill"}, attempt=number)
                 guidance = _TIMEOUT_GUIDANCE
                 continue
             quota = _quota_exhausted(exc)

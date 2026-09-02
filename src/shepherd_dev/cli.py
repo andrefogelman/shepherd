@@ -828,6 +828,35 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
     return 0 if report.succeeded else 1
 
 
+#: What the command line means when it says nothing: the numbers every run
+#: used before a repo could set its own.
+DEFAULT_LIMITS = {"worker_budget": 900, "gate_timeout": 600}
+DEFAULT_MAX_ATTEMPTS = {"run": 3, "run2": 2, "runN": 2}
+
+
+def _apply_run_limits(args, repo_root: Path, command: str) -> None:
+    """Fill the limits the flags left unset: flag > repo/global `limits` >
+    the built-in default. Prints the ones that came from config, so a run
+    that behaves differently from the flag's documented default says why."""
+    limits = config.run_limits(repo_root)
+    from_config: list[str] = []
+    for key in ("worker_budget", "gate_timeout"):
+        if getattr(args, key, None) is None:
+            if key in limits:
+                setattr(args, key, limits[key])
+                from_config.append(f"{key}={limits[key]}")
+            else:
+                setattr(args, key, DEFAULT_LIMITS[key])
+    if getattr(args, "max_attempts", None) is None:
+        if "max_attempts" in limits:
+            args.max_attempts = limits["max_attempts"]
+            from_config.append(f"max_attempts={limits['max_attempts']}")
+        else:
+            args.max_attempts = DEFAULT_MAX_ATTEMPTS[command]
+    if from_config:
+        print(f"limits (from {config.CONFIG_NAME}): " + ", ".join(from_config))
+
+
 def _role_models(args, repo_root: Path) -> RoleModels:
     """Model/effort/fallback per role: flags over repo config over global
     config over the CLI default. Warnings (an unknown effort level) are
@@ -1037,6 +1066,7 @@ def cmd_run(args) -> int:
 
 
 def _cmd_run_inner(args, repo_root: Path) -> int:
+    _apply_run_limits(args, repo_root, "run")
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -1407,6 +1437,7 @@ def cmd_run2(args) -> int:
 
 
 def _cmd_run2_inner(args, repo_root: Path) -> int:
+    _apply_run_limits(args, repo_root, "run2")
 
     if args.auto_settle and args.no_review:
         print("error: --auto-settle requires the reviewer (drop --no-review)", file=sys.stderr)
@@ -1658,6 +1689,7 @@ def cmd_runN(args) -> int:
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
         return 2
+    _apply_run_limits(args, repo_root, "runN")
     features = list(args.features)
     if not 2 <= len(features) <= MAX_LANES:
         print(f"error: runN takes 2..{MAX_LANES} features (got {len(features)})", file=sys.stderr)
@@ -2232,7 +2264,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[1, 2, 3, 4],
         help="branch K candidates from the same state, gate+review all, stage the winner (Tree-RL essence at inference)",
     )
-    p_run.add_argument("--max-attempts", type=int, default=3)
+    p_run.add_argument("--max-attempts", type=int, default=None, help="attempts before giving up (default: limits.max_attempts in .shepherd-dev.json, else 3)")
     p_run.add_argument(
         "--review-rounds", type=int, default=1,
         help=f"extra passes to spend on a REJECTED-but-passing proposal "
@@ -2256,12 +2288,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-report", default=None, metavar="FILE",
         help="write a durable markdown report (verdict, issues, ledger, diff) to this path",
     )
-    p_run.add_argument("--gate-timeout", type=int, default=600, help="seconds for the test suite")
+    p_run.add_argument("--gate-timeout", type=int, default=None, help="seconds for the test suite (default: limits.gate_timeout in .shepherd-dev.json, else 600)")
     p_run.add_argument(
         "--worker-budget",
         type=_positive_seconds,
-        default=900,
-        help="wall-clock seconds each worker attempt may use (claude provider)",
+        default=None,
+        help="wall-clock seconds each worker attempt may use (claude provider; "
+             "default: limits.worker_budget in .shepherd-dev.json, else 900)",
     )
     p_run.add_argument(
         "--model", default=None, metavar="MODEL",
@@ -2347,10 +2380,10 @@ def build_parser() -> argparse.ArgumentParser:
              "latency; spends review tokens when the gate fails, and re-reviews "
              "if a repair round changes the proposal)",
     )
-    p_run2.add_argument("--max-attempts", type=int, default=2, help="attempts per worker")
+    p_run2.add_argument("--max-attempts", type=int, default=None, help="attempts per worker (default: limits.max_attempts, else 2)")
     p_run2.add_argument("--max-repairs", type=int, default=2, help="repair rounds on the combined gate")
-    p_run2.add_argument("--gate-timeout", type=int, default=600)
-    p_run2.add_argument("--worker-budget", type=_positive_seconds, default=900)
+    p_run2.add_argument("--gate-timeout", type=int, default=None, help="seconds for the combined gate (default: limits.gate_timeout, else 600)")
+    p_run2.add_argument("--worker-budget", type=_positive_seconds, default=None, help="seconds per worker attempt (default: limits.worker_budget, else 900)")
     p_run2.add_argument(
         "--model", default=None, metavar="MODEL",
         help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
@@ -2384,9 +2417,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="concurrent lanes (1-5, default 3); remaining features queue",
     )
     p_runN.add_argument("--no-review", action="store_true", help="skip the per-lane reviewer")
-    p_runN.add_argument("--max-attempts", type=int, default=2, help="attempts per lane (default 2)")
-    p_runN.add_argument("--gate-timeout", type=int, default=600)
-    p_runN.add_argument("--worker-budget", type=_positive_seconds, default=900)
+    p_runN.add_argument("--max-attempts", type=int, default=None, help="attempts per lane (default: limits.max_attempts, else 2)")
+    p_runN.add_argument("--gate-timeout", type=int, default=None, help="seconds per lane gate (default: limits.gate_timeout, else 600)")
+    p_runN.add_argument("--worker-budget", type=_positive_seconds, default=None, help="seconds per worker attempt (default: limits.worker_budget, else 900)")
     p_runN.add_argument(
         "--model", default=None, metavar="MODEL",
         help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "

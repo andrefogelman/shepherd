@@ -10,6 +10,30 @@ None.
 
 ## Fixed
 
+### A worker reaped at its budget was recorded as an unexplained run failure
+
+**Was:** the budget hard-kill has two layers. When the launch perl's alarm
+fires first — the normal case — the worker's process group dies, the perl
+exits 124, and the substrate raises `ProviderInvocationError("confined body
+refused (rc=124): …")` out of `workspace.run`. The watchdog, the second
+layer, then finds nothing to kill and never fires, so `wd.fired` is False and
+the exception fell through to the generic branch: verdict `run_failed`, error
+"the agent run itself failed", and the retry told to "work efficiently"
+instead of receiving the timeout guidance. In the history: 13 attempts of
+about 915 seconds, all labelled `run_failed`, 3.3 hours whose cause the
+record did not name. The same held for the framework's own alarm path, which
+raises `BudgetExhausted`.
+
+**Fix:** `_budget_killed` recognises both shapes (the exit code 124 in the
+message, the exception's name, the framework's "budget exceeded" text), and
+`develop` records the attempt as `timed_out` naming the budget it exceeded,
+with `_TIMEOUT_GUIDANCE` for the retry — the same outcome the watchdog path
+already produced. Alongside: a repo may set `limits.worker_budget`,
+`limits.gate_timeout` and `limits.max_attempts` in `.shepherd-dev.json`
+(flags still win), so a repository whose features need a longer wall clock
+declares it once instead of on every command line. Pinned by
+`tests/test_budget_kill.py`.
+
 ### `optimize` hung two minutes per replay case, then scored the case as a failure
 
 **Was:** `optimize._replay` turns a pinned worktree into a workspace with

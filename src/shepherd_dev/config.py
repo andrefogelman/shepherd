@@ -290,6 +290,29 @@ def load_global_config() -> dict:
         return {}
 
 
+#: The limits a repo may set instead of repeating them on every command line.
+#: Flags still win; these only fill in what the command line left unsaid.
+RUN_LIMIT_KEYS = ("worker_budget", "gate_timeout", "max_attempts")
+
+
+def run_limits(repo_root: Path) -> dict[str, int]:
+    """`worker_budget`, `gate_timeout`, `max_attempts` from the repo's
+    `.shepherd-dev.json` (over the global config), as positive ints. A value
+    that is not a positive int is ignored — the flag's own validation would
+    have refused it, and a config must not do worse than a flag."""
+    out: dict[str, int] = {}
+    for source in (load_global_config(), load_config(repo_root)):  # repo wins
+        block = source.get("limits")
+        if not isinstance(block, dict):
+            continue
+        for key in RUN_LIMIT_KEYS:
+            value = block.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                continue
+            out[key] = value
+    return out
+
+
 def auto_optimize_config(repo_root: Path) -> dict | None:
     """auto_optimize settings; per-repo .shepherd-dev.json wins over the global
     ~/.shepherd-dev/config.json. None = feature off (the default)."""
