@@ -15,7 +15,11 @@ lockfile consistency; and both platform benchmark jobs. All execution took
 place on GitHub's remote runners. The first type-check job's success was
 invalid: a subsequent coverage assertion found it had analyzed zero files.
 The checker now passes the source directory explicitly and requires all 38
-source files to be analyzed. Its corrected result is being verified in CI.
+source files to be analyzed. The
+[corrected static job](https://github.com/andrefogelman/shepherd/actions/runs/34702347051/job/103576263697)
+analyzed all 38 files in each revision: **27 pre-existing type errors in the
+base, the same 27 in current source, zero introduced errors**. This is a
+passing regression check, not a claim that the repository is type-error-free.
 
 ## Measured results
 
