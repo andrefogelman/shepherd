@@ -33,6 +33,10 @@ def diagnostics(root: Path):
     result = json.loads(proc.stdout)
     if "generalDiagnostics" not in result:
         raise RuntimeError(f"pyright did not report diagnostics: {result}")
+    analyzed = result.get("summary", {}).get("filesAnalyzed", 0)
+    expected = sum(1 for _ in (root / "src").rglob("*.py"))
+    if not expected or analyzed < expected:
+        raise RuntimeError(f"pyright analyzed {analyzed} files; expected at least {expected}")
     errors = collections.Counter()
     for item in result["generalDiagnostics"]:
         if item["severity"] == "error":
@@ -40,7 +44,7 @@ def diagnostics(root: Path):
             # Root paths can also occur in type messages (e.g. import errors).
             message = item["message"].replace(str(root), "<checkout>")
             errors[(path, item.get("rule", ""), message)] += 1
-    print(f"{root}: {sum(errors.values())} type errors", flush=True)
+    print(f"{root}: {analyzed} files analyzed, {sum(errors.values())} type errors", flush=True)
     return errors
 
 

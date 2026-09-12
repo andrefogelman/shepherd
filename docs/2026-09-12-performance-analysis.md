@@ -5,12 +5,47 @@ Scope: `andrefogelman/shepherd`, base commit
 its committed documentation and tests, and this repository's GitHub CI.
 No GBrain or other project was consulted.
 
-**Validation status:** the user explicitly approved committing and pushing
-to `main` before testing for this task, so validation can run on GitHub's
-remote runners. The workflow now includes the full suite, repeated I/O and
-streaming tests, baseline/current benchmarks on Linux and macOS, syntax/name
-lint, and a check for type errors introduced relative to the base. Results
-will be recorded here once those checks finish.
+**Validated implementation:** `b8fe0356c19ea9626d60f290b6277f111a6e858d`.
+The user explicitly approved committing and pushing to `main` before testing
+for this task. All 11 jobs in
+[CI run 34701993084](https://github.com/andrefogelman/shepherd/actions/runs/34701993084)
+passed: 993 tests on each of six Linux/macOS and Python 3.11/3.13/3.14
+combinations; 106 focused tests repeated ten times; syntax/name lint;
+Pyright (zero base and current errors); lockfile consistency; and both
+platform benchmark jobs. All execution took place on GitHub's remote runners.
+
+## Measured results
+
+Three runtime samples per workload, median shown, using Python 3.11. Each
+platform measured base and current source sequentially on the same runner.
+These are synthetic I/O workloads, not end-to-end agent or LLM timings.
+
+| Workload | Linux base → current | Speedup | macOS base → current | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Context scan with ignored tree | 47.1 → 5.1 ms | 9.19× | 51.1 → 5.6 ms | 9.13× |
+| Context pack | 76.6 → 34.3 ms | 2.23× | 97.6 → 30.9 ms | 3.16× |
+| Diff snapshot with ignored tree | 77.0 → 10.6 ms | 7.29× | 71.4 → 8.5 ms | 8.39× |
+| Snapshot, 32 MiB file | 25.7 → 23.2 ms | 1.11× | 23.5 → 18.5 ms | 1.27× |
+| Unchanged diff, 32 MiB file | 25.7 → 23.3 ms | 1.10× | 28.0 → 19.6 ms | 1.43× |
+| Worker stream, 20,000 events | 497.1 → 191.7 ms | 2.59× | 457.5 → 136.6 ms | 3.35× |
+| Status, 20,000 gate lines | 75.3 → 56.6 ms | 1.33× | 75.2 → 38.4 ms | 1.96× |
+| Subprocess, 16 MB output tail | 28.7 → 24.9 ms | 1.15× | 59.9 → 40.7 ms | 1.47× |
+
+Peak Python allocations (measured separately from runtime; decimal units):
+
+| Workload | Linux base → current | macOS base → current |
+| --- | ---: | ---: |
+| Snapshot, 32 MiB file | 33.56 MB → 269 KB | 33.56 MB → 270 KB |
+| Unchanged diff, 32 MiB file | 33.56 MB → 794 KB | 33.56 MB → 795 KB |
+| Worker stream | 3.15 MB → 10.8 KB | 3.15 MB → 11.2 KB |
+| Status | 32.20 MB → 26.3 KB | 32.20 MB → 26.6 KB |
+| Subprocess output tail | 32.12 MB → 211 KB | 32.13 MB → 224 KB |
+
+Every measured median improved in this run. Raw samples, interpreter and
+runner details, peak allocation values and source/job identifiers are saved
+in [performance-results.json](2026-09-12-performance-results.json).
+The samples demonstrate these workload improvements; they are not a
+confidence interval or a guarantee about a different filesystem or workload.
 
 ## Findings and changes
 

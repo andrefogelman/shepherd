@@ -128,7 +128,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -e . ruff==0.12.10 pyright==1.1.403
       - name: Check source syntax and undefined names
-        run: ruff check --select E9,F821,F822,F823 src tests/test_io_perf.py scripts/benchmark_io.py
+        run: ruff check --select E9,F821,F822,F823 src tests/test_io_perf.py scripts
       - name: Compare type diagnostics against the unchanged baseline
         run: |
           git fetch --depth=1 origin 9e6a842bae068c3779a950152aa21d5d64530f81

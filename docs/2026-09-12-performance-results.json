@@ -1,0 +1,367 @@
+{
+  "baseline_commit": "9e6a842bae068c3779a950152aa21d5d64530f81",
+  "measured_commit": "b8fe0356c19ea9626d60f290b6277f111a6e858d",
+  "ci_run": "https://github.com/andrefogelman/shepherd/actions/runs/34701993084",
+  "measurements": [
+    {
+      "os": "ubuntu-latest",
+      "job_url": "https://github.com/andrefogelman/shepherd/actions/runs/34701993084/job/103575279325",
+      "baseline": {
+        "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+        "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+        "source_root": "/home/runner/work/_temp/shepherd-baseline",
+        "repeat": 3,
+        "results": [
+          {
+            "name": "context_scan_ignored_tree",
+            "median_s": 0.047100407000002065,
+            "samples_s": [
+              0.04785775300000239,
+              0.047100407000002065,
+              0.047069819000000734
+            ],
+            "peak_python_bytes": 1498458
+          },
+          {
+            "name": "context_pack",
+            "median_s": 0.07661340499999625,
+            "samples_s": [
+              0.07661340499999625,
+              0.0770722070000005,
+              0.07508105900000572
+            ],
+            "peak_python_bytes": 1498825
+          },
+          {
+            "name": "diff_snapshot_ignored_tree",
+            "median_s": 0.07699110699999778,
+            "samples_s": [
+              0.07812269800000138,
+              0.07699110699999778,
+              0.07697573800000157
+            ],
+            "peak_python_bytes": 1991039
+          },
+          {
+            "name": "snapshot_32mib",
+            "median_s": 0.025690698999994765,
+            "samples_s": [
+              0.02635912000000218,
+              0.025690698999994765,
+              0.02563816100000338
+            ],
+            "peak_python_bytes": 33562108
+          },
+          {
+            "name": "unchanged_diff_32mib",
+            "median_s": 0.025674078000001543,
+            "samples_s": [
+              0.026034608000003345,
+              0.025636308000002828,
+              0.025674078000001543
+            ],
+            "peak_python_bytes": 33563110
+          },
+          {
+            "name": "worker_stream_20000_events",
+            "median_s": 0.49709093699999585,
+            "samples_s": [
+              0.4978927760000005,
+              0.49701805099999774,
+              0.49709093699999585
+            ],
+            "peak_python_bytes": 3151378
+          },
+          {
+            "name": "status_20000_gate_lines",
+            "median_s": 0.07530778900000001,
+            "samples_s": [
+              0.07530778900000001,
+              0.07562730300000453,
+              0.07293429100000282
+            ],
+            "peak_python_bytes": 32195178
+          },
+          {
+            "name": "subprocess_16mb_output_tail",
+            "median_s": 0.028675632999998868,
+            "samples_s": [
+              0.03722810200000026,
+              0.02805090300000046,
+              0.028675632999998868
+            ],
+            "peak_python_bytes": 32120734
+          }
+        ]
+      },
+      "current": {
+        "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+        "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+        "source_root": "/home/runner/work/shepherd/shepherd",
+        "repeat": 3,
+        "results": [
+          {
+            "name": "context_scan_ignored_tree",
+            "median_s": 0.0051245510000015315,
+            "samples_s": [
+              0.0057788740000006555,
+              0.0051245510000015315,
+              0.00492923399999512
+            ],
+            "peak_python_bytes": 1272268
+          },
+          {
+            "name": "context_pack",
+            "median_s": 0.034340813999996556,
+            "samples_s": [
+              0.035321040000006576,
+              0.033790837999994494,
+              0.034340813999996556
+            ],
+            "peak_python_bytes": 1272475
+          },
+          {
+            "name": "diff_snapshot_ignored_tree",
+            "median_s": 0.010560468999997852,
+            "samples_s": [
+              0.010897141999997473,
+              0.010547424000002081,
+              0.010560468999997852
+            ],
+            "peak_python_bytes": 312382
+          },
+          {
+            "name": "snapshot_32mib",
+            "median_s": 0.023182740000002866,
+            "samples_s": [
+              0.023318605999996578,
+              0.023066980999999487,
+              0.023182740000002866
+            ],
+            "peak_python_bytes": 269295
+          },
+          {
+            "name": "unchanged_diff_32mib",
+            "median_s": 0.023315038999996318,
+            "samples_s": [
+              0.023353812000003416,
+              0.023315038999996318,
+              0.023272880000000384
+            ],
+            "peak_python_bytes": 794287
+          },
+          {
+            "name": "worker_stream_20000_events",
+            "median_s": 0.19170435499999883,
+            "samples_s": [
+              0.19063752600000328,
+              0.19170435499999883,
+              0.19238165100000515
+            ],
+            "peak_python_bytes": 10764
+          },
+          {
+            "name": "status_20000_gate_lines",
+            "median_s": 0.05661752399999642,
+            "samples_s": [
+              0.05661752399999642,
+              0.057500863999997875,
+              0.0565508099999974
+            ],
+            "peak_python_bytes": 26346
+          },
+          {
+            "name": "subprocess_16mb_output_tail",
+            "median_s": 0.02487306300000114,
+            "samples_s": [
+              0.021647729000001448,
+              0.027672389999999325,
+              0.02487306300000114
+            ],
+            "peak_python_bytes": 211367
+          }
+        ]
+      }
+    },
+    {
+      "os": "macos-latest",
+      "job_url": "https://github.com/andrefogelman/shepherd/actions/runs/34701993084/job/103575279450",
+      "baseline": {
+        "python": "3.11.9 (v3.11.9:de54cf5be3, Apr  2 2024, 07:12:50) [Clang 13.0.0 (clang-1300.0.29.30)]",
+        "platform": "macOS-26.6.2-arm64-arm-64bit",
+        "source_root": "/Users/runner/work/_temp/shepherd-baseline",
+        "repeat": 3,
+        "results": [
+          {
+            "name": "context_scan_ignored_tree",
+            "median_s": 0.05106329200000914,
+            "samples_s": [
+              0.05106329200000914,
+              0.05537079100000142,
+              0.03843858300000136
+            ],
+            "peak_python_bytes": 1649350
+          },
+          {
+            "name": "context_pack",
+            "median_s": 0.09756575000000112,
+            "samples_s": [
+              0.09175995900000089,
+              0.09756575000000112,
+              0.1001629999999949
+            ],
+            "peak_python_bytes": 1649685
+          },
+          {
+            "name": "diff_snapshot_ignored_tree",
+            "median_s": 0.07135537500001021,
+            "samples_s": [
+              0.10518125000000111,
+              0.06574750000000051,
+              0.07135537500001021
+            ],
+            "peak_python_bytes": 2399539
+          },
+          {
+            "name": "snapshot_32mib",
+            "median_s": 0.023542375000005222,
+            "samples_s": [
+              0.023542375000005222,
+              0.023527584000007096,
+              0.02791945799999951
+            ],
+            "peak_python_bytes": 33562596
+          },
+          {
+            "name": "unchanged_diff_32mib",
+            "median_s": 0.027998084000003587,
+            "samples_s": [
+              0.027998084000003587,
+              0.028119750000001886,
+              0.02610845799999595
+            ],
+            "peak_python_bytes": 33563746
+          },
+          {
+            "name": "worker_stream_20000_events",
+            "median_s": 0.45749858400000676,
+            "samples_s": [
+              0.5163216659999961,
+              0.45749858400000676,
+              0.428072874999998
+            ],
+            "peak_python_bytes": 3151718
+          },
+          {
+            "name": "status_20000_gate_lines",
+            "median_s": 0.07518170800000235,
+            "samples_s": [
+              0.09640779200000793,
+              0.07419487500000344,
+              0.07518170800000235
+            ],
+            "peak_python_bytes": 32195330
+          },
+          {
+            "name": "subprocess_16mb_output_tail",
+            "median_s": 0.05994929199999888,
+            "samples_s": [
+              0.062224167000010766,
+              0.05100699999999847,
+              0.05994929199999888
+            ],
+            "peak_python_bytes": 32133307
+          }
+        ]
+      },
+      "current": {
+        "python": "3.11.9 (v3.11.9:de54cf5be3, Apr  2 2024, 07:12:50) [Clang 13.0.0 (clang-1300.0.29.30)]",
+        "platform": "macOS-26.6.2-arm64-arm-64bit",
+        "source_root": "/Users/runner/work/shepherd/shepherd",
+        "repeat": 3,
+        "results": [
+          {
+            "name": "context_scan_ignored_tree",
+            "median_s": 0.005593833999995468,
+            "samples_s": [
+              0.00597774999999956,
+              0.005004792000008251,
+              0.005593833999995468
+            ],
+            "peak_python_bytes": 1294160
+          },
+          {
+            "name": "context_pack",
+            "median_s": 0.03085729200000742,
+            "samples_s": [
+              0.03248045899999852,
+              0.02895725000000482,
+              0.03085729200000742
+            ],
+            "peak_python_bytes": 1301095
+          },
+          {
+            "name": "diff_snapshot_ignored_tree",
+            "median_s": 0.008504833000003487,
+            "samples_s": [
+              0.008504833000003487,
+              0.009320582999990279,
+              0.007241916999987552
+            ],
+            "peak_python_bytes": 312958
+          },
+          {
+            "name": "snapshot_32mib",
+            "median_s": 0.018519625000010365,
+            "samples_s": [
+              0.018630125000001385,
+              0.017902000000006524,
+              0.018519625000010365
+            ],
+            "peak_python_bytes": 269871
+          },
+          {
+            "name": "unchanged_diff_32mib",
+            "median_s": 0.019619832999993037,
+            "samples_s": [
+              0.019619832999993037,
+              0.01959649999999158,
+              0.020089834000003748
+            ],
+            "peak_python_bytes": 795011
+          },
+          {
+            "name": "worker_stream_20000_events",
+            "median_s": 0.1365616249999988,
+            "samples_s": [
+              0.14865012499998898,
+              0.12155674999999633,
+              0.1365616249999988
+            ],
+            "peak_python_bytes": 11192
+          },
+          {
+            "name": "status_20000_gate_lines",
+            "median_s": 0.038382833000000005,
+            "samples_s": [
+              0.03597329199999422,
+              0.0440427079999921,
+              0.038382833000000005
+            ],
+            "peak_python_bytes": 26586
+          },
+          {
+            "name": "subprocess_16mb_output_tail",
+            "median_s": 0.04068825000000231,
+            "samples_s": [
+              0.04068825000000231,
+              0.04866141599998741,
+              0.03720766600000047
+            ],
+            "peak_python_bytes": 224007
+          }
+        ]
+      }
+    }
+  ]
+}
