@@ -19,13 +19,13 @@ def diagnostics(root: Path):
     with tempfile.TemporaryDirectory(prefix="shepherd-pyright-") as tmp:
         config = Path(tmp) / "pyrightconfig.json"
         config.write_text(json.dumps({
-            "include": [str(root / "src")],
             "pythonVersion": "3.11",
             "typeCheckingMode": "basic",
             "reportUnusedParameter": False,
         }))
         proc = subprocess.run(
-            ["pyright", "--project", str(config), "--pythonpath", sys.executable, "--outputjson"],
+            ["pyright", "--project", str(config), "--pythonpath", sys.executable,
+             "--outputjson", str(root / "src")],
             cwd=root, capture_output=True, text=True, timeout=180,
         )
     if proc.returncode not in (0, 1):

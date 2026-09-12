@@ -11,8 +11,11 @@ for this task. All 11 jobs in
 [CI run 34701993084](https://github.com/andrefogelman/shepherd/actions/runs/34701993084)
 passed: 993 tests on each of six Linux/macOS and Python 3.11/3.13/3.14
 combinations; 106 focused tests repeated ten times; syntax/name lint;
-Pyright (zero base and current errors); lockfile consistency; and both
-platform benchmark jobs. All execution took place on GitHub's remote runners.
+lockfile consistency; and both platform benchmark jobs. All execution took
+place on GitHub's remote runners. The first type-check job's success was
+invalid: a subsequent coverage assertion found it had analyzed zero files.
+The checker now passes the source directory explicitly and requires all 38
+source files to be analyzed. Its corrected result is being verified in CI.
 
 ## Measured results
 
