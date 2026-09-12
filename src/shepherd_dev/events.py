@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 HUNK_LIMIT = 4000
 EXCERPT_LIMIT = 200
@@ -107,20 +107,24 @@ class RunEventLog:
         return event
 
 
+def iter_run_events(run_id: str, root: Path | None = None) -> Iterator[dict]:
+    """Read fresh events from disk one at a time, tolerating bad JSON lines."""
+    path = (Path(root) if root else _default_runs_root()) / run_id / "events.ndjson"
+    if not path.is_file():
+        return
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(event, dict):
+                yield event
+
+
 def load_run_events(run_id: str, root: Path | None = None) -> list[dict]:
     """Read one run's events (tolerant to bad lines). Empty list if absent."""
-    path = (Path(root) if root else _default_runs_root()) / run_id / "events.ndjson"
-    events: list[dict] = []
-    if not path.is_file():
-        return events
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+    return list(iter_run_events(run_id, root))
 
 
 def latest_run_id(root: Path | None = None) -> str | None:
@@ -139,12 +143,18 @@ def edit_hunk(old: str, new: str, path: str = "") -> dict:
     new_lines = new.splitlines(keepends=True)
     added = removed = 0
     parts: list[str] = []
+    hunk_chars = 0
     for line in difflib.unified_diff(old_lines, new_lines, fromfile=path, tofile=path, n=2):
         if line.startswith("+") and not line.startswith("+++"):
             added += 1
         elif line.startswith("-") and not line.startswith("---"):
             removed += 1
-        parts.append(line if line.endswith("\n") else line + "\n")
+        # Keep counting the complete diff, but retain only the displayed
+        # prefix (plus one character to tell whether it was truncated).
+        if hunk_chars <= HUNK_LIMIT:
+            piece = (line if line.endswith("\n") else line + "\n")[:HUNK_LIMIT + 1 - hunk_chars]
+            parts.append(piece)
+            hunk_chars += len(piece)
     hunk = "".join(parts)
     if len(hunk) > HUNK_LIMIT:
         hunk = hunk[: HUNK_LIMIT - 1] + "…"
@@ -287,8 +297,10 @@ class StreamTailer(threading.Thread):
         # NB: named _stopping, not _stop — Thread has an internal _stop()
         # method that join() calls on Python ≤3.12; shadowing it breaks join.
         self._stopping = threading.Event()
-        self._buf = b""
+        self._buf = bytearray()
         self._pos = 0
+        self._dropping = False
+        self._pump_lock = threading.Lock()
 
     # -- lifecycle ------------------------------------------------------------
     def run(self) -> None:
@@ -301,33 +313,50 @@ class StreamTailer(threading.Thread):
         self._stopping.set()
         if self.is_alive():
             self.join(timeout)
-        self._pump()
-        if self._buf.strip():
-            self._handle_line(self._buf)
-        self._buf = b""
+        with self._pump_lock:
+            self._read_available()
+            if self._buf.strip() and not self._dropping:
+                self._handle_line(bytes(self._buf))
+            self._buf.clear()
 
     # -- internals ------------------------------------------------------------
     def _pump(self) -> None:
+        with self._pump_lock:
+            self._read_available()
+
+    def _read_available(self) -> None:
         try:
-            if not self._path.exists():
-                return
             with open(self._path, "rb") as fh:
                 fh.seek(self._pos)
-                chunk = fh.read()
-            self._pos += len(chunk)
+                # Bound this pump to the bytes present at entry: a producer
+                # that keeps appending must not prevent drain()/stop forever.
+                remaining = max(0, os.fstat(fh.fileno()).st_size - self._pos)
+                while remaining:
+                    chunk = fh.readline(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self._pos += len(chunk)
+                    remaining -= len(chunk)
+                    complete = chunk.endswith(b"\n")
+                    if self._dropping:
+                        if complete:
+                            self._dropping = False
+                        continue
+                    self._buf.extend(chunk[:-1] if complete else chunk)
+                    if len(self._buf) > self._max:
+                        self._log.emit(
+                            "worker.raw", {"truncated": True, "bytes": len(self._buf)},
+                            attempt=self._attempt,
+                        )
+                        self._buf.clear()
+                        # Never parse a valid-looking suffix of an oversized
+                        # line as a new event, including across later polls.
+                        self._dropping = not complete
+                    elif complete:
+                        self._handle_line(bytes(self._buf))
+                        self._buf.clear()
         except Exception:
             return
-        if not chunk:
-            return
-        self._buf += chunk
-        while b"\n" in self._buf:
-            line, self._buf = self._buf.split(b"\n", 1)
-            self._handle_line(line)
-        if len(self._buf) > self._max:  # a single line larger than the cap
-            self._log.emit(
-                "worker.raw", {"truncated": True, "bytes": len(self._buf)}, attempt=self._attempt
-            )
-            self._buf = b""
 
     def _handle_line(self, raw: bytes) -> None:
         raw = raw.strip()

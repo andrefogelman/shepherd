@@ -14,6 +14,7 @@ feature => byte-identical pack.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,14 +104,31 @@ def extract_keywords(feature: str) -> list[str]:
 
 
 def _iter_files(repo_root: Path, allowed_prefixes: tuple[str, ...]) -> list[Path]:
+    def walk(directory: Path):
+        # Sorting each level preserves sorted(Path.rglob())'s component-wise
+        # order, but never enumerates ignored subtrees or walks past the cap.
+        try:
+            with os.scandir(directory) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name)
+        except OSError:
+            return
+        for entry in ordered:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name in PACK_IGNORED_DIRS or (
+                        entry.name.startswith(".") and entry.name != ".github"
+                    ):
+                        continue
+                    yield from walk(Path(entry.path))
+                elif entry.is_file():
+                    yield Path(entry.path)
+            except OSError:
+                continue
+
     files: list[Path] = []
-    for path in sorted(repo_root.rglob("*")):
+    for path in walk(repo_root):
         rel = path.relative_to(repo_root)
         parts = rel.parts
-        if any(p in PACK_IGNORED_DIRS or p == ".git" or p.startswith(".") and p not in (".github",) for p in parts[:-1]):
-            continue
-        if not path.is_file():
-            continue
         name = parts[-1]
         if name.startswith(".") and name not in (".gitignore", ".env.example"):
             continue
@@ -131,7 +149,8 @@ def _iter_files(repo_root: Path, allowed_prefixes: tuple[str, ...]) -> list[Path
 
 def _read_text(path: Path) -> str:
     try:
-        return path.read_bytes()[:READ_CAP].decode("utf-8", errors="replace")
+        with path.open("rb") as fh:
+            return fh.read(READ_CAP).decode("utf-8", errors="replace")
     except OSError:
         return ""
 
@@ -311,7 +330,8 @@ def _import_edges(files: list[Path], repo_root: Path, repo_rels: set[str]) -> di
             continue
         rel = _norm(str(path.relative_to(repo_root)))
         try:
-            header = path.read_bytes()[:HEADER_BYTES].decode("utf-8", errors="replace")
+            with path.open("rb") as fh:
+                header = fh.read(HEADER_BYTES).decode("utf-8", errors="replace")
         except OSError:
             continue
         neigh: set[str] = set()

@@ -8,6 +8,7 @@ Deletions are not represented (same limitation as the v0.3.0 workspace lane).
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -60,13 +61,17 @@ def _walk(root: Path, ignore: set[str]):
     """Yield (relative-posix-path, path) for every regular file under `root`."""
     if not root.is_dir():
         return
-    for path in root.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        rel = path.relative_to(root)
-        if any(part in ignore for part in rel.parts):
-            continue
-        yield rel.as_posix(), path
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        # Prune before descent: a node_modules/.git tree must cost one entry,
+        # not a traversal and stat of every file it contains.
+        dirs[:] = [name for name in dirs if name not in ignore]
+        for name in files:
+            if name in ignore:
+                continue
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            yield path.relative_to(root).as_posix(), path
 
 
 def snapshot_tree(root: Path, *, ignore_dirs: set[str] | None = None) -> dict[str, tuple[str, bool]]:
@@ -96,7 +101,8 @@ def snapshot_tree(root: Path, *, ignore_dirs: set[str] | None = None) -> dict[st
     snapshot: dict[str, tuple[str, bool]] = {}
     for rel, path in _walk(root.resolve(), ignore):
         try:
-            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            with path.open("rb") as fh:
+                sha = hashlib.file_digest(fh, "sha256").hexdigest()
             is_exec = bool(path.stat().st_mode & 0o111)
             snapshot[rel] = (sha, is_exec)
         except OSError:
@@ -131,15 +137,28 @@ def collect_changed_entries(
     executable: set[str] = set()
     for rel, path in _walk(modified, ignore):
         try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        try:
             is_exec = bool(path.stat().st_mode & 0o111)
         except OSError:
             is_exec = False
+        prior = baseline.get(rel) if baseline is not None else None
+        try:
+            with path.open("rb") as fh:
+                # Large unchanged files need a content hash, not a bytes copy
+                # the size of the file. Small files keep the one-read path.
+                data = fh.read(256 * 1024)
+                if prior is not None and len(data) == 256 * 1024:
+                    digest = hashlib.sha256(data)
+                    while chunk := fh.read(256 * 1024):
+                        digest.update(chunk)
+                    if prior == (digest.hexdigest(), is_exec):
+                        continue
+                    fh.seek(0)
+                    data = fh.read()
+                else:
+                    data += fh.read()
+        except OSError:
+            continue
         if baseline is not None:
-            prior = baseline.get(rel)
             if prior is not None and prior == (hashlib.sha256(data).hexdigest(), is_exec):
                 continue
         else:

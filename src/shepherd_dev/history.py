@@ -55,13 +55,14 @@ def load_events(kinds: tuple[str, ...] | None = None) -> list[dict]:
     path = HISTORY_DIR / RUNS_FILE
     if not path.is_file():
         return events
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(line)
-        except Exception:
-            continue
-        if kinds is None or event.get("kind") in kinds:
-            events.append(event)
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(event, dict) and (kinds is None or event.get("kind") in kinds):
+                events.append(event)
     return events
 
 

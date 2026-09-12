@@ -74,5 +74,64 @@ jobs:
           for i in $(seq 1 10); do
             echo "── round $i ──"
             env -u PYTHONPATH python -m unittest \
-              tests.test_diffcollect tests.test_perf tests.test_teepump
+              tests.test_diffcollect tests.test_perf tests.test_teepump \
+              tests.test_io_perf tests.test_events tests.test_gatestream
           done
+
+  performance:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: Prepare the performance baseline without creating a branch
+        run: |
+          git fetch --depth=1 origin 9e6a842bae068c3779a950152aa21d5d64530f81
+          mkdir -p "$RUNNER_TEMP/shepherd-baseline"
+          git archive 9e6a842bae068c3779a950152aa21d5d64530f81 | tar -x -C "$RUNNER_TEMP/shepherd-baseline"
+      - name: Benchmark baseline and current source sequentially
+        run: |
+          env -u PYTHONPATH python scripts/benchmark_io.py --source-root "$RUNNER_TEMP/shepherd-baseline" --repeat 3 > "$RUNNER_TEMP/baseline.json"
+          env -u PYTHONPATH python scripts/benchmark_io.py --source-root "$GITHUB_WORKSPACE" --repeat 3 > "$RUNNER_TEMP/current.json"
+          python - "$RUNNER_TEMP/baseline.json" "$RUNNER_TEMP/current.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          baseline, current = (json.loads(Path(p).read_text()) for p in sys.argv[1:])
+          lines = ["## I/O performance (Python 3.11)", "",
+                   "| Workload | Base (s) | Current (s) | Speedup | Base peak | Current peak |",
+                   "| --- | ---: | ---: | ---: | ---: | ---: |"]
+          for before, after in zip(baseline["results"], current["results"]):
+              assert before["name"] == after["name"]
+              lines.append(f'| {after["name"]} | {before["median_s"]:.4f} | {after["median_s"]:.4f} | '
+                           f'{before["median_s"] / after["median_s"]:.2f}x | '
+                           f'{before["peak_python_bytes"]:,} B | {after["peak_python_bytes"]:,} B |')
+          report = "\n".join(lines) + "\n"
+          print(report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(report)
+          print("BASELINE_JSON=" + json.dumps(baseline))
+          print("CURRENT_JSON=" + json.dumps(current))
+          PY
+
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e . ruff==0.12.10 pyright==1.1.403
+      - name: Check source syntax and undefined names
+        run: ruff check --select E9,F821,F822,F823 src tests/test_io_perf.py scripts/benchmark_io.py
+      - name: Compare type diagnostics against the unchanged baseline
+        run: |
+          git fetch --depth=1 origin 9e6a842bae068c3779a950152aa21d5d64530f81
+          mkdir -p "$RUNNER_TEMP/shepherd-baseline"
+          git archive 9e6a842bae068c3779a950152aa21d5d64530f81 | tar -x -C "$RUNNER_TEMP/shepherd-baseline"
+          python scripts/check_type_delta.py "$RUNNER_TEMP/shepherd-baseline" "$GITHUB_WORKSPACE"

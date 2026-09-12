@@ -482,7 +482,10 @@ def run_remote_gate(
 
             started = time.monotonic()
             try:
-                res = run_streaming(_remote_argv(cfg, test_line), timeout=timeout + 60, on_line=on_line)
+                res = run_streaming(
+                    _remote_argv(cfg, test_line), timeout=timeout + 60,
+                    on_line=on_line, output_limit=4000,
+                )
             except OSError as exc:
                 return GateResult(False, None, "", infra_error=f"could not run ssh: {exc}")
             elapsed = time.monotonic() - started

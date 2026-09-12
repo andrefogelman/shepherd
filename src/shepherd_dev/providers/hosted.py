@@ -155,6 +155,7 @@ def run_cli_worker(
             cwd=str(clone),
             timeout=max(MIN_WORKER_TIMEOUT, budget_seconds),
             env={**os.environ, "CI": os.environ.get("CI", "1")},
+            output_limit=4000,
         )
     except OSError as exc:
         return ExecResult(

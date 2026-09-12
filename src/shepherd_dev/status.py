@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import re
 import time
+from heapq import nlargest
 from pathlib import Path
+from typing import Iterable
 
-from .events import load_run_events
+from .events import iter_run_events
 
 #: A run with no summary and no event for this long is presumed dead.
 STALE_AFTER_SECONDS = 30 * 60
@@ -36,32 +38,48 @@ def runs_status(root: Path | None = None, limit: int = 10) -> list[dict]:
 
     base = Path(root) if root else _default_runs_root()
     try:
-        run_ids = sorted((p.name for p in base.iterdir() if p.is_dir()), reverse=True)
+        run_ids = nlargest(max(1, limit), (p.name for p in base.iterdir() if p.is_dir()))
     except Exception:
         return []
     rows: list[dict] = []
     now = time.time()
-    for run_id in run_ids[: max(1, limit)]:
-        events = load_run_events(run_id, root=base)
-        if not events:
+    for run_id in run_ids:
+        count = 0
+        first_ts = last_ts = now
+        summary: dict | None = None
+        phase_ev: dict | None = None
+
+        def tracked_events():
+            nonlocal count, first_ts, last_ts, summary, phase_ev
+            for event in iter_run_events(run_id, root=base):
+                if count == 0:
+                    first_ts = _as_ts(event.get("ts"), now)
+                count += 1
+                last_ts = _as_ts(event.get("ts"), first_ts)
+                if event.get("kind") == "run.summary":
+                    summary = event
+                elif event.get("kind") == "phase.start":
+                    phase_ev = event
+                yield event
+
+        # Every call rereads disk, but only aggregates survive each event.
+        # Verbose gate output can dominate a log; status needs none of its text.
+        metrics = run_telemetry(tracked_events())
+        if not count:
             continue
         # A run's own log can be truncated or hand-edited, and float() on a
         # bad `ts` raised out of this loop — so ONE damaged run made `status`
         # list none of them. Status is the tool you reach for when something
         # already went wrong; it has to survive the wreckage it reports on.
-        first_ts = _as_ts(events[0].get("ts"), now)
-        last_ts = _as_ts(events[-1].get("ts"), first_ts)
-        summary = next((e for e in reversed(events) if e.get("kind") == "run.summary"), None)
-        phase_ev = next((e for e in reversed(events) if e.get("kind") == "phase.start"), None)
         phase = (phase_ev or {}).get("payload", {}).get("label")
         attempt = (phase_ev or {}).get("attempt")
         row: dict = {
             "run_id": run_id,
-            "events": len(events),
+            "events": count,
             "elapsed_s": round((last_ts if summary else now) - first_ts, 1),
             "phase": phase,
             "attempt": attempt,
-            **run_telemetry(events),
+            **metrics,
         }
         if summary is not None:
             payload = summary.get("payload") or {}
@@ -83,7 +101,7 @@ def runs_status(root: Path | None = None, limit: int = 10) -> list[dict]:
     return rows
 
 
-def run_telemetry(events: list[dict]) -> dict:
+def run_telemetry(events: Iterable[dict]) -> dict:
     """Tokens, cost, launches and models summed over a run's `worker.result`
     events (worker attempts and reviewer alike). Empty when none were
     recorded — a run whose stream was not tailed, or one killed mid-launch."""
@@ -91,22 +109,27 @@ def run_telemetry(events: list[dict]) -> dict:
     cost = 0.0
     launches = 0
     models: set[str] = set()
-    for event in events:
-        if event.get("kind") != "worker.result":
-            continue
-        p = event.get("payload") or {}
-        launches += 1
-        tokens_in += int(p.get("input_tokens") or 0)
-        tokens_out += int(p.get("output_tokens") or 0)
-        cached += int(p.get("cache_read_input_tokens") or 0)
-        try:
-            cost += float(p.get("total_cost_usd") or 0.0)
-        except (TypeError, ValueError):
-            pass
-        if p.get("model"):
-            models.add(str(p["model"]))
-        for name in p.get("models") or []:
-            models.add(str(name))
+
+    def counted_events():
+        nonlocal tokens_in, tokens_out, cached, cost, launches
+        for event in events:
+            if event.get("kind") == "worker.result":
+                p = event.get("payload") or {}
+                launches += 1
+                tokens_in += int(p.get("input_tokens") or 0)
+                tokens_out += int(p.get("output_tokens") or 0)
+                cached += int(p.get("cache_read_input_tokens") or 0)
+                try:
+                    cost += float(p.get("total_cost_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                if p.get("model"):
+                    models.add(str(p["model"]))
+                for name in p.get("models") or []:
+                    models.add(str(name))
+            yield event
+
+    behaviour = behaviour_metrics(counted_events())
     out: dict = {}
     if launches:
         out.update({
@@ -117,14 +140,14 @@ def run_telemetry(events: list[dict]) -> dict:
             "cost_usd": round(cost, 4),
             "models": sorted(models),
         })
-    out.update(behaviour_metrics(events))
+    out.update(behaviour)
     return out
 
 
 _EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 
-def behaviour_metrics(events: list[dict]) -> dict:
+def behaviour_metrics(events: Iterable[dict]) -> dict:
     """How the agents spent their turns, from the tool events:
 
     - `explore_calls`: tool calls in the FIRST worker attempt before its

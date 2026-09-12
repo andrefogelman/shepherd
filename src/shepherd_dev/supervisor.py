@@ -475,8 +475,10 @@ def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> Non
             continue
         target = dest / entry.name
         done = False
-        for argv in (["cp", "-c", "-R", str(entry), str(target)],
-                     ["cp", "-R", str(entry), str(target)]):
+        commands = [["cp", "-R", str(entry), str(target)]]
+        if sys.platform == "darwin":
+            commands.insert(0, ["cp", "-c", "-R", str(entry), str(target)])
+        for argv in commands:
             try:
                 if subprocess.run(argv, capture_output=True).returncode == 0:
                     done = True
@@ -1963,7 +1965,7 @@ def _run_gate(
 
             res = run_streaming(
                 test_cmd, shell=True, cwd=workdir, timeout=timeout, on_line=on_line,
-                env=gate_env(),
+                env=gate_env(), output_limit=4000,
             )
         except OSError as exc:
             return GateResult(False, None, "", infra_error=f"could not run test suite: {exc}")
