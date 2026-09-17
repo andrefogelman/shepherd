@@ -1,6 +1,6 @@
 [project]
 name = "shepherd-dev"
-version = "0.1.40"
+version = "0.1.41"
 description = "Supervised AI development layer on Shepherd (arXiv 2605.10913): sandboxed Claude workers, deterministic policy + test gate, human-only settlement, coordinated parallel workers."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,11 +13,16 @@ dependencies = [
 # Patched build of shepherd-ai, from the fork andrefogelman/shepherd-ai
 # (of shepherd-agents/shepherd). Neither fix is reported upstream yet; drop
 # this override once upstream ships them and PyPI's shepherd-ai picks them up.
-# The fork's main tracks upstream — 0.3.3 is upstream@4b44f4e merged in at
-# @5fef8d6, so this wheel is ahead of PyPI's 0.3.0 by five upstream fixes as
-# well as the two below. The two that matter here: FileManifest.created_at is
-# tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
+# The fork's main tracks upstream — 0.3.4 is upstream v0.3.1 (@d34d5ca, citation
+# checking as a packaged workflow) merged in at @d81dd41, so this wheel is ahead
+# of PyPI's 0.3.1 by the two fixes below. Carried from 0.3.3: FileManifest.created_at
+# is tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
 # workspace carrier by platform instead of hardcoding APFS-only clonefile.
+#
+# 0.3.4 também conserta um vermelho que era NOSSO: desde 0.3.2 o patch @0692b65
+# mudou o contrato do symlink e não tocou nos testes que afirmavam o antigo, então
+# test_copy_diff_rejects_symlinks e test_clonefile_diff_rejects_symlinks falhavam
+# em toda build do fork (@8ffbb49 corrige os dois — o Clonefile herda do Copy).
 #
 # Both local fixes are the same shape: the substrate walked a real tree and
 # crashed on something ordinary that lives in one.
@@ -40,10 +45,10 @@ dependencies = [
 # so a published tag's assets on andrefogelman/shepherd-ai must NEVER be
 # replaced or re-uploaded. Any future change to this wheel — even a trivial
 # one — gets a NEW tag and a corresponding uv.lock update. v0.3.1-dotgit-fix
-# and v0.3.2-symlink-fix are left published and untouched for exactly that
-# reason.
+# v0.3.2-symlink-fix and v0.3.3-upstream-sync are left published and untouched
+# for exactly that reason.
 [tool.uv.sources]
-shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.3-upstream-sync/shepherd_ai-0.3.3-py3-none-any.whl" }
+shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.4-upstream-sync/shepherd_ai-0.3.4-py3-none-any.whl" }
 
 [project.scripts]
 shepherd-dev = "shepherd_dev.cli:entry"

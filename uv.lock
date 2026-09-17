@@ -324,8 +324,8 @@ wheels = [
 
 [[package]]
 name = "shepherd-ai"
-version = "0.3.3"
-source = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.3-upstream-sync/shepherd_ai-0.3.3-py3-none-any.whl" }
+version = "0.3.4"
+source = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.4-upstream-sync/shepherd_ai-0.3.4-py3-none-any.whl" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
@@ -333,33 +333,37 @@ dependencies = [
     { name = "tomli-w" },
 ]
 wheels = [
-    { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.3-upstream-sync/shepherd_ai-0.3.3-py3-none-any.whl", hash = "sha256:27f2a568a192e5a65af2c70e1047bc4c54c71430c25c7e5ff8fb23dd62f5e4d2" },
+    { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.4-upstream-sync/shepherd_ai-0.3.4-py3-none-any.whl", hash = "sha256:1fafa366a527d4d26040ec5d2abb30e120f1e08c9b78690ac05c12fecc021f2d" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = ">=0.1.0" },
-    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
+    { name = "beautifulsoup4", marker = "extra == 'all'", specifier = ">=4.12,<5" },
+    { name = "beautifulsoup4", marker = "extra == 'citation-checker'", specifier = ">=4.12,<5" },
+    { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = ">=0.1.18,<0.2" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.18,<0.2" },
     { name = "click", specifier = ">=8.0" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1.66" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.66" },
+    { name = "pdfplumber", marker = "extra == 'all'", specifier = ">=0.11,<0.12" },
+    { name = "pdfplumber", marker = "extra == 'citation-checker'", specifier = ">=0.11,<0.12" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygit2", specifier = ">=1.13.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["all", "claude", "openai"]
+provides-extras = ["all", "citation-checker", "claude", "openai"]
 
 [[package]]
 name = "shepherd-dev"
-version = "0.1.40"
+version = "0.1.41"
 source = { editable = "." }
 dependencies = [
     { name = "shepherd-ai" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "shepherd-ai", url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.3-upstream-sync/shepherd_ai-0.3.3-py3-none-any.whl" }]
+requires-dist = [{ name = "shepherd-ai", url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.4-upstream-sync/shepherd_ai-0.3.4-py3-none-any.whl" }]
 
 [[package]]
 name = "tomli-w"
