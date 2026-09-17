@@ -1,6 +1,6 @@
 {
   "name": "shepherd-dev",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Supervised AI development via Shepherd (arXiv 2605.10913): sandboxed workers, deterministic test gate, skeptical reviewer, human-only settlement. Ships the shepherd-dev usage skill and the /shepherd-dev:run, run2, settle, settle-par, init, optimize commands.",
   "author": { "name": "Andre Fogelman" },
   "homepage": "https://github.com/andrefogelman/shepherd",
