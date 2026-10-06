@@ -1,7 +1,7 @@
 """The repo's own AGENTS.md fits the worker's instruction budget.
 
-`workspace_instructions` hands the worker the first INSTRUCTIONS_BUDGET
-characters of AGENTS.md and cuts the rest. AGENTS.md promises that what the
+`workspace_instructions` hands the worker the paragraphs of AGENTS.md that fit
+in INSTRUCTIONS_BUDGET and cuts the rest. AGENTS.md promises that what the
 worker needs (invariants, commands, language) sits before that cut; an edit
 that grows the top of the file would break the promise silently, because the
 pack never errors on a truncated instruction file. This pins the promise to
@@ -12,11 +12,13 @@ file is meant to fill the budget. Only the file's content moves the cut: both
 the pack and this test read it through `read_text`, whose newline translation
 makes a CRLF checkout measure the same as an LF one.
 
-The cut itself is a raw character offset, so where it lands matters: the
-section right after "Language and style" is plain prose on purpose, with no
-fence and no inline code near its start, and the parity checks below keep it
-that way. A cut inside a fence or a span hands the worker an open code block
-that swallows the marker. The checks assume AGENTS.md uses backticks only as
+The pack cuts on the last blank line in the second half of the budget that
+leaves every block closed (`cut_to_fit`; otherwise it falls back to a raw
+cut), so for this file the marker follows a whole paragraph. The
+section right after "Language and style" is still plain prose near its start
+on purpose, and the parity checks below stay as this file's own guard: a cut
+inside a fence or a span would hand the worker an open code block that
+swallows the marker. The checks assume AGENTS.md uses backticks only as
 Markdown syntax (no escaped or literal backticks, no double-backtick spans).
 """
 

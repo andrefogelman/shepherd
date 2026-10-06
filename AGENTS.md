@@ -2,10 +2,10 @@
 
 Read by humans and by every coding agent that opens the repo, including
 shepherd-dev's own worker when it runs against this checkout. The context pack
-injects just under `INSTRUCTIONS_BUDGET` (4,000) characters of this file, the
-rest of the budget going to a truncation marker (`src/shepherd_dev/contextpack.py`;
-the budget is shared with `CLAUDE.md` and `.github/copilot-instructions.md`
-when they exist), so what the worker needs comes first.
+injects up to `INSTRUCTIONS_BUDGET` (4,000) characters of this file, cut at
+the last empty line that fits outside a code block (`cut_to_fit` in
+`src/shepherd_dev/contextpack.py`; the budget is shared with `CLAUDE.md` and
+`.github/copilot-instructions.md`), so what the worker needs comes first.
 Where this file conflicts with a skill or a tool default, this file wins.
 
 ## Invariants
