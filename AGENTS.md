@@ -60,6 +60,15 @@ Portuguese material stays as it is. `docs/MANUAL.md` (Portuguese) is kept in
 step with `docs/MANUAL.en.md`. A commit message says the defect observed and
 the mechanism of the change, not the file list.
 
+## What is not tested here
+
+- Real providers (`claude`, `codex`, `grok` CLIs) cost tokens and need a login;
+  the suite stubs them. `--provider static` is the offline dry run.
+- Native jails (macOS Seatbelt, Linux Landlock) are exercised by provider runs,
+  not by the suite.
+- The performance and type-delta jobs compare against a pinned baseline
+  commit; a regression there is a finding to fix, not a number to re-pin.
+
 ## Gate at the start of every task
 
 ```bash
@@ -137,12 +146,3 @@ the suite and publishes the GitHub Release (`.github/workflows/release.yml`).
 Notes written by hand before the tag push win over the generated ones; the
 workflow leaves an existing release alone. `updatecheck.py` reads the version
 from `main`, so an unbumped change is invisible to `shepherd-dev update`.
-
-## What is not tested here
-
-- Real providers (`claude`, `codex`, `grok` CLIs) cost tokens and need a login;
-  the suite stubs them. `--provider static` is the offline dry run.
-- Native jails (macOS Seatbelt, Linux Landlock) are exercised by provider runs,
-  not by the suite.
-- The performance and type-delta jobs compare against a pinned baseline
-  commit; a regression there is a finding to fix, not a number to re-pin.

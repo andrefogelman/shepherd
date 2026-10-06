@@ -48,6 +48,9 @@ class TestRepoAgentsMdFitsBudget(unittest.TestCase):
         # ("--- AGENTS.md ---") sits outside it.
         content = visible.split("\n", 1)[1]
         self.assertLessEqual(len(content), INSTRUCTIONS_BUDGET)
+        # The cut must land in prose: a fence left open hands the worker a
+        # code block that swallows the marker and whatever the pack adds next.
+        self.assertEqual(visible.count("```") % 2, 0, "the cut fell inside a code fence")
         for needle in (
             "## Invariants",
             "**Generic solutions only.**",
