@@ -11,10 +11,18 @@ The headroom past the last needle is a few dozen characters on purpose: the
 file is meant to fill the budget. Only the file's content moves the cut: both
 the pack and this test read it through `read_text`, whose newline translation
 makes a CRLF checkout measure the same as an LF one.
+
+The cut itself is a raw character offset, so where it lands matters: the
+section right after "Language and style" is plain prose on purpose, with no
+fence and no inline code near its start, and the parity checks below keep it
+that way. A cut inside a fence or a span hands the worker an open code block
+that swallows the marker. The checks assume AGENTS.md uses backticks only as
+Markdown syntax (no escaped or literal backticks, no double-backtick spans).
 """
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -48,12 +56,11 @@ class TestRepoAgentsMdFitsBudget(unittest.TestCase):
         # ("--- AGENTS.md ---") sits outside it.
         content = visible.split("\n", 1)[1]
         self.assertLessEqual(len(content), INSTRUCTIONS_BUDGET)
-        # The cut must land in prose: a fence left open hands the worker a
-        # code block that swallows the marker and whatever the pack adds next.
+        # The cut must land in prose (see the module docstring): an open fence
+        # or an open inline span would swallow the marker.
         self.assertEqual(visible.count("```") % 2, 0, "the cut fell inside a code fence")
-        # Same for inline spans: an odd backtick count means the prefix ends
-        # inside one (Pullfrog caught `` (`claud `` + marker on PR #8).
-        self.assertEqual(visible.count("`") % 2, 0, "the cut fell inside an inline code span")
+        prose = re.sub(r"```.*?```", "", visible, flags=re.S)  # fences already judged above
+        self.assertEqual(prose.count("`") % 2, 0, "the cut fell inside an inline code span")
         for needle in (
             "## Invariants",
             "**Generic solutions only.**",

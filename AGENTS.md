@@ -62,7 +62,7 @@ the mechanism of the change, not the file list.
 
 ## What is not tested here
 
-- Real providers, the claude, codex and grok CLIs, cost tokens and need a
+- Real providers (the claude, codex and grok CLIs) cost tokens and need a
   login, so the suite stubs them; the offline dry run is `--provider static`.
 - Native jails (macOS Seatbelt, Linux Landlock) are exercised by provider runs,
   not by the suite.
