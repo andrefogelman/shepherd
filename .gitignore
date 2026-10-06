@@ -8,5 +8,9 @@ __pycache__/
 quickstart_demo.py
 agent_task.py
 
+# evidence captured while proving a change (see AGENTS.md); it is attached
+# to the PR, never committed
+.artifacts/
+
 # macOS finder droppings
 .DS_Store
