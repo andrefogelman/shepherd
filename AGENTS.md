@@ -62,8 +62,8 @@ the mechanism of the change, not the file list.
 
 ## What is not tested here
 
-- Real providers (`claude`, `codex`, `grok` CLIs) cost tokens and need a login;
-  the suite stubs them. `--provider static` is the offline dry run.
+- Real providers, the claude, codex and grok CLIs, cost tokens and need a
+  login, so the suite stubs them; the offline dry run is `--provider static`.
 - Native jails (macOS Seatbelt, Linux Landlock) are exercised by provider runs,
   not by the suite.
 - The performance and type-delta jobs compare against a pinned baseline

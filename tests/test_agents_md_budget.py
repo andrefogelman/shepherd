@@ -51,6 +51,9 @@ class TestRepoAgentsMdFitsBudget(unittest.TestCase):
         # The cut must land in prose: a fence left open hands the worker a
         # code block that swallows the marker and whatever the pack adds next.
         self.assertEqual(visible.count("```") % 2, 0, "the cut fell inside a code fence")
+        # Same for inline spans: an odd backtick count means the prefix ends
+        # inside one (Pullfrog caught `` (`claud `` + marker on PR #8).
+        self.assertEqual(visible.count("`") % 2, 0, "the cut fell inside an inline code span")
         for needle in (
             "## Invariants",
             "**Generic solutions only.**",
