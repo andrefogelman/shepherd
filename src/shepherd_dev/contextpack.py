@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -408,23 +409,167 @@ TRUNCATION_MARKER = "[... truncated ...]"
 _MARKER_RESERVE = len(TRUNCATION_MARKER) + 1
 
 
+#: A Markdown fence line: three or more backticks or tildes, up to three
+#: spaces in, then whatever follows (an info string on an opener). A block
+#: closes on a line whose run is the same character, at least as long as the
+#: opener, with nothing but whitespace after it; a run carrying an info string
+#: inside an open block is content, and so is a backtick run whose info string
+#: holds a backtick (that line is an inline span). The opener's run is what a
+#: cut echoes.
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _walk_fences(text: str) -> Iterator[tuple[str, str | None, bool]]:
+    """Each line of `text` (split on newlines, so offsets add up) with the
+    fence run of the block in effect after it (None outside any block) and
+    whether the line was taken as a fence line: an opener, a closer, or a
+    fence-looking line inside a block, which is content. A backtick run whose
+    info string holds a backtick is an inline span and yields False."""
+    opener: str | None = None
+    for line in text.split("\n"):
+        m = _FENCE_LINE.match(line)
+        if m is None:
+            yield line, opener, False
+            continue
+        run, rest = m.groups()
+        if opener is None and run[0] == "`" and "`" in rest:
+            yield line, opener, False  # a backtick fence's info string cannot hold a backtick
+            continue
+        if opener is None:
+            opener = run
+        elif run.startswith(opener) and not rest.strip():
+            opener = None
+        yield line, opener, True
+
+
+def _unclosed_fence(text: str) -> str | None:
+    """The fence run (```, ````, ~~~ ...) of the block `text` leaves open, or
+    None when every block is closed."""
+    opener: str | None = None
+    for _, opener, _ in _walk_fences(text):
+        pass
+    return opener
+
+
+def _open_span(text: str) -> int | None:
+    """Offset of the backtick run that opens an inline code span `text`
+    leaves unclosed, or None. Only prose counts (fence lines and code blocks
+    are skipped); a span closes on the next run of the same length, a run of
+    another length inside it is literal, and a blank line or a fence line ends
+    the paragraph, so a run left open before it was a literal backtick."""
+    open_at: int | None = None
+    open_len = 0
+    offset = 0
+    for line, opener, matched in _walk_fences(text):
+        if matched:
+            open_at = None
+        elif opener is None:
+            if not line.strip():
+                open_at = None
+            for m in re.finditer(r"`+", line):
+                if open_at is None:
+                    open_at, open_len = offset + m.start(), len(m.group())
+                elif len(m.group()) == open_len:
+                    open_at = None
+        offset += len(line) + 1
+    return open_at
+
+
+def _raw_cut(text: str, keep: int) -> str:
+    """At most `keep` characters: a prefix of `text` that leaves no code block
+    and no inline span open, plus the closer of a block the prefix is inside.
+
+    The prefix only ever shrinks, so it stays a prefix of `text` and the
+    fence state can be judged against the real lines. A cut that lands inside
+    a fence line is backed up to the line before it (a partial run is not a
+    fence, and keeping it would mislead the tracker); an open inline span is
+    backed up to before its opening backtick; a block left open gets its own
+    run as a closer, with the prefix trimmed to make room. Each step shrinks
+    the prefix, so the loop ends; an empty prefix means only the marker fits.
+    """
+    body = text[:keep]
+    prev = len(body) + 1
+    while body:
+        if len(body) >= prev:  # a stall would spin forever; fail loudly instead, even under -O
+            raise RuntimeError("_raw_cut did not shrink its prefix")
+        prev = len(body)
+        opener = _unclosed_fence(body)
+        closer = "\n" + opener if opener is not None else ""
+        if len(body) + len(closer) > keep:
+            body = body[: max(0, keep - len(closer))]
+            continue
+        start = body.rfind("\n") + 1
+        line = text[start:].partition("\n")[0]
+        # The raw regex is over-inclusive on purpose (it also matches a span
+        # line such as ```foo```): backing up one more line is always safe.
+        if _FENCE_LINE.match(line) and start < len(body) < start + len(line):
+            body = body[: max(0, start - 1)]
+            continue
+        open_at = _open_span(body)
+        if open_at is not None:
+            body = body[:open_at]
+            continue
+        return body + closer
+    return ""
+
+
+def cut_to_fit(text: str, limit: int) -> str:
+    """`text` when it fits in `limit`; otherwise a prefix that does, cut on a
+    paragraph boundary when one is near enough (below), closed by
+    TRUNCATION_MARKER. When `limit` is at most `_MARKER_RESERVE` nothing fits
+    and the result is the marker alone (longer than `limit` when `limit` is
+    below the marker's length; callers skip such a slot); above that the
+    result never exceeds `limit`.
+
+    The cut lands on the last empty line (two consecutive newlines) before
+    the limit that leaves every code block closed. Text is expected with LF
+    line endings, which `read_text` guarantees for the instruction files;
+    CRLF text has no "\\n\\n", so it skips the paragraph search and takes the
+    raw path below, still closed.
+    Cutting at a raw character offset handed the worker an open block (or an
+    open inline span) that swallowed the marker and whatever the pack
+    appended after it; an empty line closes any inline span, and the fence
+    check keeps the cut out of a block. The search never gives up more than
+    half the budget: when no empty line in the second half leaves every block
+    closed (one long paragraph, a wall of text, or a block that opened before
+    the halfway point), the cut stays near the raw offset, pulled back only
+    as far as closing what it leaves open requires (see `_raw_cut`), so the
+    worker never reads past an open block or span.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= _MARKER_RESERVE:
+        return TRUNCATION_MARKER
+    keep = limit - _MARKER_RESERVE
+    head = text[:keep]
+    floor = keep // 2  # never give up more than half the budget to find a blank line
+    pos = keep
+    while (pos := head.rfind("\n\n", 0, pos)) >= floor:
+        if _unclosed_fence(head[:pos]) is None:
+            return head[:pos] + "\n\n" + TRUNCATION_MARKER
+    body = _raw_cut(text, keep)
+    return (body + "\n" if body else "") + TRUNCATION_MARKER
+
+
 def workspace_instructions(repo_root: Path, budget: int = INSTRUCTIONS_BUDGET) -> str:
     """The repo's agent-instruction files, concatenated and capped. Empty when
-    none exist. Best-effort: unreadable entries are skipped."""
+    none exist. Best-effort: unreadable entries are skipped, and so is any
+    file met with the remaining budget at or below `_MARKER_RESERVE` (the
+    marker and its newline), since not one character of it would fit before
+    the marker; it is left out entirely rather than reduced to the marker."""
     parts: list[str] = []
     remaining = budget
     for rel in INSTRUCTION_FILES:
         path = repo_root / rel
         try:
-            if not path.is_file() or remaining <= 0:
+            if not path.is_file() or remaining <= _MARKER_RESERVE:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace").strip()
         except Exception:
             continue
         if not text:
             continue
-        if len(text) > remaining:
-            text = text[: max(0, remaining - _MARKER_RESERVE)] + "\n" + TRUNCATION_MARKER
+        text = cut_to_fit(text, remaining)
         parts.append(f"--- {rel} ---\n{text}")
         remaining -= len(text)
     return "\n\n".join(parts)
@@ -473,8 +618,7 @@ def build_pack(
     )
     sections: list[str] = [header]
     if plan_text:
-        if len(plan_text) > PLAN_TEXT_CAP:
-            plan_text = plan_text[:PLAN_TEXT_CAP - _MARKER_RESERVE] + "\n" + TRUNCATION_MARKER
+        plan_text = cut_to_fit(plan_text, PLAN_TEXT_CAP)
         sections.append(f"== FEATURE PLAN (pre-computed; follow it) ==\n{plan_text}\n")
     if memory_text:
         # Labelled as observations, not as instructions. These lines are

@@ -28,10 +28,17 @@ start, and `tests/test_agents_md_budget.py` asserts that the visible slice
 has an even number of fences and, with fences removed, an even number of
 backticks. Each assertion fails against the AGENTS.md of the commit it was
 added for (4faad35: one fence before the marker; 687e4f6: the cut after
-`` (`claud ``). The pack still cuts at a raw offset: a different repository's
-AGENTS.md can end up with an open block in the worker's prompt, and nothing
-in the suite asserts that behaviour either way. Pinned by
-`tests/test_agents_md_budget.py`.
+`` (`claud ``). That protected this repository's file only; the pack itself
+still cut at a raw offset, so any other repository's AGENTS.md (or a planner
+sketch over `PLAN_TEXT_CAP`) could hand the worker an open block. `cut_to_fit`
+now cuts on the last empty line (two consecutive newlines) before the budget
+that leaves every code block closed, and falls back to the raw offset only
+when no empty line in the second half of the budget does (one long paragraph,
+or a block that opened before the halfway point); the fallback closes an open
+block with its own fence run and drops an open inline span back to before its
+opening backtick, before the marker. Pinned by
+`tests/test_agents_md_budget.py`, `tests/test_contextpack.py::CutToFit` and the
+`test_plan_text_*` cases in `tests/test_contextpack.py::ContextPackEnrichment`.
 
 ### Bytecode the worker's own test run left behind became part of the proposal
 
