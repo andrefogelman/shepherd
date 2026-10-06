@@ -401,6 +401,11 @@ def repo_file_view(
 #: conventions on the FIRST attempt instead of learning them from review.
 INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md")
 INSTRUCTIONS_BUDGET = 4_000
+#: Closes any text the pack had to cut; what precedes it is all the worker gets.
+TRUNCATION_MARKER = "[... truncated ...]"
+#: What a cut keeps back for the marker and its newline, so a capped section
+#: never exceeds its cap once the marker is appended.
+_MARKER_RESERVE = len(TRUNCATION_MARKER) + 1
 
 
 def workspace_instructions(repo_root: Path, budget: int = INSTRUCTIONS_BUDGET) -> str:
@@ -419,7 +424,7 @@ def workspace_instructions(repo_root: Path, budget: int = INSTRUCTIONS_BUDGET) -
         if not text:
             continue
         if len(text) > remaining:
-            text = text[: max(0, remaining - 20)] + "\n[... truncated ...]"
+            text = text[: max(0, remaining - _MARKER_RESERVE)] + "\n" + TRUNCATION_MARKER
         parts.append(f"--- {rel} ---\n{text}")
         remaining -= len(text)
     return "\n\n".join(parts)
@@ -469,7 +474,7 @@ def build_pack(
     sections: list[str] = [header]
     if plan_text:
         if len(plan_text) > PLAN_TEXT_CAP:
-            plan_text = plan_text[:PLAN_TEXT_CAP - 20] + "\n[... truncated ...]"
+            plan_text = plan_text[:PLAN_TEXT_CAP - _MARKER_RESERVE] + "\n" + TRUNCATION_MARKER
         sections.append(f"== FEATURE PLAN (pre-computed; follow it) ==\n{plan_text}\n")
     if memory_text:
         # Labelled as observations, not as instructions. These lines are
