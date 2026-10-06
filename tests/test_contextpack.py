@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.contextpack import (  # noqa: E402
+    PLAN_TEXT_CAP,
+    TRUNCATION_MARKER,
     build_pack,
     repo_file_view,
     scan_repo,
@@ -128,6 +130,15 @@ class ContextPackEnrichment(unittest.TestCase):
         pack, _ = build_pack(root, "a thing", plan_text="1. do X\n2. do Y")
         self.assertIn("FEATURE PLAN", pack)
         self.assertIn("do X", pack)
+
+    def test_plan_text_over_the_cap_is_cut_and_marked(self):
+        root = _repo({"a.py": "x = 1\n"})
+        pack, _ = build_pack(root, "a thing", plan_text="x" * (PLAN_TEXT_CAP + 500))
+        self.assertIn(TRUNCATION_MARKER, pack)
+        kept = pack.split("FEATURE PLAN", 1)[1].split("\n", 1)[1].split(TRUNCATION_MARKER, 1)[0]
+        # The cap covers the whole section: the plan that survived, its
+        # newline and the marker.
+        self.assertLessEqual(len(kept) + len(TRUNCATION_MARKER), PLAN_TEXT_CAP)
 
     def test_planned_hallucination_ignored(self):
         root = _repo({"a.py": "x = 1\n"})

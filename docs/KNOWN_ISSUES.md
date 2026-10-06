@@ -10,6 +10,29 @@ None.
 
 ## Fixed
 
+### The worker's cut of AGENTS.md landed inside a code fence, then inside a code span
+
+**Was:** `workspace_instructions` keeps what fits of `INSTRUCTIONS_BUDGET`
+once the marker's reserve is taken (3,980 characters of the repo's
+instruction file) and appends the marker. The cut is a raw character offset.
+With the Gate section right after the worker-facing sections, it fell inside
+the Gate's bash fence, so the prefix the worker read ended with an open code
+block that swallowed the marker and whatever the pack appended next. Moving a
+prose section in front of the Gate fixed that, and the cut then fell inside
+`` `claude` `` in that section's first bullet: an open inline span, same
+effect. Both were found by the review bot on the PR, not by the suite, because
+the budget test only checked that the right sections preceded the marker.
+
+**Fix:** the section after "Language and style" is plain prose near its
+start, and `tests/test_agents_md_budget.py` asserts that the visible slice
+has an even number of fences and, with fences removed, an even number of
+backticks. Each assertion fails against the AGENTS.md of the commit it was
+added for (4faad35: one fence before the marker; 687e4f6: the cut after
+`` (`claud ``). The pack still cuts at a raw offset: a different repository's
+AGENTS.md can end up with an open block in the worker's prompt, and nothing
+in the suite asserts that behaviour either way. Pinned by
+`tests/test_agents_md_budget.py`.
+
 ### Bytecode the worker's own test run left behind became part of the proposal
 
 **Was:** with the gate command in its prompt, the worker runs the suite before
