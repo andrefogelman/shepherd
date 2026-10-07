@@ -138,7 +138,9 @@ task did not touch alone.
 A version bump touches five files in one commit (`chore: X.Y.Z`):
 `pyproject.toml`, `src/shepherd_dev/__init__.py`, `.claude-plugin/plugin.json`,
 `kimi.plugin.json` and `uv.lock` (run `uv lock`; CI's `lock` job fails
-otherwise). The bump reaches `main` by PR like anything else.
+otherwise, and `tests/test_version_sync.py` fails when the other three
+disagree with `pyproject.toml`). The bump reaches `main` by PR like anything
+else.
 
 A bump without a release is a version nobody can see. After the merge, the
 owner tags it (`git tag vX.Y.Z && git push origin vX.Y.Z`): the tag push runs
