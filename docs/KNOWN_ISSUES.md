@@ -10,7 +10,7 @@ None.
 
 ## Fixed
 
-### The worker's cut of AGENTS.md landed inside a code fence, then inside a code span
+### The pack handed the worker an open code block (cuts and file blocks)
 
 **Was:** `workspace_instructions` keeps what fits of `INSTRUCTIONS_BUDGET`
 once the marker's reserve is taken (3,980 characters of the repo's
@@ -20,18 +20,99 @@ the Gate's bash fence, so the prefix the worker read ended with an open code
 block that swallowed the marker and whatever the pack appended next. Moving a
 prose section in front of the Gate fixed that, and the cut then fell inside
 `` `claude` `` in that section's first bullet: an open inline span, same
-effect. Both were found by the review bot on the PR, not by the suite, because
-the budget test only checked that the right sections preceded the marker.
+effect. Both were found by the review bot on the PR, not by the suite,
+because the budget test only checked that the right sections preceded the
+marker. The same held for every other text the pack copies in: a planner
+sketch over `PLAN_TEXT_CAP` was cut at a raw offset too, and a file block
+(whole under `FULL_FILE_LIMIT`, or a Markdown skeleton's first lines) that
+ended inside a fence, such as an unfinished Markdown file or an unpaired
+fence in a docstring or comment, swallowed every `== FILE:` section after it.
 
 **Fix:** the section after "Language and style" is plain prose near its
 start, and `tests/test_agents_md_budget.py` asserts that the visible slice
 has an even number of fences and, with fences removed, an even number of
 backticks. Each assertion fails against the AGENTS.md of the commit it was
-added for (4faad35: one fence before the marker; 687e4f6: the cut after
-`` (`claud ``). The pack still cuts at a raw offset: a different repository's
-AGENTS.md can end up with an open block in the worker's prompt, and nothing
-in the suite asserts that behaviour either way. Pinned by
-`tests/test_agents_md_budget.py`.
+added for (4faad35: one fence before the marker; 687e4f6: the cut after ``
+(`claud ``). That protected this repository's file only; the pack itself
+still cut at a raw offset, so any other repository's AGENTS.md (or a planner
+sketch over `PLAN_TEXT_CAP`) could hand the worker an open block.
+`cut_to_fit` now cuts on the last empty line (two consecutive newlines)
+before the budget that leaves every code block closed, and falls back to the
+raw offset only when no empty line in the second half of the budget does (one
+long paragraph, or a block that opened before the halfway point); the
+fallback closes an open block with its own fence (indentation and run, so a
+block opened inside a list item is closed inside it) and drops an open inline
+span back to before its opening backtick, unless the real paragraph never
+closes that run within the budget past the cut: the callers put a blank line
+after the marker, so such a run is literal in CommonMark and stays. A span is
+judged per paragraph (a blank line, a fence line, a heading, a thematic
+break, a setext underline, a non-empty list item or the start of a block
+quote ends one, inside a quote as well), before the marker. Text that fits
+but itself leaves a block open gets that block's closer, so what the pack
+appends is not swallowed either. List items are tracked as containers: a
+block opened inside one (on the marker line or later) closes within the
+item's column window, and a dedented line ends the item and the block with no
+closer (a line dedented out of a block is never lazy: the opener ended the
+paragraph); with no block open, a dedented line that is a lazy continuation
+of the item's paragraph (prose after prose, even behind a quote marker,
+starting no block and bearing no marker) keeps the item instead, and a marker
+on a dedented line starts an item, as in cmark, where the list and not the
+paragraph is that line's container; a thematic break (`* * *`) is never read
+as markers. A blank line is spaces and tabs only, as in CommonMark (an NBSP
+line is paragraph text, and a vertical tab or form feed is content). A line
+four or more columns past its container with no paragraph to continue is
+indented code, not a paragraph, so the marker after it is an item (and so is
+a wide-gap item's content, even under a paragraph, so the line after it is
+not lazy); an item that began blank ends at the next blank line; and a `===`
+right behind a marker opens that item's paragraph instead of underlining an
+outer one. Not tracked: an item indented four or more columns in its
+container (indented code; tabs are read at their 4-column stops), a block
+quote as a container (a fence opened behind `>` is read as ending with the
+quote, which is where CommonMark ends it too, and its lines are code, so no
+line after them continues a paragraph), and HTML blocks (a line starting, up
+to three spaces in, with an open or closing tag, `<!--`, `<?`, `<!X` or
+`<![CDATA[`): the block is not tracked, so a fence run inside it is read as a
+fence; the closer the cut then appends is, to CommonMark, a fence opener
+after the HTML block ends (at a blank line, or at the end marker for `<pre`,
+`<script`, `<style`, `<textarea`, `<!--`, `<?`, `<!X` and `<![CDATA[`: the
+closing tag, `-->`, `?>`, `>` or `]]>`), and the marker and the section the
+pack appends after it land inside that block. An HTML comment or `<pre` left
+open before the cut swallows the marker the same way, as raw HTML. Markdown
+that opens a fence directly under an HTML line with no blank line is already
+read this way by cmark and GitHub, so the pack does not try to repair it. The
+span check is conservative rather than CommonMark-exact: a backtick run left
+pending in a paragraph hides the spans after it, a heading line is not
+rescanned, and a prefix's last line that continues the paragraph is judged as
+cut, so a cut can land inside a span CommonMark would have closed; nothing
+open reaches the worker either way, because the callers put a blank line
+after the marker, and a blank line after each section header keeps the file's
+first line from continuing the header's paragraph. A file met with a
+remaining budget of `_MARKER_RESERVE` or less is left out of
+`workspace_instructions` instead of being reduced to the marker alone, as it
+was. The file blocks of the pack got the same treatment: a file shown whole
+(up to `FULL_FILE_LIMIT`) or as a skeleton (its first lines, for a type with
+no signature prefixes, such as Markdown) that leaves a fence open gets its
+closer (`_closed`), since an unfinished Markdown file, an unpaired fence in a
+docstring or one in a comment swallowed every `== FILE:` section after it;
+the repository tree is closed the same way (a directory named ``` would
+otherwise open a fence there); a path is printed on one line, with control
+characters escaped (a newline in a file name put the rest of a header on a
+line of its own); a lone CR in a file is made a line ending before the check;
+and every section header is followed by a blank line, so the first line after
+it starts a block of its own. An HTML block a file leaves open (`<!--`,
+`<pre>`, `<script>` with no end) still swallows what follows: not tracked,
+like HTML blocks in the cut. Pinned by `tests/test_agents_md_budget.py`,
+`tests/test_contextpack.py::CutToFit`,
+`tests/test_contextpack.py::WorkspaceInstructionsBudget` and the
+`test_plan_text_*` cases,
+`test_a_planned_files_skeleton_does_not_leave_a_block_open`,
+`test_a_whole_file_that_ends_inside_a_block_does_not_swallow_the_next`,
+`test_whole_files_from_keywords_and_test_contracts_are_closed_too`,
+`test_a_path_that_looks_like_a_fence_does_not_swallow_the_pack`,
+`test_a_file_name_with_a_newline_stays_on_its_header_line`,
+`test_every_path_the_pack_prints_stays_on_one_line` and
+`test_a_lone_cr_in_a_file_is_a_line_ending_to_the_closer` in
+`tests/test_contextpack.py::ContextPackEnrichment`.
 
 ### Bytecode the worker's own test run left behind became part of the proposal
 
