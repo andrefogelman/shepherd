@@ -16,7 +16,11 @@ permissions:
 
 jobs:
   pullfrog:
-    runs-on: ubuntu-latest
+    # Runner efêmero no mac-ollama (14/10/2026, ordem do dono): VM tart clonada
+    # por job e apagada no fim, com `sudo` sem senha dentro dela, que o Pullfrog
+    # exige para guardar a credencial da assinatura Grok. Supervisor: anf-runners
+    # (GitHub App anf-runners; detalhes no CLAUDE.md do anf-nano).
+    runs-on: [self-hosted, pullfrog]
     permissions:
       id-token: write
       contents: read
