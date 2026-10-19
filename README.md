@@ -99,6 +99,8 @@ commands above, and the bootstrap script.
   [docs/2026-07-12-context-pack-ab-benchmark.md](docs/2026-07-12-context-pack-ab-benchmark.md)
   — measured on a real production repo: **448.7s → 128.6s (−71%, 3.5×)** worker
   wall-clock with the pack on, plus correct code placement.
+- **Plugin eval suite**: [docs/EVALS.md](docs/EVALS.md) — what `evals/` measures,
+  how to run it with `claude plugin eval`, the host it needs, calibration.
 - **Design doc**: `docs/2026-07-11-dev-layer-design.md` — including the
   empirically-verified constraints of shepherd-ai 0.3.0 (stateless
   per-invocation substrate, custody-based reviewer isolation, worktree as

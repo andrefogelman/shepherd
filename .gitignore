@@ -12,5 +12,8 @@ agent_task.py
 # to the PR, never committed
 .artifacts/
 
+# `claude plugin eval` output: transcripts and report.html of each run
+evals/results/
+
 # macOS finder droppings
 .DS_Store
