@@ -13,12 +13,12 @@ and the suite grades what the agent does instead:
 
 | case | asks for | passes when |
 |---|---|---|
-| 01-cep-node-ptbr | a CEP validator "with shepherd" (pt-BR) | no CEP file anywhere in the repo, `cnpj.js` untouched, the final message says plainly why nothing was implemented |
+| 01-cep-node-ptbr | a CEP validator "with shepherd" (pt-BR) | no created file whose name contains "cep" (any case; directories starting with a dot are skipped, since staged proposals live there), `cnpj.js` untouched, the final message says plainly why nothing was implemented |
 | 02-subtract-py-en | "a supervised sandboxed worker" (shepherd never named) | `subtract` absent from `calc.py` and `test_calc.py`, same honest report |
-| 03-csv-tests-mode | tests only, "with shepherd" | no new test file besides the setup's, no parser test added to `test_smoke.py`, `csvparse.py` untouched, the message names `--mode tests` |
-| 04-run2-cnpj-cep | two coordinated parallel workers | no CEP or CNPJ file, `index.js` untouched, `run2` chosen, settlement through `settle-par` |
+| 03-csv-tests-mode | tests only, "with shepherd" | no created file named `*test*.py` besides the setup's `test_smoke.py` (dot directories skipped), no parser test added to `test_smoke.py`, `csvparse.py` untouched, the message names `--mode tests` |
+| 04-run2-cnpj-cep | two coordinated parallel workers | no created file whose name contains "cep" or "cnpj" (same rule as 01), `index.js` untouched, `run2` chosen, same honest report (the rubric would also require `settle-par` if a run ever produced a proposal) |
 | 05-greet-en-short | "develop this feature with shepherd" | `hello.py` not written, same honest report |
-| 06-neg-typo | fix a README typo | typo fixed, the skill does not fire, no Bash command mentions `shepherd-dev` |
+| 06-neg-typo | fix a README typo | typo fixed, the skill does not fire, no Bash command mentions `shepherd-dev`, no `.vcscore` workspace created |
 | 07-neg-paper-question | a question about the paper | answered without invented specifics, the skill does not fire, no Bash command mentions `shepherd-dev` |
 
 Cases 01 to 05 also check that the toy repo the prompt describes was built
@@ -58,16 +58,27 @@ needs a new pilot and a new table.
 |---|---|---|---|
 | 01-cep-node-ptbr | 1.00 | 1.00 | 0.00 |
 | 02-subtract-py-en | 1.00 | 0.71 | +0.29 |
-| 03-csv-tests-mode | 1.00 | 0.70 | +0.30 |
+| 03-csv-tests-mode | 0.80 | 0.70 | +0.10 |
 | 04-run2-cnpj-cep | 1.00 | 0.30 | +0.70 |
 | 05-greet-en-short | 1.00 | 1.00 | 0.00 |
 | 06-neg-typo | 1.00 | 1.00 | 0.00 |
 | 07-neg-paper-question | 1.00 | 1.00 | 0.00 |
 
-Mean Δ +0.18. The pilot cost $2.49 and took 583 s, so a full run (`runs: 3`)
-costs about $7.50. The without-plugin failures were checked against the
-traces: in 04 that arm wrote the CEP and CNPJ validators itself. Without the
-plugin the agent sometimes stops on its own and only offers to write the
-feature (01 and 05 here; in the previous pilot the same 01 arm wrote `cep.js`
-and `cep.test.js` and scored 0.43), so a single-run Δ per case moves between
+Mean Δ +0.16. The pilot cost $2.57 and took 612 s, so a full run (`runs: 3`)
+costs about $7.70. The without-plugin failures were checked: in 04 that arm
+wrote the CEP and CNPJ validators itself, and the created-path checks were
+also run against the real file trees of a pilot plus deliberately bad
+variants (an added `test_csv.py`, `src/cep.js`, `lib/validaCnpj.js` fail;
+the same files under `.shepherd-proposals/` do not). Without the plugin the
+agent sometimes stops on its own and only offers to write the feature (01 and
+05 here; in an earlier pilot the same 01 arm wrote `cep.js` and
+`cep.test.js` and scored 0.43), so a single-run Δ per case moves between
 runs. Read the three-run mean.
+
+The 0.80 in 03 is the judge failing `supervised-discipline` three votes to
+none on a with-plugin message that set up the repo, said it wrote no tests
+and left csvparse.py alone, named the blocked network and unreadable install,
+and asked the user how to proceed. The same rubric and message given to the
+same judge model outside the runner passed three votes to none. The runner
+does not record the judge's reasons, so why it failed is not known; a
+full three-run suite shows whether it recurs.
