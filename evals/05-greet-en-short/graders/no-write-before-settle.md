@@ -1,5 +1,7 @@
 ---
-type: file_exists
-path: "repo/hello.py"
-exists: false
+type: regex
+target: files
+match: not_contains
+flags: mi
 ---
+^repo/(?!\.|[^\n]*/\.)(?![^\n]*\.pyc$)(?!test_hello\.py$)[^\n]*(?:hello|greet)[^\n]*$
