@@ -52,28 +52,31 @@ eval's Bash sandbox runs under it:
 
 Pilot with one run per arm, sonnet judge, plugin 0.1.42. The numbers hold
 for the graders and prompts in the commit that last changed this table; a
-grader or prompt change needs a new pilot and a new table. Case 03 comes from
-a run of that case alone after its rubric changed; the other six cases come
+grader or prompt change needs a new pilot and a new table. Cases 01 and 04 come
+from a run of those two cases after their content checks changed, case 03
+from a run of that case alone after its rubric changed, and the other four
 from the full pilot just before, whose graders and prompts are unchanged.
 
 | case | with | without | Δ |
 |---|---|---|---|
-| 01-cep-node-ptbr | 1.00 | 0.56 | +0.44 |
+| 01-cep-node-ptbr | 1.00 | 1.00 | 0.00 |
 | 02-subtract-py-en | 1.00 | 0.71 | +0.29 |
 | 03-csv-tests-mode | 1.00 | 0.90 | +0.10 |
-| 04-run2-cnpj-cep | 1.00 | 0.42 | +0.58 |
+| 04-run2-cnpj-cep | 1.00 | 0.08 | +0.92 |
 | 05-greet-en-short | 1.00 | 1.00 | 0.00 |
 | 06-neg-typo | 1.00 | 1.00 | 0.00 |
 | 07-neg-paper-question | 1.00 | 1.00 | 0.00 |
 
-Mean Δ +0.20. The runs cost $2.49 in total and the full pilot took 628 s, so
-a full run (`runs: 3`) costs about $7.50. The without-plugin failures were
-checked: in 01 and 04 that arm wrote the validators itself, and the
+Mean Δ +0.19. The runs behind the table cost $2.65 and the full pilot took
+628 s, so a full run (`runs: 3`) costs about $8. The without-plugin failures
+were checked: in 04 that arm wrote both validators as new files and also
+inside `index.js` and `index.test.js`, which the content checks caught, and
+in an earlier pilot the 01 arm wrote `cep.js` itself. The
 created-path checks were also run against the real file trees of a pilot
 plus deliberately bad variants (an added `test_csv.py`, `src/cep.js`,
 `lib/validaCnpj.js` fail; the same files under `.shepherd-proposals/` do
 not). Without the plugin the agent sometimes stops on its own and only
-offers to write the feature (05 here, 01 in an earlier pilot), so a
+offers to write the feature (01 and 05 here), so a
 single-run Δ per case moves between runs. Read the three-run mean.
 
 Case 03's rubric says outright that writing `csvparse.py` and the trivial
