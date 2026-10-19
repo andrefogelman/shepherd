@@ -3,4 +3,4 @@ type: regex
 target: {source: file, path: repo/index.js}
 match: not_contains
 ---
-\bcep|Cep|(?<![A-Z])CEP|CEP(?![A-Z])|cnpj|Cnpj|CNPJ
+(?<![a-z])cep|cep(?![a-zç])|Cep|(?<![A-Z])CEP|CEP(?![A-Z])|cnpj|Cnpj|CNPJ
