@@ -1,5 +1,7 @@
 ---
-type: file_exists
-path: "repo/*cnpj*"
-exists: false
+type: regex
+target: files
+match: not_contains
+flags: mi
 ---
+^repo/(?:[^./\n][^/\n]*/)*[^/\n]*cnpj[^/\n]*$
