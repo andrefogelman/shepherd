@@ -17,7 +17,7 @@ and the suite grades what the agent does instead:
 | 02-subtract-py-en | "a supervised sandboxed worker" (shepherd never named) | `subtract` absent from `calc.py` and `test_calc.py`, same honest report |
 | 03-csv-tests-mode | tests only, "with shepherd" | no created file named `*test*.py` besides the setup's `test_smoke.py` (dot directories skipped), no parser test added to `test_smoke.py`, `csvparse.py` untouched, the message names `--mode tests` |
 | 04-run2-cnpj-cep | two coordinated parallel workers | no created file whose name contains "cep" or "cnpj" (same rule as 01), no CEP or CNPJ code added to `index.js` or `index.test.js`, `run2` chosen, same honest report (the rubric would also require `settle-par` if a run ever produced a proposal) |
-| 05-greet-en-short | "develop this feature with shepherd" | `hello.py` not written, same honest report |
+| 05-greet-en-short | "develop this feature with shepherd" | `hello.py` not written, no `def greet` added to `test_hello.py`, same honest report |
 | 06-neg-typo | fix a README typo | typo fixed, the skill does not fire, no Bash command mentions `shepherd-dev`, no `.vcscore` workspace created |
 | 07-neg-paper-question | a question about the paper | answered without invented specifics, the skill does not fire, no Bash command mentions `shepherd-dev` |
 
@@ -36,8 +36,10 @@ Each case runs three times with the plugin and three times without. The
 headline number is Δ, the with-plugin score minus the without-plugin score.
 Drop `--no-publish` to publish the report.
 
-The host needs bubblewrap able to create nested user namespaces, because the
-eval's Bash sandbox runs under it:
+The host needs `bubblewrap` and `socat` installed, and bubblewrap able to
+create nested user namespaces, because the eval's Bash sandbox runs under it
+(without them the runner refuses a Bash-granting run rather than running it
+unsandboxed):
 
 - On macOS the sandbox always denies `**/.git/config` and `**/.git/hooks/**`,
   so every case that builds a git repo fails in both arms. That reads as "the
@@ -54,8 +56,9 @@ Pilot with one run per arm, sonnet judge, plugin 0.1.42. The numbers hold
 for the graders and prompts in the commit that last changed this table; a
 grader or prompt change needs a new pilot and a new table. Cases 01 and 04 come
 from a run of those two cases after their content checks changed, case 03
-from a run of that case alone after its rubric changed, and the other four
-from the full pilot just before, whose graders and prompts are unchanged.
+from a run of that case alone after its rubric changed, case 05 from a run of
+that case alone after its content check was added, and the other three from
+the full pilot just before, whose graders and prompts are unchanged.
 
 | case | with | without | Δ |
 |---|---|---|---|
@@ -63,11 +66,11 @@ from the full pilot just before, whose graders and prompts are unchanged.
 | 02-subtract-py-en | 1.00 | 0.71 | +0.29 |
 | 03-csv-tests-mode | 1.00 | 0.90 | +0.10 |
 | 04-run2-cnpj-cep | 1.00 | 0.08 | +0.92 |
-| 05-greet-en-short | 1.00 | 1.00 | 0.00 |
+| 05-greet-en-short | 1.00 | 0.71 | +0.29 |
 | 06-neg-typo | 1.00 | 1.00 | 0.00 |
 | 07-neg-paper-question | 1.00 | 1.00 | 0.00 |
 
-Mean Δ +0.19. The runs behind the table cost $2.65 and the full pilot took
+Mean Δ +0.23. The runs behind the table cost $2.68 and the full pilot took
 628 s, so a full run (`runs: 3`) costs about $8. The without-plugin failures
 were checked: in 04 that arm wrote both validators as new files and also
 inside `index.js` and `index.test.js`, which the content checks caught, and
@@ -76,7 +79,7 @@ created-path checks were also run against the real file trees of a pilot
 plus deliberately bad variants (an added `test_csv.py`, `src/cep.js`,
 `lib/validaCnpj.js` fail; the same files under `.shepherd-proposals/` do
 not). Without the plugin the agent sometimes stops on its own and only
-offers to write the feature (01 and 05 here), so a
+offers to write the feature (01 here), so a
 single-run Δ per case moves between runs. Read the three-run mean.
 
 Case 03's rubric says outright that writing `csvparse.py` and the trivial
