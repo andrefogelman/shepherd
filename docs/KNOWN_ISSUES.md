@@ -965,3 +965,24 @@ cannot see one). Both writers re-apply: `materialize_into` chmods 0o755,
 themselves (the stage wrote them with the bit already on). Pinned by
 `tests/test_diffcollect.py` (`ExecBitTracked`), `tests/test_supervisor.py`
 (`ExecBitSurvives`) and `tests/test_remotegate_ssh.py` (`TarCarriesModes`).
+
+### The planning pass obeyed the repository it planned for
+
+**Was:** `plan_targets` ran `claude -p` in the caller's working directory with
+none of the worker's hardening. Started from the repository under review, the
+CLI loaded that repository's `CLAUDE.md` (and any `CLAUDE.md` in a directory
+above it), ran the hooks in its `.claude/settings.json` and started the
+servers in its `.mcp.json`. All of this happened in shepherd's own process,
+outside the worker's jail. On a toy repository holding all three, 0.1.43
+returned the plan the repository's `CLAUDE.md` dictated, including a target
+the feature never touched, and both the hook and the MCP server ran their
+commands. A benchmark caught the milder form: an owner's personal
+`CLAUDE.md` sat above the run directories and reached every planning call.
+
+**Fix:** the call runs from a fresh empty temporary directory and carries
+`launch.HARDENING_FLAGS` (no MCP servers, no browser bridge, user settings
+only) plus `--tools ""`. The file tree is already in the prompt, so the planner
+needs no tool. The prompt comes before `--tools` because that option takes a
+variadic list. On the same toy repository the plan follows the feature, and
+neither marker file appears. Pinned by `tests/test_planning.py`
+(`test_runs_isolated_from_the_repository`).

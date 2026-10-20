@@ -3,7 +3,9 @@ short plan + the exact target files, fed to the worker so it skips the "where do
 I even touch" exploration (the dominant wall-clock cost).
 
 Runs the `claude` CLI in the PARENT process — outside the sandbox jail, where
-network is allowed, exactly like the gate. Best-effort by design: any failure
+network is allowed, exactly like the gate. Because nothing jails it, it runs from
+an empty directory with the worker's hardening flags and no tools: nothing in the
+repository under review can reach it. Best-effort by design: any failure
 (no CLI, timeout, bad JSON, unknown paths) yields an empty plan and the run
 proceeds on keyword-scored targets exactly as before. No new dependency: it
 reuses the `claude` CLI the worker already requires.
@@ -14,12 +16,20 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .launch import HARDENING_FLAGS
 
 DEFAULT_PLAN_MODEL = "claude-haiku-4-5-20251001"
 PLAN_TIMEOUT = 60          # seconds for the planning call
 MAX_TARGETS = 8            # cap on planned target files
+
+#: The worker's hardening (no MCP servers, no browser bridge, user settings
+#: only) plus no tools at all: the file tree is in the prompt. `--tools` takes
+#: a variadic list, so it stays last, after the prompt.
+PLAN_ISOLATION: tuple[str, ...] = (*HARDENING_FLAGS, "--tools", "")
 
 
 @dataclass
@@ -120,10 +130,14 @@ def plan_targets(
         return PlanResult(error=f"{cli} CLI not found on PATH")
     prompt = build_plan_prompt(feature, file_tree_text)
     try:
-        proc = subprocess.run(
-            [binary, "-p", "--output-format", "json", "--model", model, prompt],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        # Not the caller's cwd: started from the repository under review, the
+        # CLI followed its CLAUDE.md, ran the hooks in its .claude/settings.json
+        # and started the servers in its .mcp.json, in this unjailed process.
+        with tempfile.TemporaryDirectory(prefix="shepherd-plan-") as empty:
+            proc = subprocess.run(
+                [binary, "-p", prompt, "--output-format", "json", "--model", model, *PLAN_ISOLATION],
+                capture_output=True, text=True, timeout=timeout, cwd=empty,
+            )
     except subprocess.TimeoutExpired:
         return PlanResult(error=f"planning timed out after {timeout}s")
     except OSError as exc:

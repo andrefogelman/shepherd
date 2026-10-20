@@ -76,6 +76,33 @@ class PlanTargetsCli(unittest.TestCase):
         self.assertEqual(res.targets, ["x.py"])
         self.assertEqual(res.plan, "s")
 
+    def test_runs_isolated_from_the_repository(self):
+        # Pins the planner reading a hostile repo's CLAUDE.md, hooks and
+        # .mcp.json: it must start in an empty directory that is not the
+        # caller's cwd, with the worker's hardening flags and no tools.
+        PL.shutil.which = lambda _c: "/fake/claude"
+        seen = {}
+
+        def _fake(argv, **kw):
+            seen["argv"], seen["cwd"] = argv, kw.get("cwd")
+            seen["listing"] = sorted(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        res = plan_targets("feat", "x.py", {"x.py"})
+        self.assertEqual(res.targets, ["x.py"])
+        self.assertIsNotNone(seen["cwd"])
+        self.assertNotEqual(Path(seen["cwd"]).resolve(), Path.cwd().resolve())
+        self.assertEqual(seen["listing"], [])
+        self.assertFalse(Path(seen["cwd"]).exists())  # removed after the call
+        argv = seen["argv"]
+        for flag in ("--strict-mcp-config", "--no-chrome"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")
+        self.assertEqual(argv[-2:], ["--tools", ""])
+        # the prompt is not swallowed by the variadic --tools
+        self.assertLess(argv.index(build_plan_prompt("feat", "x.py")), argv.index("--tools"))
+
     def test_cli_missing_returns_error(self):
         PL.shutil.which = lambda _c: None
         res = plan_targets("feat", "x.py", {"x.py"})
