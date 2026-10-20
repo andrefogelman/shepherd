@@ -965,3 +965,30 @@ cannot see one). Both writers re-apply: `materialize_into` chmods 0o755,
 themselves (the stage wrote them with the bit already on). Pinned by
 `tests/test_diffcollect.py` (`ExecBitTracked`), `tests/test_supervisor.py`
 (`ExecBitSurvives`) and `tests/test_remotegate_ssh.py` (`TarCarriesModes`).
+
+### The planning pass obeyed the repository it planned for
+
+**Was:** `plan_targets` ran `claude -p` in the caller's working directory with
+none of the worker's hardening. Started from the repository under review, the
+CLI loaded that repository's `CLAUDE.md` (and any `CLAUDE.md` in a directory
+above it), ran the hooks in its `.claude/settings.json` and started the
+servers in its `.mcp.json`. All of this happened in shepherd's own process,
+outside the worker's jail. On a toy repository holding all three, 0.1.43
+returned the plan the repository's `CLAUDE.md` dictated, including a target
+the feature never touched, and both the hook and the MCP server ran their
+commands. A benchmark caught the milder form: an owner's personal
+`CLAUDE.md` sat above the run directories and reached every planning call.
+
+**Fix:** the call gets the worker's isolation. `HOME`, `CLAUDE_CONFIG_DIR` and
+`TMPDIR` point into a fresh scratch, and the host login is seeded there the way
+the substrate seeds the worker's (`0600`, removed with the scratch). It carries
+`launch.HARDENING_FLAGS` (no MCP servers, no browser bridge, user settings
+only) plus `--tools "Read,Glob,Grep"`: the planner still runs in the repository
+and may open its files, but cannot change or run anything. The prompt comes
+before `--tools` because that option takes a variadic list. The redirect
+matters on its own: with the flags alone, the user's own `CLAUDE.md` still
+dictated the plan on the same toy repository. With the fix, the plan follows
+the feature, neither marker file appears, and nothing is written into the
+user's config directory. Pinned by `tests/test_planning.py`
+(`test_runs_isolated_from_the_repository`, `test_runs_in_the_repo_when_given_one`,
+`test_no_host_login_seeds_nothing`, `test_tempdir_failure_returns_error`).

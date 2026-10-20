@@ -3,7 +3,12 @@ short plan + the exact target files, fed to the worker so it skips the "where do
 I even touch" exploration (the dominant wall-clock cost).
 
 Runs the `claude` CLI in the PARENT process — outside the sandbox jail, where
-network is allowed, exactly like the gate. Best-effort by design: any failure
+network is allowed, exactly like the gate. Because nothing jails it, it gets the
+worker's isolation instead: HOME, CLAUDE_CONFIG_DIR and TMPDIR redirected into a
+scratch that holds only the seeded login, the worker's hardening flags, and only
+the read-only tools (Read, Glob, Grep) so it can open the repository's files.
+Neither the repository's CLAUDE.md, settings and MCP servers nor the user's own
+reach it. Best-effort by design: any failure
 (no CLI, timeout, bad JSON, unknown paths) yields an empty plan and the run
 proceeds on keyword-scored targets exactly as before. No new dependency: it
 reuses the `claude` CLI the worker already requires.
@@ -12,14 +17,24 @@ reuses the `claude` CLI the worker already requires.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .launch import HARDENING_FLAGS
 
 DEFAULT_PLAN_MODEL = "claude-haiku-4-5-20251001"
 PLAN_TIMEOUT = 60          # seconds for the planning call
 MAX_TARGETS = 8            # cap on planned target files
+
+#: The worker's hardening (no MCP servers, no browser bridge, user settings
+#: only) plus the read-only tools, so the planner can open files but not change
+#: or run anything. `--tools` takes a variadic list, so it stays last, after the
+#: prompt.
+PLAN_ISOLATION: tuple[str, ...] = (*HARDENING_FLAGS, "--tools", "Read,Glob,Grep")
 
 
 @dataclass
@@ -104,6 +119,19 @@ def parse_plan_response(raw: str, repo_rels: set[str]) -> PlanResult:
     return PlanResult(targets=targets, plan=plan)
 
 
+def _host_login() -> bytes | None:
+    """The host CLI's subscription login, as the substrate seeds it into the
+    worker's redirected config. None when the auth comes from the environment
+    (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, which the redirect keeps), when
+    there is no login, or when the substrate cannot be asked. Never raises."""
+    try:
+        from shepherd_dialect.providers import _resolve_claude_auth_diagnostic
+
+        return _resolve_claude_auth_diagnostic().blob
+    except Exception:
+        return None
+
+
 def plan_targets(
     feature: str,
     file_tree_text: str,
@@ -112,18 +140,47 @@ def plan_targets(
     model: str = DEFAULT_PLAN_MODEL,
     timeout: int = PLAN_TIMEOUT,
     cli: str = "claude",
+    repo: Path | str | None = None,
 ) -> PlanResult:
     """Run the cheap-model planning pass. Never raises — returns a PlanResult
-    whose `error` is set (and targets/plan empty) on any failure."""
+    whose `error` is set (and targets/plan empty) on any failure. With `repo`
+    the planner runs there and may read its files; without it, it runs in an
+    empty directory and plans from the file tree alone."""
     binary = shutil.which(cli)
     if not binary:
         return PlanResult(error=f"{cli} CLI not found on PATH")
     prompt = build_plan_prompt(feature, file_tree_text)
     try:
-        proc = subprocess.run(
-            [binary, "-p", "--output-format", "json", "--model", model, prompt],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        # Started from the repository under review on the user's config, the
+        # CLI followed the repository's CLAUDE.md, ran the hooks in its
+        # .claude/settings.json and started the servers in its .mcp.json, in
+        # this unjailed process; the flags keep those out. The user's config
+        # is redirected too: `--setting-sources user` still loads the user's
+        # own CLAUDE.md and settings, and a personal CLAUDE.md was measured
+        # dictating the plan. The worker runs on a redirected config for the
+        # same reasons; this is that redirect.
+        with tempfile.TemporaryDirectory(prefix="shepherd-plan-") as scratch:
+            root = Path(scratch)
+            for sub in ("work", "home", "config", "tmp"):
+                (root / sub).mkdir()
+            login = _host_login()
+            if login is not None:
+                cred = root / "config" / ".credentials.json"
+                cred.write_bytes(login)
+                cred.chmod(0o600)
+            env = {
+                **os.environ,
+                "HOME": str(root / "home"),
+                "CLAUDE_CONFIG_DIR": str(root / "config"),
+                "TMPDIR": str(root / "tmp"),
+                "DISABLE_AUTOUPDATER": "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            }
+            proc = subprocess.run(
+                [binary, "-p", prompt, "--output-format", "json", "--model", model, *PLAN_ISOLATION],
+                capture_output=True, text=True, timeout=timeout, env=env,
+                cwd=Path(repo) if repo is not None else root / "work",
+            )
     except subprocess.TimeoutExpired:
         return PlanResult(error=f"planning timed out after {timeout}s")
     except OSError as exc:

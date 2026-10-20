@@ -63,10 +63,13 @@ class PlanTargetsCli(unittest.TestCase):
     def setUp(self):
         self._real_run = subprocess.run
         self._real_which = PL.shutil.which
+        self._real_login = PL._host_login
+        PL._host_login = lambda: None  # never read the real login in a test
 
     def tearDown(self):
         PL.subprocess.run = self._real_run
         PL.shutil.which = self._real_which
+        PL._host_login = self._real_login
 
     def test_success_path(self):
         PL.shutil.which = lambda _c: "/fake/claude"
@@ -75,6 +78,101 @@ class PlanTargetsCli(unittest.TestCase):
         res = plan_targets("feat", "x.py\ny.py", {"x.py", "y.py"})
         self.assertEqual(res.targets, ["x.py"])
         self.assertEqual(res.plan, "s")
+
+    def test_runs_isolated_from_the_repository(self):
+        # Pins the planner reading a hostile repo's CLAUDE.md, hooks and
+        # .mcp.json, and the user's own: without a repo it starts in an empty
+        # directory that is not the caller's cwd, on a redirected config, with
+        # the worker's hardening flags and only the read-only tools.
+        PL.shutil.which = lambda _c: "/fake/claude"
+        PL._host_login = lambda: b'{"claudeAiOauth":{}}'
+        seen = {}
+
+        def _fake(argv, **kw):
+            env = kw.get("env") or {}
+            cred = Path(env.get("CLAUDE_CONFIG_DIR", "/nonexistent")) / ".credentials.json"
+            seen.update(argv=argv, cwd=kw.get("cwd"), env=env,
+                        listing=sorted(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None,
+                        config=sorted(p.name for p in cred.parent.iterdir()) if cred.parent.is_dir() else None,
+                        cred=cred.read_bytes() if cred.is_file() else None,
+                        cred_mode=cred.stat().st_mode & 0o777 if cred.is_file() else None)
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        res = plan_targets("feat", "x.py", {"x.py"})
+        self.assertEqual(res.targets, ["x.py"])
+        self.assertIsNotNone(seen["cwd"])
+        cwd = Path(seen["cwd"])
+        self.assertNotEqual(cwd.resolve(), Path.cwd().resolve())
+        self.assertEqual(seen["listing"], [])
+        # the user's config is redirected too, into the same scratch, holding
+        # nothing but the seeded login
+        scratch = cwd.parent
+        env = seen["env"]
+        self.assertEqual(Path(env["HOME"]).parent, scratch)
+        self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).parent, scratch)
+        self.assertEqual(Path(env["TMPDIR"]).parent, scratch)
+        self.assertEqual(seen["config"], [".credentials.json"])
+        self.assertEqual(seen["cred"], b'{"claudeAiOauth":{}}')
+        self.assertEqual(seen["cred_mode"], 0o600)
+        self.assertFalse(scratch.exists())  # login and scratch removed after the call
+        argv = seen["argv"]
+        for flag in ("--strict-mcp-config", "--no-chrome"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")
+        self.assertEqual(argv[-2:], ["--tools", "Read,Glob,Grep"])
+        # the prompt is not swallowed by the variadic --tools
+        self.assertLess(argv.index(build_plan_prompt("feat", "x.py")), argv.index("--tools"))
+
+    def test_runs_in_the_repo_when_given_one(self):
+        # the planner may open the repository's files, still on the redirected
+        # config and with the read-only tools only
+        PL.shutil.which = lambda _c: "/fake/claude"
+        seen = {}
+
+        def _fake(argv, **kw):
+            seen.update(argv=argv, cwd=kw.get("cwd"), env=kw.get("env") or {})
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        repo = Path(__file__).resolve().parent
+        self.assertEqual(plan_targets("feat", "x.py", {"x.py"}, repo=repo).targets, ["x.py"])
+        self.assertEqual(Path(seen["cwd"]), repo)
+        self.assertNotEqual(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).parent, repo)
+        self.assertEqual(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).name, "config")
+        self.assertEqual(seen["argv"][-2:], ["--tools", "Read,Glob,Grep"])
+        self.assertEqual(seen["argv"][seen["argv"].index("--setting-sources") + 1], "user")
+
+    def test_no_host_login_seeds_nothing(self):
+        # auth from the environment (or none): the redirected config stays empty
+        PL.shutil.which = lambda _c: "/fake/claude"
+        PL._host_login = lambda: None
+        seen = {}
+
+        def _fake(argv, **kw):
+            seen["config"] = sorted(Path(kw["env"]["CLAUDE_CONFIG_DIR"]).iterdir())
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        self.assertEqual(plan_targets("feat", "x.py", {"x.py"}).targets, ["x.py"])
+        self.assertEqual(seen["config"], [])
+
+    def test_tempdir_failure_returns_error(self):
+        # the scratch is created inside the try: a full or missing TMPDIR is a
+        # skipped plan, never an exception out of plan_targets
+        PL.shutil.which = lambda _c: "/fake/claude"
+        real = PL.tempfile.TemporaryDirectory
+
+        def _no_tmp(*a, **k):
+            raise OSError("no space left on device")
+
+        PL.tempfile.TemporaryDirectory = _no_tmp
+        try:
+            res = plan_targets("feat", "x.py", {"x.py"})
+        finally:
+            PL.tempfile.TemporaryDirectory = real
+        self.assertIn("could not run", res.error or "")
+        self.assertEqual(res.targets, [])
 
     def test_cli_missing_returns_error(self):
         PL.shutil.which = lambda _c: None
@@ -97,6 +195,37 @@ class PlanTargetsCli(unittest.TestCase):
         PL.subprocess.run = _boom
         res = plan_targets("feat", "x.py", {"x.py"}, timeout=1)
         self.assertIn("timed out", res.error or "")
+
+
+class CliWiring(unittest.TestCase):
+    def test_run_planning_hands_the_repo_root_to_the_planner(self):
+        # Without repo= every real run plans from an empty directory and cannot
+        # open the repository's files; nothing else would notice.
+        import types
+
+        import shepherd_dev.cli as C
+        import shepherd_dev.config as CFG
+        import shepherd_dev.contextpack as CP
+
+        seen = {}
+
+        def _plan(*a, **k):
+            seen.update(k)
+            return PL.PlanResult(targets=["x.py"], plan="p")
+
+        real = (PL.plan_targets, CFG.planning_config, CP.repo_file_view)
+        PL.plan_targets = _plan
+        CFG.planning_config = lambda _root: {"enabled": True, "model": "m"}
+        CP.repo_file_view = lambda _root, _prefixes=(), scan=None: ("x.py", {"x.py"})
+        try:
+            root = Path(__file__).resolve().parent
+            args = types.SimpleNamespace(no_plan=False, provider="claude", allowed_prefix=[])
+            out = []
+            targets, plan = C._run_planning(args, root, "feat", out=out)
+        finally:
+            PL.plan_targets, CFG.planning_config, CP.repo_file_view = real
+        self.assertEqual((targets, plan), (("x.py",), "p"))
+        self.assertEqual(Path(seen["repo"]), root)
 
 
 if __name__ == "__main__":
