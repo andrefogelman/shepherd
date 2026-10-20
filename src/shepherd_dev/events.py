@@ -187,6 +187,36 @@ def parse_test_failure(line: str) -> dict | None:
     return None
 
 
+_BASELINE_CAP = 512 * 1024
+
+
+def _read_unrecorded(path: Path) -> str:
+    """The file's text, read with os.open/os.read rather than open().
+
+    The substrate wraps builtins.open and io.open to record every read inside
+    the workspace, under a lock the launching thread holds for the whole
+    worker launch. The tailer runs on its own thread, so a read through open()
+    waited on that lock until the launch returned, while the launch, in
+    drain(), waited on the tailer: every Write over an existing file hung the
+    run. A diff for the event log is not a read the worker made either, so it
+    has no business in the substrate's record. Newlines are translated as
+    read_text() did."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        chunks: list[bytes] = []
+        remaining = _BASELINE_CAP
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def repo_baseline_reader(repo_root: Path) -> Callable[[str], str | None]:
     """A ``read_baseline`` for StreamTailer: resolve a worker tool path (often
     jail-absolute, pointing into the forked workspace) to the repo's CURRENT
@@ -204,8 +234,8 @@ def repo_baseline_reader(repo_root: Path) -> Callable[[str], str | None]:
                 resolved = candidate.resolve()
                 if not resolved.is_relative_to(root):
                     continue  # `..` or symlink escape — never read outside the repo
-                if resolved.is_file() and resolved.stat().st_size <= 512 * 1024:
-                    return resolved.read_text(encoding="utf-8", errors="replace")
+                if resolved.is_file() and resolved.stat().st_size <= _BASELINE_CAP:
+                    return _read_unrecorded(resolved)
             except Exception:
                 continue
         return None
@@ -313,11 +343,24 @@ class StreamTailer(threading.Thread):
         self._stopping.set()
         if self.is_alive():
             self.join(timeout)
-        with self._pump_lock:
+        # Bounded: drain() runs on the launching thread after the worker has
+        # exited, and a tailer wedged inside a line would otherwise hold the
+        # run until an outside timeout killed it. The events after the stuck
+        # line are lost; the run is not.
+        if not self._pump_lock.acquire(timeout=timeout):
+            self._log.emit(
+                "worker.stream.stuck",
+                {"waited_s": timeout, "note": "stream tailer did not finish; later worker events were not recorded"},
+                attempt=self._attempt,
+            )
+            return
+        try:
             self._read_available()
             if self._buf.strip() and not self._dropping:
                 self._handle_line(bytes(self._buf))
             self._buf.clear()
+        finally:
+            self._pump_lock.release()
 
     # -- internals ------------------------------------------------------------
     def _pump(self) -> None:
