@@ -81,9 +81,9 @@ class PlanTargetsCli(unittest.TestCase):
 
     def test_runs_isolated_from_the_repository(self):
         # Pins the planner reading a hostile repo's CLAUDE.md, hooks and
-        # .mcp.json, and the user's own: it must start in an empty directory
-        # that is not the caller's cwd, on a redirected config, with the
-        # worker's hardening flags and no tools.
+        # .mcp.json, and the user's own: without a repo it starts in an empty
+        # directory that is not the caller's cwd, on a redirected config, with
+        # the worker's hardening flags and only the read-only tools.
         PL.shutil.which = lambda _c: "/fake/claude"
         PL._host_login = lambda: b'{"claudeAiOauth":{}}'
         seen = {}
@@ -120,9 +120,28 @@ class PlanTargetsCli(unittest.TestCase):
         for flag in ("--strict-mcp-config", "--no-chrome"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")
-        self.assertEqual(argv[-2:], ["--tools", ""])
+        self.assertEqual(argv[-2:], ["--tools", "Read,Glob,Grep"])
         # the prompt is not swallowed by the variadic --tools
         self.assertLess(argv.index(build_plan_prompt("feat", "x.py")), argv.index("--tools"))
+
+    def test_runs_in_the_repo_when_given_one(self):
+        # the planner may open the repository's files, still on the redirected
+        # config and with the read-only tools only
+        PL.shutil.which = lambda _c: "/fake/claude"
+        seen = {}
+
+        def _fake(argv, **kw):
+            seen.update(argv=argv, cwd=kw.get("cwd"), env=kw.get("env") or {})
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        repo = Path(__file__).resolve().parent
+        self.assertEqual(plan_targets("feat", "x.py", {"x.py"}, repo=repo).targets, ["x.py"])
+        self.assertEqual(Path(seen["cwd"]), repo)
+        self.assertNotEqual(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).parent, repo)
+        self.assertTrue(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).name == "config")
+        self.assertEqual(seen["argv"][-2:], ["--tools", "Read,Glob,Grep"])
+        self.assertEqual(seen["argv"][seen["argv"].index("--setting-sources") + 1], "user")
 
     def test_no_host_login_seeds_nothing(self):
         # auth from the environment (or none): the redirected config stays empty

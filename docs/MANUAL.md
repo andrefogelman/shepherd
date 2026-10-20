@@ -352,9 +352,10 @@ honra as convenções na PRIMEIRA tentativa em vez de aprender pelo revisor.
 com um modelo barato decompõe a feature num plano e nos arquivos-alvo exatos, que
 entram no context pack — o worker já começa sabendo onde mexer, em vez de
 explorar o repo do zero. Best-effort: se falhar (sem rede, CLI ausente), o run
-continua. Ele roda isolado como o worker: diretório vazio, configuração redirecionada
-com só o login, sem ferramentas e sem servidores MCP. Enxerga apenas a lista de
-arquivos e a feature; nada do repositório nem do `CLAUDE.md` pessoal chega a ele. Desligue com `--no-plan`; troque o modelo em `planning.model` no
+continua. Ele roda isolado como o worker: configuração redirecionada com só o login,
+sem servidores MCP e só com ferramentas de leitura (abre os arquivos do repositório,
+mas não altera nem executa nada). Nem o `CLAUDE.md` e as configurações do
+repositório nem o `CLAUDE.md` pessoal chegam a ele. Desligue com `--no-plan`; troque o modelo em `planning.model` no
 `.shepherd-dev.json`.
 
 **Feedback vivo.** Enquanto o run acontece, o terminal mostra o progresso por

@@ -4,10 +4,11 @@ I even touch" exploration (the dominant wall-clock cost).
 
 Runs the `claude` CLI in the PARENT process — outside the sandbox jail, where
 network is allowed, exactly like the gate. Because nothing jails it, it gets the
-worker's isolation instead: an empty working directory, HOME, CLAUDE_CONFIG_DIR
-and TMPDIR redirected into a scratch that holds only the seeded login, the
-worker's hardening flags and no tools. Neither the repository under review nor
-the user's own CLAUDE.md, hooks or MCP servers reach it. Best-effort by design: any failure
+worker's isolation instead: HOME, CLAUDE_CONFIG_DIR and TMPDIR redirected into a
+scratch that holds only the seeded login, the worker's hardening flags, and only
+the read-only tools (Read, Glob, Grep) so it can open the repository's files.
+Neither the repository's CLAUDE.md, settings and MCP servers nor the user's own
+reach it. Best-effort by design: any failure
 (no CLI, timeout, bad JSON, unknown paths) yields an empty plan and the run
 proceeds on keyword-scored targets exactly as before. No new dependency: it
 reuses the `claude` CLI the worker already requires.
@@ -30,9 +31,10 @@ PLAN_TIMEOUT = 60          # seconds for the planning call
 MAX_TARGETS = 8            # cap on planned target files
 
 #: The worker's hardening (no MCP servers, no browser bridge, user settings
-#: only) plus no tools at all: the file tree is in the prompt. `--tools` takes
-#: a variadic list, so it stays last, after the prompt.
-PLAN_ISOLATION: tuple[str, ...] = (*HARDENING_FLAGS, "--tools", "")
+#: only) plus the read-only tools, so the planner can open files but not change
+#: or run anything. `--tools` takes a variadic list, so it stays last, after the
+#: prompt.
+PLAN_ISOLATION: tuple[str, ...] = (*HARDENING_FLAGS, "--tools", "Read,Glob,Grep")
 
 
 @dataclass
@@ -138,20 +140,24 @@ def plan_targets(
     model: str = DEFAULT_PLAN_MODEL,
     timeout: int = PLAN_TIMEOUT,
     cli: str = "claude",
+    repo: Path | str | None = None,
 ) -> PlanResult:
     """Run the cheap-model planning pass. Never raises — returns a PlanResult
-    whose `error` is set (and targets/plan empty) on any failure."""
+    whose `error` is set (and targets/plan empty) on any failure. With `repo`
+    the planner runs there and may read its files; without it, it runs in an
+    empty directory and plans from the file tree alone."""
     binary = shutil.which(cli)
     if not binary:
         return PlanResult(error=f"{cli} CLI not found on PATH")
     prompt = build_plan_prompt(feature, file_tree_text)
     try:
-        # Not the caller's cwd: started from the repository under review, the
-        # CLI followed its CLAUDE.md, ran the hooks in its .claude/settings.json
-        # and started the servers in its .mcp.json, in this unjailed process.
-        # Not the user's config either: `--setting-sources user` still loads
-        # the user's own CLAUDE.md and settings, and a personal CLAUDE.md was
-        # measured dictating the plan. The worker runs on a redirected config for the
+        # Started from the repository under review on the user's config, the
+        # CLI followed the repository's CLAUDE.md, ran the hooks in its
+        # .claude/settings.json and started the servers in its .mcp.json, in
+        # this unjailed process; the flags keep those out. The user's config
+        # is redirected too: `--setting-sources user` still loads the user's
+        # own CLAUDE.md and settings, and a personal CLAUDE.md was measured
+        # dictating the plan. The worker runs on a redirected config for the
         # same reasons; this is that redirect.
         with tempfile.TemporaryDirectory(prefix="shepherd-plan-") as scratch:
             root = Path(scratch)
@@ -172,7 +178,8 @@ def plan_targets(
             }
             proc = subprocess.run(
                 [binary, "-p", prompt, "--output-format", "json", "--model", model, *PLAN_ISOLATION],
-                capture_output=True, text=True, timeout=timeout, cwd=root / "work", env=env,
+                capture_output=True, text=True, timeout=timeout, env=env,
+                cwd=Path(repo) if repo is not None else root / "work",
             )
     except subprocess.TimeoutExpired:
         return PlanResult(error=f"planning timed out after {timeout}s")

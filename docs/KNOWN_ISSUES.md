@@ -979,16 +979,16 @@ the feature never touched, and both the hook and the MCP server ran their
 commands. A benchmark caught the milder form: an owner's personal
 `CLAUDE.md` sat above the run directories and reached every planning call.
 
-**Fix:** the call gets the worker's isolation. It runs from an empty directory
-inside a fresh scratch, with `HOME`, `CLAUDE_CONFIG_DIR` and `TMPDIR` pointed
-into that scratch. The host login is seeded there the way the substrate seeds
-the worker's (`0600`, removed with the scratch). It also carries
+**Fix:** the call gets the worker's isolation. `HOME`, `CLAUDE_CONFIG_DIR` and
+`TMPDIR` point into a fresh scratch, and the host login is seeded there the way
+the substrate seeds the worker's (`0600`, removed with the scratch). It carries
 `launch.HARDENING_FLAGS` (no MCP servers, no browser bridge, user settings
-only) plus `--tools ""`: the file tree is already in the prompt, so the planner
-needs no tool. The prompt comes before `--tools` because that option takes a
-variadic list. The redirect matters on its own: with the flags alone, the
-user's own `CLAUDE.md` still dictated the plan on the same toy repository.
-With the fix, the plan follows the feature, neither marker file appears, and
-nothing is written into the user's config directory. Pinned by
-`tests/test_planning.py` (`test_runs_isolated_from_the_repository`,
+only) plus `--tools "Read,Glob,Grep"`: the planner still runs in the repository
+and may open its files, but cannot change or run anything. The prompt comes
+before `--tools` because that option takes a variadic list. The redirect
+matters on its own: with the flags alone, the user's own `CLAUDE.md` still
+dictated the plan on the same toy repository. With the fix, the plan follows
+the feature, neither marker file appears, and nothing is written into the
+user's config directory. Pinned by `tests/test_planning.py`
+(`test_runs_isolated_from_the_repository`, `test_runs_in_the_repo_when_given_one`,
 `test_no_host_login_seeds_nothing`, `test_tempdir_failure_returns_error`).

@@ -947,7 +947,7 @@ def _run_planning(
     tree_text, repo_rels = repo_file_view(repo_root, tuple(args.allowed_prefix), scan=scan)
     if not repo_rels:
         return (), ""
-    result = plan_targets(feature_text, tree_text, repo_rels, model=cfg["model"])
+    result = plan_targets(feature_text, tree_text, repo_rels, model=cfg["model"], repo=repo_root)
     if result.error:
         say(f"planning: skipped ({result.error})")
         return (), ""
