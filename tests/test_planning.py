@@ -139,7 +139,7 @@ class PlanTargetsCli(unittest.TestCase):
         self.assertEqual(plan_targets("feat", "x.py", {"x.py"}, repo=repo).targets, ["x.py"])
         self.assertEqual(Path(seen["cwd"]), repo)
         self.assertNotEqual(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).parent, repo)
-        self.assertTrue(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).name == "config")
+        self.assertEqual(Path(seen["env"]["CLAUDE_CONFIG_DIR"]).name, "config")
         self.assertEqual(seen["argv"][-2:], ["--tools", "Read,Glob,Grep"])
         self.assertEqual(seen["argv"][seen["argv"].index("--setting-sources") + 1], "user")
 
@@ -195,6 +195,37 @@ class PlanTargetsCli(unittest.TestCase):
         PL.subprocess.run = _boom
         res = plan_targets("feat", "x.py", {"x.py"}, timeout=1)
         self.assertIn("timed out", res.error or "")
+
+
+class CliWiring(unittest.TestCase):
+    def test_run_planning_hands_the_repo_root_to_the_planner(self):
+        # Without repo= every real run plans from an empty directory and cannot
+        # open the repository's files; nothing else would notice.
+        import types
+
+        import shepherd_dev.cli as C
+        import shepherd_dev.config as CFG
+        import shepherd_dev.contextpack as CP
+
+        seen = {}
+
+        def _plan(*a, **k):
+            seen.update(k)
+            return PL.PlanResult(targets=["x.py"], plan="p")
+
+        real = (PL.plan_targets, CFG.planning_config, CP.repo_file_view)
+        PL.plan_targets = _plan
+        CFG.planning_config = lambda _root: {"enabled": True, "model": "m"}
+        CP.repo_file_view = lambda _root, _prefixes=(), scan=None: ("x.py", {"x.py"})
+        try:
+            root = Path(__file__).resolve().parent
+            args = types.SimpleNamespace(no_plan=False, provider="claude", allowed_prefix=[])
+            out = []
+            targets, plan = C._run_planning(args, root, "feat", out=out)
+        finally:
+            PL.plan_targets, CFG.planning_config, CP.repo_file_view = real
+        self.assertEqual((targets, plan), (("x.py",), "p"))
+        self.assertEqual(Path(seen["repo"]), root)
 
 
 if __name__ == "__main__":
