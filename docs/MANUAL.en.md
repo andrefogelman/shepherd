@@ -355,7 +355,9 @@ from the reviewer.
 decomposes the feature into a plan and the exact target files, which feed the
 context pack — the worker starts knowing where to touch instead of exploring the
 repo from scratch. Best-effort: on any failure (no network, missing CLI) the run
-continues. Disable with `--no-plan`; change the model via `planning.model` in
+continues. It runs isolated like the worker: an empty directory, a redirected config
+holding only the login, no tools and no MCP servers. It sees only the file list
+and the feature; nothing from the repository or a personal `CLAUDE.md` reaches it. Disable with `--no-plan`; change the model via `planning.model` in
 `.shepherd-dev.json`.
 
 **Live feedback.** While the run happens, the terminal shows per-phase progress —

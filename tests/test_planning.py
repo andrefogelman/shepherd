@@ -63,10 +63,13 @@ class PlanTargetsCli(unittest.TestCase):
     def setUp(self):
         self._real_run = subprocess.run
         self._real_which = PL.shutil.which
+        self._real_login = PL._host_login
+        PL._host_login = lambda: None  # never read the real login in a test
 
     def tearDown(self):
         PL.subprocess.run = self._real_run
         PL.shutil.which = self._real_which
+        PL._host_login = self._real_login
 
     def test_success_path(self):
         PL.shutil.which = lambda _c: "/fake/claude"
@@ -78,23 +81,41 @@ class PlanTargetsCli(unittest.TestCase):
 
     def test_runs_isolated_from_the_repository(self):
         # Pins the planner reading a hostile repo's CLAUDE.md, hooks and
-        # .mcp.json: it must start in an empty directory that is not the
-        # caller's cwd, with the worker's hardening flags and no tools.
+        # .mcp.json, and the user's own: it must start in an empty directory
+        # that is not the caller's cwd, on a redirected config, with the
+        # worker's hardening flags and no tools.
         PL.shutil.which = lambda _c: "/fake/claude"
+        PL._host_login = lambda: b'{"claudeAiOauth":{}}'
         seen = {}
 
         def _fake(argv, **kw):
-            seen["argv"], seen["cwd"] = argv, kw.get("cwd")
-            seen["listing"] = sorted(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None
+            env = kw.get("env") or {}
+            cred = Path(env.get("CLAUDE_CONFIG_DIR", "/nonexistent")) / ".credentials.json"
+            seen.update(argv=argv, cwd=kw.get("cwd"), env=env,
+                        listing=sorted(Path(kw["cwd"]).iterdir()) if kw.get("cwd") else None,
+                        config=sorted(p.name for p in cred.parent.iterdir()) if cred.parent.is_dir() else None,
+                        cred=cred.read_bytes() if cred.is_file() else None,
+                        cred_mode=cred.stat().st_mode & 0o777 if cred.is_file() else None)
             return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
 
         PL.subprocess.run = _fake
         res = plan_targets("feat", "x.py", {"x.py"})
         self.assertEqual(res.targets, ["x.py"])
         self.assertIsNotNone(seen["cwd"])
-        self.assertNotEqual(Path(seen["cwd"]).resolve(), Path.cwd().resolve())
+        cwd = Path(seen["cwd"])
+        self.assertNotEqual(cwd.resolve(), Path.cwd().resolve())
         self.assertEqual(seen["listing"], [])
-        self.assertFalse(Path(seen["cwd"]).exists())  # removed after the call
+        # the user's config is redirected too, into the same scratch, holding
+        # nothing but the seeded login
+        scratch = cwd.parent
+        env = seen["env"]
+        self.assertEqual(Path(env["HOME"]).parent, scratch)
+        self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).parent, scratch)
+        self.assertEqual(Path(env["TMPDIR"]).parent, scratch)
+        self.assertEqual(seen["config"], [".credentials.json"])
+        self.assertEqual(seen["cred"], b'{"claudeAiOauth":{}}')
+        self.assertEqual(seen["cred_mode"], 0o600)
+        self.assertFalse(scratch.exists())  # login and scratch removed after the call
         argv = seen["argv"]
         for flag in ("--strict-mcp-config", "--no-chrome"):
             self.assertIn(flag, argv)
@@ -102,6 +123,37 @@ class PlanTargetsCli(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--tools", ""])
         # the prompt is not swallowed by the variadic --tools
         self.assertLess(argv.index(build_plan_prompt("feat", "x.py")), argv.index("--tools"))
+
+    def test_no_host_login_seeds_nothing(self):
+        # auth from the environment (or none): the redirected config stays empty
+        PL.shutil.which = lambda _c: "/fake/claude"
+        PL._host_login = lambda: None
+        seen = {}
+
+        def _fake(argv, **kw):
+            seen["config"] = sorted(Path(kw["env"]["CLAUDE_CONFIG_DIR"]).iterdir())
+            return subprocess.CompletedProcess(argv, 0, stdout='{"targets":["x.py"],"plan":"s"}', stderr="")
+
+        PL.subprocess.run = _fake
+        self.assertEqual(plan_targets("feat", "x.py", {"x.py"}).targets, ["x.py"])
+        self.assertEqual(seen["config"], [])
+
+    def test_tempdir_failure_returns_error(self):
+        # the scratch is created inside the try: a full or missing TMPDIR is a
+        # skipped plan, never an exception out of plan_targets
+        PL.shutil.which = lambda _c: "/fake/claude"
+        real = PL.tempfile.TemporaryDirectory
+
+        def _no_tmp(*a, **k):
+            raise OSError("no space left on device")
+
+        PL.tempfile.TemporaryDirectory = _no_tmp
+        try:
+            res = plan_targets("feat", "x.py", {"x.py"})
+        finally:
+            PL.tempfile.TemporaryDirectory = real
+        self.assertIn("could not run", res.error or "")
+        self.assertEqual(res.targets, [])
 
     def test_cli_missing_returns_error(self):
         PL.shutil.which = lambda _c: None
