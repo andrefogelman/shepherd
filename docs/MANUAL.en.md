@@ -327,6 +327,7 @@ shepherd-dev settle run-abc123 --repo ~/projects/my-app --reject   # discard
 | `--max-attempts` | run · run2 | Attempts per worker (default 3; `limits.max_attempts` in `.shepherd-dev.json` changes the repo's default). |
 | `--review-rounds N` | run | Extra passes spent on a proposal that passed the gate but the reviewer REJECTED (default 1 = hand it to the human, as before; capped at 5). |
 | `--worker-budget` | run · run2 | Seconds per attempt (default 900; `limits.worker_budget` in config changes the repo's default, as `limits.gate_timeout` does for `--gate-timeout`). |
+| `--memory-max SIZE` | run · run2 · runN | Memory ceiling (e.g. `8G`) for every worker, reviewer and local gate launch, each in its own cgroup (`systemd-run --user --scope`, no swap). Linux only; where it cannot be enforced the run refuses to start. Default: `limits.memory_max`, else none. |
 | `--max-repairs` | run2 | Repair rounds on the combined gate (default 2). |
 | `--provider static` | run · run2 | Offline dry-run without an LLM (zero cost). |
 | `--optimize-after` | run · run2 | Runs `optimize` when the run finishes (`--optimize-apply` persists). |
@@ -472,6 +473,19 @@ the budget it exceeded) and the next attempt receives the timeout guidance;
 it used to be a generic `run_failed`. `limits.worker_budget`,
 `limits.gate_timeout` and `limits.max_attempts` in config change the repo's
 defaults; flags still win.
+
+**A memory ceiling.** The jail limits where a worker writes, not how much
+memory its commands use: a test a worker wrote reached 19.8 GB on a shared
+Linux host and the kernel's global OOM killer had to pick a victim among every
+process on the machine. `limits.memory_max` (e.g. `"8G"`) or `--memory-max 8G`
+puts each worker and reviewer launch, and each local gate run, in its own
+cgroup through `systemd-run --user --scope`, with `MemoryMax` at the ceiling
+and no swap: whatever goes over dies inside its own scope and nothing else
+does. It is opt-in and off by default. Asked for and impossible to enforce
+(not Linux, no `systemd-run`, no systemd user manager, memory controller not
+delegated), the run stops before it starts and says why. It also refuses
+`--provider grok|codex`, whose launches do not go through it. The remote gate
+runs on another machine and is not covered.
 
 ## Verbose mode & trace (step by step)
 

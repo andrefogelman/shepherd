@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import memlimit
 from .diffcollect import Entries
 from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
@@ -1142,12 +1143,17 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
                     argv = model_argv(argv, getattr(self, "_role", None) or RoleModel())
                 except Exception:
                     pass  # a hardening failure must not cost the launch
+                swapped = None
                 if stream_hook is not None:
                     try:
-                        return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
+                        swapped = _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
                     except Exception:
                         pass  # verbose off, run intact
-                return _swap_perl_killtree(argv)
+                if swapped is None:
+                    swapped = _swap_perl_killtree(argv)
+                # Outermost, after the perl swaps that look for perl at argv[0].
+                # No try: a limit the user asked for is never silently dropped.
+                return memlimit.wrap_argv(swapped)
 
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
                 overlay_from = getattr(self, "_overlay_from", None)
@@ -1964,10 +1970,10 @@ def _run_gate(
             from .procstream import run_streaming
 
             res = run_streaming(
-                test_cmd, shell=True, cwd=workdir, timeout=timeout, on_line=on_line,
-                env=gate_env(), output_limit=4000,
+                memlimit.wrap_shell(test_cmd), shell=True, cwd=workdir, timeout=timeout,
+                on_line=on_line, env=gate_env(), output_limit=4000,
             )
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             return GateResult(False, None, "", infra_error=f"could not run test suite: {exc}")
         if res.timed_out:
             return GateResult(False, None, "", infra_error=f"test suite timed out after {timeout}s")

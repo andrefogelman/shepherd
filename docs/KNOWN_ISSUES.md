@@ -992,3 +992,28 @@ the feature, neither marker file appears, and nothing is written into the
 user's config directory. Pinned by `tests/test_planning.py`
 (`test_runs_isolated_from_the_repository`, `test_runs_in_the_repo_when_given_one`,
 `test_no_host_login_seeds_nothing`, `test_tempdir_failure_returns_error`).
+
+### A worker's test could take the whole host's memory
+
+**Was:** the jail confines where a worker writes, not how much memory the
+commands it runs may take. In a Linux experiment a Haiku worker rewrote an
+inline Markdown parser and ran its own tests; one `python3` grew to 19.8 GB
+and the kernel's global OOM killer (`constraint=CONSTRAINT_NONE`) had to pick
+a victim among every process on a shared host. It picked the test that time;
+nothing in shepherd would have stopped it from picking a service.
+
+**Fix:** opt-in `limits.memory_max` / `--memory-max SIZE` (run, run2, runN).
+Each worker and reviewer launch and each local gate run is wrapped in
+`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`,
+outermost, after the perl swaps; the command is exec'd in place, so the
+killtree and the watchdog see the same pid and group. An overrun is killed
+inside its own scope (`constraint=CONSTRAINT_MEMCG`), measured on the same
+host with the scope started from inside the Landlock jail, which kept
+refusing writes outside its roots. A limit that cannot be enforced stops the
+run before it starts: the preflight starts a real scope and reads back its
+`memory.max`, because a scope without the memory controller delegated starts
+fine and carries no limit. `--provider grok|codex` is refused with a limit,
+since those launches do not go through it; the remote gate is not covered.
+With no limit set, every argv and gate command is unchanged. Pinned by
+`tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
+allocation where the host can enforce the limit.
