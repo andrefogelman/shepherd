@@ -17,6 +17,11 @@ every argv is left exactly as it was.
 The active limit is process state, set once per run by the CLI like
 `set_worker_budget`, because the launches it governs are built deep inside
 the substrate's transport and the gate, far from any argument list.
+
+Worker and reviewer launches get the scope from the jail itself
+(`set_outer_prefix` in shepherd-ai's Landlock backend), so it wraps the jail
+from outside. Inside the jail it could not start: the jail hides the user
+manager's bus, because from that bus a command runs outside the jail.
 """
 
 from __future__ import annotations
@@ -140,16 +145,39 @@ def activate(limit: int | None, *, run=subprocess.run) -> str | None:
     None. Returns why it cannot be enforced, leaving nothing active, or None."""
     global _active, _no_expand
     _active = None
+    _clear_jail_prefix()
     if limit is None:
         return None
     reason = unavailable_reason(limit, run=run)
     if reason is None:
+        landlock = _jail_backend()
+        if landlock is None:
+            return "this shepherd-ai cannot put the scope around its jail (needs 0.3.6 or later)"
         version = _systemd_version(run)
         # unreadable here means the flag stays: a launch that fails on it is
         # loud, a command rewritten under it is not
         _no_expand = version is None or version >= _EXPANDS_SINCE
         _active = limit
+        landlock.set_outer_prefix(wrap_argv([]))
     return reason
+
+
+def _jail_backend():
+    """shepherd-ai's Landlock backend module, or None when it cannot take an
+    outer prefix (not installed, or older than 0.3.6)."""
+    try:
+        from vcs_core import _landlock_containment as landlock
+    except Exception:
+        return None
+    return landlock if hasattr(landlock, "set_outer_prefix") else None
+
+
+def _clear_jail_prefix() -> None:
+    # only a module some run already loaded can hold a prefix; importing it
+    # here would put the jail on the path of every run, limit or not
+    landlock = sys.modules.get("vcs_core._landlock_containment")
+    if landlock is not None and hasattr(landlock, "set_outer_prefix"):
+        landlock.set_outer_prefix([])
 
 
 def active() -> int | None:
@@ -159,9 +187,8 @@ def active() -> int | None:
 def _restore_env(rundir: str) -> list[str]:
     """What runs between the scope and the command so the command sees the
     XDG_RUNTIME_DIR it would have seen without the limit. systemd-run needs
-    the variable to find the user bus; a jailed worker handed it gets the
-    bus's path for free, and from that bus a transient service runs outside
-    the jail."""
+    the variable to find the user bus; nothing after the scope should inherit
+    a setting the user did not have."""
     original = os.environ.get("XDG_RUNTIME_DIR")
     if original is None:
         return ["env", "-u", "XDG_RUNTIME_DIR"]

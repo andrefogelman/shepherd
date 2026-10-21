@@ -25,16 +25,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from shepherd_dev import memlimit  # noqa: E402
 
+try:
+    from vcs_core import _landlock_containment as _landlock
+
+    _HAS_JAIL = hasattr(_landlock, "set_outer_prefix")
+except Exception:  # pragma: no cover - substrate absent
+    _HAS_JAIL = False
+
 GIB = 1024 ** 3
 
 
 class _Reset(unittest.TestCase):
+    #: activation builds the jail's prefix from the runtime directory, and a CI
+    #: runner may have none; only tests that start a real scope need the real one
+    real_runtime_dir = False
+
     def setUp(self):
         self._saved = memlimit._active
         memlimit._active = None
+        if not self.real_runtime_dir:
+            runtime = mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7")
+            runtime.start()
+            self.addCleanup(runtime.stop)
 
     def tearDown(self):
         memlimit._active = self._saved
+        memlimit._clear_jail_prefix()
 
 
 class ParseSize(unittest.TestCase):
@@ -148,6 +164,28 @@ class ActivateAndWrap(_Reset):
             self.assertIsNone(memlimit.activate(GIB))
         self.assertEqual(memlimit.active(), GIB)
         memlimit.activate(None)
+        self.assertIsNone(memlimit.active())
+
+    @unittest.skipUnless(_HAS_JAIL, "shepherd-ai 0.3.6+ not installed")
+    def test_activation_puts_the_scope_around_the_jail(self):
+        # inside the jail the scope could not reach the user bus it needs
+        from vcs_core import _landlock_containment as landlock
+
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            self.assertIsNone(memlimit.activate(GIB))
+        prefix = landlock.outer_prefix()
+        self.assertEqual(prefix[2:5], ("systemd-run", "--user", "--scope"))
+        self.assertIn(f"MemoryMax={GIB}", prefix)
+        # the jail's own argv follows the scope's `--` and the restored env
+        self.assertEqual(prefix[prefix.index("--") + 1:], tuple(memlimit._restore_env("/run/user/7")))
+        memlimit.activate(None)
+        self.assertEqual(landlock.outer_prefix(), ())
+
+    def test_activation_refuses_a_jail_that_takes_no_prefix(self):
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None), \
+                mock.patch.object(memlimit, "_jail_backend", lambda: None):
+            reason = memlimit.activate(GIB)
+        self.assertIn("0.3.6", reason or "")
         self.assertIsNone(memlimit.active())
 
     def test_inactive_wrap_is_identity(self):
@@ -301,44 +339,16 @@ class WorkerArgv(_Reset):
         self.assertTrue(argv[0].endswith("perl"))
         self.assertEqual(argv[2], _KILLTREE_PERL)
 
-    def test_limit_wraps_the_whole_launch(self):
+    def test_limit_leaves_the_worker_argv_alone(self):
+        # the argv runs inside the jail, where systemd-run cannot reach the user
+        # bus; the scope wraps the jail instead (see ActivateAndWrap)
         from shepherd_dev.supervisor import _KILLTREE_PERL
 
         memlimit._active = GIB
-        with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"), \
-                mock.patch.dict(memlimit.os.environ):
-            memlimit.os.environ.pop("XDG_RUNTIME_DIR", None)
-            argv = self._argv()
-        cut = argv.index("--") + 1
-        self.assertIn(f"MemoryMax={GIB}", argv[:cut])
-        # the parent had no XDG_RUNTIME_DIR, so neither does the worker
-        self.assertEqual(argv[cut:cut + 3], ["env", "-u", "XDG_RUNTIME_DIR"])
-        self.assertTrue(argv[cut + 3].endswith("perl"))
-        self.assertEqual(argv[cut + 5], _KILLTREE_PERL)
-
-
-@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
-class PlainProviderFallback(_Reset):
-    """When our provider cannot be built the framework's own one launches,
-    and its argv is never wrapped: with a limit active it must not launch."""
-
-    def test_no_limit_falls_back(self):
-        from shepherd_dialect import providers
-
-        from shepherd_dev.supervisor import _plain_provider
-
-        sentinel = object()
-        with mock.patch.object(providers, "ClaudeHeadlessProvider", lambda **kw: sentinel):
-            self.assertIs(_plain_provider(providers, {}), sentinel)
-
-    def test_limit_refuses_to_fall_back(self):
-        from shepherd_dialect import providers
-
-        from shepherd_dev.supervisor import _plain_provider
-
-        memlimit._active = GIB
-        with self.assertRaises(RuntimeError):
-            _plain_provider(providers, {})
+        argv = self._argv()
+        self.assertTrue(argv[0].endswith("perl"))
+        self.assertEqual(argv[2], _KILLTREE_PERL)
+        self.assertNotIn("systemd-run", argv)
 
 
 class Cli(_Reset):
@@ -387,17 +397,6 @@ class Cli(_Reset):
                 self.assertFalse(self._apply(flag="8G", provider=provider))
                 self.assertIsNone(memlimit.active())
 
-    def test_failed_rebind_stops_a_limited_run(self):
-        # the worker and reviewer argv is wrapped only by the rebound provider;
-        # without it they would run uncapped after the CLI said the limit was on
-        from shepherd_dev import cli
-
-        for limit, bound, expected in ((GIB, False, False), (GIB, True, True), (None, False, True)):
-            with self.subTest(limit=limit, bound=bound):
-                memlimit._active = limit
-                with mock.patch.object(cli, "set_worker_budget", lambda *a, **k: bound):
-                    self.assertEqual(cli._bind_claude_launches(300), expected)
-
     def test_flag_validator(self):
         import argparse
 
@@ -416,6 +415,8 @@ class Live(_Reset):
     """On a host that can enforce it: an allocation past the cap dies inside
     the scope, one under it runs."""
 
+    real_runtime_dir = True
+
     def _run(self, nbytes: int) -> subprocess.CompletedProcess:
         memlimit._active = 512 * 1024 ** 2
         cmd = memlimit.wrap_shell(f"{shlex.quote(sys.executable)} -c 'x = bytearray({nbytes}); print(1)'")
@@ -427,6 +428,29 @@ class Live(_Reset):
     def test_under_the_cap_runs(self):
         res = self._run(64 * 1024 ** 2)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux") and _HAS_JAIL, "Linux with shepherd-ai 0.3.6+")
+class LimitAroundTheJail(unittest.TestCase):
+    """On a host that can enforce a limit and hide the bus: a confined command
+    lands in the capped scope, and the user bus is gone from its view."""
+
+    def test_confined_command_is_capped_and_blind_to_the_bus(self):
+        from vcs_core._landlock_containment import LandlockContainmentBackend, service_manager_exposure
+
+        if memlimit.unavailable_reason(GIB) is not None or service_manager_exposure() is not None:
+            self.skipTest("this host cannot enforce a limit or hide the user bus")
+        rundir = memlimit.runtime_dir()
+        saved = memlimit._active
+        self.addCleanup(lambda: (memlimit.activate(None), setattr(memlimit, "_active", saved)))
+        self.assertIsNone(memlimit.activate(GIB))
+        backend = LandlockContainmentBackend()
+        with tempfile.TemporaryDirectory(prefix="shepherd-memjail-") as tmp:
+            profile = backend.profile_for((tmp,), allow_network=True)
+            done = backend.launch(profile, tmp, ["sh", "-c", f"{memlimit._READ_OWN_MAX}; ls -A {shlex.quote(rundir)}"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = done.stdout.split()
+        self.assertEqual(lines, [str(GIB)])  # memory.max is the limit, the runtime dir is empty
 
 
 if __name__ == "__main__":

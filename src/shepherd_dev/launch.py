@@ -30,9 +30,25 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+def jail_exposure() -> str | None:
+    """Why the jail leaves the user's service manager in the worker's reach on
+    this host, as a message for the user, or None. On Linux the jail hides the
+    manager's sockets with bubblewrap; without a working bubblewrap a worker
+    can still ask the manager to start a command for it, outside the jail.
+    The run goes ahead: the user decides whether to install bubblewrap."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        from vcs_core._landlock_containment import service_manager_exposure
+    except Exception:
+        return None  # a shepherd-ai older than 0.3.6 neither hides nor reports
+    return service_manager_exposure()
+
 
 #: Tools a worker or reviewer does not need. Sub-agents multiply cost outside
 #: the trace; the task-list and tool-search tools are session furniture; the

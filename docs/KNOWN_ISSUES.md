@@ -1059,9 +1059,11 @@ nothing in shepherd would have stopped it from picking a service.
 **Fix:** opt-in `limits.memory_max` / `--memory-max SIZE` (run, run2, runN).
 Each worker and reviewer launch and each local gate and `pre_gate_cmd` run
 is wrapped in
-`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`,
-outermost, after the perl swaps; the command is exec'd in place, so the
-killtree and the watchdog see the same pid and group. An overrun is killed
+`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`;
+the command is exec'd in place, so the killtree and the watchdog see the
+same pid and group. Worker and reviewer launches got the scope inside their
+argv, after the perl swaps, until the jail started hiding the user bus (next
+entry); since then the scope wraps the jail from outside. An overrun is killed
 inside its own scope (`constraint=CONSTRAINT_MEMCG`), measured on the same
 host with the scope started from inside the Landlock jail, which kept
 refusing writes outside its roots. A limit that cannot be enforced stops the
@@ -1070,20 +1072,53 @@ run before it starts: the preflight starts a real scope and reads back its
 fine and carries no limit. `--provider grok|codex` is refused with a limit,
 since those launches do not go through it; the remote gate is not covered.
 The wrapped command gets back the `XDG_RUNTIME_DIR` it had without the
-limit: `systemd-run` needs it to find the user bus, and a jailed worker
-handed the bus's path can ask it for a transient service outside the jail.
-This does not close that escape, which needs only the path a worker can
-guess; it only stops the limit from handing the path over.
+limit: `systemd-run` needs it to find the user bus, and nothing after the
+scope should inherit a setting the user did not have.
 From systemd 254 on, `systemd-run` may rewrite `${...}` and `$$` in the
 command it runs, and that command is a worker prompt or a gate string, so
 the scope passes `--expand-environment=no` there. Older versions do not
 expand and reject the flag; a version that cannot be read refuses the limit.
 On systemd 255 a `--scope` probe left `${HOME}`, `$$` and `$HOME` intact
 with and without the flag: there the flag is a guard, not a measured repair.
-Only the rebound launch provider wraps worker and reviewer argv, so a
-rebind that fails with a limit set stops the run (`_bind_claude_launches`),
-and a launch whose provider cannot be built does not fall back to the
-framework's unwrapped one (`_plain_provider`).
 With no limit set, every argv and gate command is unchanged. Pinned by
 `tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
 allocation where the host can enforce the limit.
+
+### A jailed worker could run commands outside the jail through the user bus
+
+**Was:** the Landlock jail confines writes by path, and Landlock below ABI 6
+does not govern connecting to a socket by path. `$XDG_RUNTIME_DIR` holds the
+user's session bus and systemd's private socket, so a confined command could
+run `systemd-run --user -- cmd`. systemd then started `cmd` as its own child,
+outside the jail's process tree, and the jail never applied to it. On
+Ubuntu 24.04 (kernel 6.8, Landlock ABI 4) a confined `systemd-run --user`
+wrote a file outside the writable roots. The memory scope made the path
+easier to find, since it set `XDG_RUNTIME_DIR` for the command, but a
+worker could guess `/run/user/<uid>` on its own.
+
+**Fix:** shepherd-ai 0.3.6 (fork `@2753e96`, release
+`v0.3.6-landlock-service-manager`), pinned in `pyproject.toml` and
+`uv.lock`. Where a service-manager socket exists, the Landlock backend puts
+bubblewrap in front of its runner. bubblewrap keeps the host view and mounts
+an empty tmpfs over the runtime directory, so the sockets are gone before
+Landlock confines the runner. The jail probe checks inside the real jail
+that the directory is empty. Pinned by the fork's
+`test_landlock_blocks_a_write_through_systemd_run` and
+`test_landlock_hides_the_user_service_manager_sockets`, which fail on 0.3.5.
+
+Without a working bubblewrap (not installed, or its user namespace denied
+by AppArmor), the worker still runs, with that path open. The CLI prints a
+warning naming the directory, the reason and how to install bubblewrap
+(`launch.jail_exposure`, `cli._warn_jail_exposure`). Hosts with no
+service-manager socket launch exactly as before.
+
+The memory scope needs the bus, so it moved out of the worker argv:
+`memlimit.activate` hands it to the backend's `set_outer_prefix`, which puts
+it around the jail. As a result the limit covers every confined launch,
+including the framework's own provider when the rebind fails, and the
+guards that stopped a limited run on a failed rebind are gone. A shepherd-ai
+without `set_outer_prefix` refuses the limit. Pinned by
+`tests/test_memlimit.py`: the activation tests, `WorkerArgv`, and
+`LimitAroundTheJail`, which, on a host that can do both, launches through
+the real jail and reads back the scope's `memory.max` and an empty runtime
+directory. `tests/test_launch_policy.py` `JailExposure` pins the warning.

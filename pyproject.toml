@@ -15,7 +15,7 @@ dependencies = [
 # this override once upstream ships them and PyPI's shepherd-ai picks them up.
 # The fork's main tracks upstream — 0.3.4 and 0.3.5 are upstream v0.3.1 (@d34d5ca, citation
 # checking as a packaged workflow) merged in at @d81dd41, so this wheel is ahead
-# of PyPI's 0.3.1 by the three local fixes below. Carried from 0.3.3: FileManifest.created_at
+# of PyPI's 0.3.1 by the local fixes below. Carried from 0.3.3: FileManifest.created_at
 # is tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
 # workspace carrier by platform instead of hardcoding APFS-only clonefile.
 #
@@ -29,6 +29,16 @@ dependencies = [
 # `2>/dev/null` in a worker's Bash call exited 1 before it ran (26 of 173 calls
 # in one Linux experiment). Seatbelt allows /dev, so macOS never showed it. The
 # ruleset now grants write_file on /dev/null alone; /dev/shm stays denied.
+#
+# 0.3.6 (@2753e96) closes an escape from that jail. Landlock below ABI 6 does
+# not govern connecting to a socket by path, so a confined command could run
+# `systemd-run --user -- cmd` over the user bus in $XDG_RUNTIME_DIR; systemd
+# then started cmd as its own child, outside the jail, and its writes landed.
+# Where such a socket exists, bubblewrap now mounts an empty tmpfs over that
+# directory before the runner confines itself. Without a working bubblewrap
+# the launch still runs and the backend reports the open door
+# (service_manager_exposure), which the CLI prints. `set_outer_prefix` puts an
+# argv around the jail: the memory scope goes there, since it needs the bus.
 #
 # The first two local fixes are the same shape: the substrate walked a real tree and
 # crashed on something ordinary that lives in one.
@@ -51,10 +61,11 @@ dependencies = [
 # so a published tag's assets on andrefogelman/shepherd-ai must NEVER be
 # replaced or re-uploaded. Any future change to this wheel — even a trivial
 # one — gets a NEW tag and a corresponding uv.lock update. v0.3.1-dotgit-fix,
-# v0.3.2-symlink-fix, v0.3.3-upstream-sync and v0.3.4-upstream-sync are left
+# v0.3.2-symlink-fix, v0.3.3-upstream-sync, v0.3.4-upstream-sync and
+# v0.3.5-landlock-devnull are left
 # published and untouched for exactly that reason.
 [tool.uv.sources]
-shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.5-landlock-devnull/shepherd_ai-0.3.5-py3-none-any.whl" }
+shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.6-landlock-service-manager/shepherd_ai-0.3.6-py3-none-any.whl" }
 
 [project.scripts]
 shepherd-dev = "shepherd_dev.cli:entry"

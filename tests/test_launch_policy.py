@@ -206,5 +206,60 @@ class ThroughTheTransport(unittest.TestCase):
         self.assertTrue(any(str(a).startswith("CLAUDE_CODE_TMPDIR=") for a in argv))
 
 
+
+class JailExposure(unittest.TestCase):
+    """Where the jail cannot hide the user's service manager, the user is told
+    once and the run goes ahead; elsewhere nothing is printed."""
+
+    def test_not_linux_reports_nothing(self):
+        from unittest import mock
+
+        from shepherd_dev import launch
+
+        with mock.patch.object(launch.sys, "platform", "darwin"):
+            self.assertIsNone(launch.jail_exposure())
+
+    def test_linux_relays_the_backend_message(self):
+        from unittest import mock
+
+        from shepherd_dev import launch
+
+        backend = SimpleNamespace(service_manager_exposure=lambda: "the jail does not hide X. Install bubblewrap")
+        with mock.patch.object(launch.sys, "platform", "linux"), \
+                mock.patch.dict(sys.modules, {"vcs_core._landlock_containment": backend}):
+            self.assertEqual(launch.jail_exposure(), "the jail does not hide X. Install bubblewrap")
+
+    def test_cli_warns_and_does_not_stop(self):
+        import contextlib
+        import io
+        import warnings
+        from unittest import mock
+
+        from shepherd_dev import cli
+
+        err = io.StringIO()
+        with warnings.catch_warnings(), mock.patch(
+            "shepherd_dev.launch.jail_exposure", lambda: "the jail does not hide X. Install bubblewrap"
+        ), contextlib.redirect_stderr(err):
+            self.assertIsNone(cli._warn_jail_exposure(SimpleNamespace(provider="claude")))
+            # the backend's own per-launch warning is not repeated
+            warnings.warn("the jail does not hide X", RuntimeWarning, stacklevel=1)
+        self.assertIn("warning: the jail does not hide X. Install bubblewrap", err.getvalue())
+        self.assertEqual(err.getvalue().count("the jail does not hide"), 1)
+
+    def test_cli_silent_when_nothing_is_open(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from shepherd_dev import cli
+
+        err = io.StringIO()
+        with mock.patch("shepherd_dev.launch.jail_exposure", lambda: None), contextlib.redirect_stderr(err):
+            cli._warn_jail_exposure(SimpleNamespace(provider="claude"))
+            cli._warn_jail_exposure(SimpleNamespace(provider="static"))
+        self.assertEqual(err.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

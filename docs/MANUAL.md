@@ -482,6 +482,17 @@ controlador de memória delegado), o run para antes de começar e diz por quê.
 Também recusa `--provider grok|codex`, cujos launches não passam por ele. O
 portão remoto roda em outra máquina e não é coberto.
 
+**A jaula no Linux e o `bubblewrap`.** O Landlock limita onde o worker escreve,
+mas não impede que ele se conecte a um socket. Em `/run/user/<uid>` mora o
+barramento do gerenciador systemd do usuário: por ele, `systemd-run --user`
+dentro da jaula pede ao systemd que rode um comando, e esse comando nasce fora
+da jaula. Onde o `bubblewrap` (`bwrap`) funciona, a jaula monta um diretório
+vazio por cima de `/run/user/<uid>` e esse caminho some. Onde ele falta, ou o
+AppArmor bloqueia o namespace dele (Ubuntu 23.10 em diante), o run segue sem
+essa proteção e avisa no começo, dizendo o motivo e como instalar
+(`sudo apt install bubblewrap`, `sudo dnf install bubblewrap`). O teto de
+memória fica por fora da jaula e continua valendo nos dois casos.
+
 ## Modo verbose & trace (passo a passo)
 
 O feed vivo passo a passo é o **padrão** do `run`: cada ferramenta que o worker

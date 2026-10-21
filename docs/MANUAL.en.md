@@ -488,6 +488,17 @@ delegated), the run stops before it starts and says why. It also refuses
 `--provider grok|codex`, whose launches do not go through it. The remote gate
 runs on another machine and is not covered.
 
+**The Linux jail and `bubblewrap`.** Landlock limits where a worker writes, not
+which sockets it connects to. `/run/user/<uid>` holds the bus of the user's
+systemd manager: through it, `systemd-run --user` inside the jail asks systemd
+to run a command, and that command starts outside the jail. Where `bubblewrap`
+(`bwrap`) works, the jail mounts an empty directory over `/run/user/<uid>` and
+that path is gone. Where it is missing, or AppArmor denies its namespace
+(Ubuntu 23.10 and later), the run goes ahead without that protection and warns
+at the start, with the reason and how to install it (`sudo apt install
+bubblewrap`, `sudo dnf install bubblewrap`). The memory ceiling sits outside
+the jail and applies either way.
+
 ## Verbose mode & trace (step by step)
 
 The live step-by-step feed is `run`'s **default**: every tool the worker uses,

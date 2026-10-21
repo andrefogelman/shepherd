@@ -753,12 +753,11 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
-            if not _bind_claude_launches(
+            set_worker_budget(
                 args.worker_budget, stream_hook=stream_hook,
                 launch=LaunchPolicy.from_config(repo_root), roles=_role_models(args, repo_root),
                 seed=LaunchSeed.from_config(repo_root),
-            ):
-                return 2
+            )
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
 
@@ -906,6 +905,23 @@ def _apply_run_limits(args, repo_root: Path, command: str) -> None:
         print(f"limits (from {config.CONFIG_NAME}): " + ", ".join(from_config))
 
 
+def _warn_jail_exposure(args) -> None:
+    """Tell the user, once per run, when the jail cannot hide the user's
+    service manager here. The run goes ahead without that protection."""
+    if getattr(args, "provider", "claude") == "static":
+        return  # nothing is launched
+    from .launch import jail_exposure
+
+    message = jail_exposure()
+    if message is None:
+        return
+    print(f"warning: {message}", file=sys.stderr)
+    import warnings
+
+    # the backend warns again on every launch; once is enough
+    warnings.filterwarnings("ignore", message="the jail does not hide", category=RuntimeWarning)
+
+
 def _apply_memory_limit(args, repo_root: Path) -> bool:
     """Flag > repo/global `limits.memory_max` > none. With a limit, every
     worker and reviewer launch and every local gate runs in its own
@@ -944,23 +960,6 @@ def _apply_memory_limit(args, repo_root: Path) -> bool:
     if config.remote_gate(repo_root) is not None:
         print("memory limit: the remote gate runs on another machine and is not covered")
     return True
-
-
-def _bind_claude_launches(seconds: int, **kwargs) -> bool:
-    """set_worker_budget, for a run that may carry a memory limit. Only the
-    rebound provider puts worker and reviewer launches in the memory scope, so
-    a failed rebind may cost the budget's hard kill (the watchdog still
-    enforces the clock) but never the limit: the run stops. False = stop."""
-    from . import memlimit
-
-    if set_worker_budget(seconds, **kwargs) or memlimit.active() is None:
-        return True
-    print(
-        "error: memory limit set but the worker launch could not be rebound into its scope; "
-        "worker and reviewer launches would run without it",
-        file=sys.stderr,
-    )
-    return False
 
 
 def _role_models(args, repo_root: Path) -> RoleModels:
@@ -1175,6 +1174,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1286,11 +1286,10 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1551,6 +1550,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run2")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1586,11 +1586,10 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1808,6 +1807,7 @@ def cmd_runN(args) -> int:
     _apply_run_limits(args, repo_root, "runN")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
     features = list(args.features)
@@ -1912,11 +1912,10 @@ def cmd_runN(args) -> int:
               file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,

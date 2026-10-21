@@ -1143,17 +1143,15 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
                     argv = model_argv(argv, getattr(self, "_role", None) or RoleModel())
                 except Exception:
                     pass  # a hardening failure must not cost the launch
-                swapped = None
+                # No memory scope here: this argv runs inside the jail, which hides
+                # the user manager the scope needs. `memlimit.activate` puts the
+                # scope around the jail instead.
                 if stream_hook is not None:
                     try:
-                        swapped = _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
+                        return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
                     except Exception:
                         pass  # verbose off, run intact
-                if swapped is None:
-                    swapped = _swap_perl_killtree(argv)
-                # Outermost, after the perl swaps that look for perl at argv[0].
-                # No try: a limit the user asked for is never silently dropped.
-                return memlimit.wrap_argv(swapped)
+                return _swap_perl_killtree(argv)
 
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
                 overlay_from = getattr(self, "_overlay_from", None)
@@ -1189,7 +1187,7 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
             try:
                 provider = _KillTreeProvider(**kwargs)
             except Exception:
-                return _plain_provider(providers, kwargs)  # never block the launch
+                return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
             # Frozen dataclass: the role rides as a private attribute set past
             # __init__, read by command_argv for --effort/--fallback-model.
             object.__setattr__(provider, "_role", role)
@@ -1216,17 +1214,6 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
         print(f"warning: worker budget rebind unavailable ({type(exc).__name__}: {exc}); "
               "the watchdog still enforces the budget", file=_sys.stderr)
         return False
-
-
-def _plain_provider(providers, kwargs):
-    """The framework's own provider, for a launch whose rebound one could not
-    be built. Its argv never goes through the memory scope, so with a limit
-    active the launch stops here instead of running uncapped."""
-    if memlimit.active() is not None:
-        raise RuntimeError(
-            "memory limit active but this launch could not be rebound into its scope; not launching without it"
-        )
-    return providers.ClaudeHeadlessProvider(**kwargs)
 
 
 def _fair_shares(sizes: list[int], limit: int) -> list[int]:
