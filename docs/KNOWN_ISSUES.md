@@ -1023,3 +1023,26 @@ by `tests/test_events.py`
 (`test_baseline_read_does_not_open_through_the_substrate`,
 `test_drain_returns_when_the_tailer_is_stuck`) and
 `tests/test_verbose.py` (`test_newlines_translated_like_read_text`).
+
+### On Linux the jailed worker could not write to /dev/null
+
+**Was:** the Landlock jail in the substrate (`vcs_core._landlock_containment`,
+shipped in the shepherd-ai wheel) denied every write outside the writable
+roots, `/dev/null` included. Every shell redirect into it, `cmd >/dev/null`
+or `2>/dev/null`, failed with `Permission denied` and exited before the
+command ran. The Claude CLI's own Bash wrapper hits it too, so a worker
+command could fail even when it named no `/dev/null`. Seatbelt allows writes
+under `/dev`, so macOS never showed it. In a Linux experiment with a Haiku
+worker, 26 of 173 Bash calls failed this way, among them a plain
+`python3 -m unittest -q 2>&1`.
+
+**Fix:** shepherd-ai 0.3.5 (fork `@713b032`, release
+`v0.3.5-landlock-devnull`) adds one Landlock rule on `/dev/null` itself,
+opened with `O_PATH` and granting `write_file` only. Nothing else under
+`/dev` is granted: `/dev/shm` stays denied. If the rule cannot be added, the
+ruleset stays as strict as before. `pyproject.toml` and `uv.lock` now pin
+that wheel. Pinned by the fork's
+`test_landlock_allows_dev_null_and_nothing_else_under_dev`
+(`vcs-core/packages/core/tests/container/test_landlock_containment.py`),
+which fails on 0.3.4 with `cannot create /dev/null: Permission denied`; this
+suite does not exercise native jails.
