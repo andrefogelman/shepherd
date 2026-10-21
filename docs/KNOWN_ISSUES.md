@@ -1074,6 +1074,16 @@ limit: `systemd-run` needs it to find the user bus, and a jailed worker
 handed the bus's path can ask it for a transient service outside the jail.
 This does not close that escape, which needs only the path a worker can
 guess; it only stops the limit from handing the path over.
+From systemd 254 on, `systemd-run` may rewrite `${...}` and `$$` in the
+command it runs, and that command is a worker prompt or a gate string, so
+the scope passes `--expand-environment=no` there. Older versions do not
+expand and reject the flag; a version that cannot be read refuses the limit.
+On systemd 255 a `--scope` probe left `${HOME}`, `$$` and `$HOME` intact
+with and without the flag: there the flag is a guard, not a measured repair.
+Only the rebound launch provider wraps worker and reviewer argv, so a
+rebind that fails with a limit set stops the run (`_bind_claude_launches`),
+and a launch whose provider cannot be built does not fall back to the
+framework's unwrapped one (`_plain_provider`).
 With no limit set, every argv and gate command is unchanged. Pinned by
 `tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
 allocation where the host can enforce the limit.

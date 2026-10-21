@@ -61,18 +61,34 @@ class ScopeArgv(unittest.TestCase):
         self.assertIn(f"MemoryMax={2 * GIB}", argv)
         self.assertIn("MemorySwapMax=0", argv)  # no swap: the cap is the cap
         self.assertEqual(argv[-1], "--")
+        self.assertNotIn("--expand-environment=no", argv)
+
+    def test_expansion_off(self):
+        # systemd-run >= 254 expands ${...} and $$ in the command it runs; the
+        # command is a worker prompt or a gate string, which must arrive intact
+        argv = memlimit.scope_argv(2 * GIB, "/run/user/7", no_expand=True)
+        self.assertLess(argv.index("--expand-environment=no"), argv.index("--"))
 
 
 def _proc(rc=0, out="", err=""):
     return subprocess.CompletedProcess([], rc, stdout=out, stderr=err)
 
 
+def _versioned(run, version="systemd 255 (255.4-1ubuntu8.18)"):
+    """`run` for the scope probe, answering `systemd-run --version` first."""
+    def dispatch(argv, **kw):
+        if argv[-1] == "--version":
+            return _proc(0, out=f"{version}\n+PAM +AUDIT\n")
+        return run(argv, **kw)
+    return dispatch
+
+
 class UnavailableReason(unittest.TestCase):
-    def _linux(self, run, which="/usr/bin/systemd-run", rundir="/run/user/7"):
+    def _linux(self, run, which="/usr/bin/systemd-run", rundir="/run/user/7", version="systemd 255 (255.4)"):
         with mock.patch.object(memlimit.sys, "platform", "linux"), \
                 mock.patch.object(memlimit.shutil, "which", lambda _n: which), \
                 mock.patch.object(memlimit, "runtime_dir", lambda: rundir):
-            return memlimit.unavailable_reason(GIB, run=run)
+            return memlimit.unavailable_reason(GIB, run=run if run is None else _versioned(run, version))
 
     def test_not_linux(self):
         with mock.patch.object(memlimit.sys, "platform", "darwin"):
@@ -102,6 +118,23 @@ class UnavailableReason(unittest.TestCase):
 
         self.assertIsNone(self._linux(run))
         self.assertEqual(seen["argv"][:3], ["env", "XDG_RUNTIME_DIR=/run/user/7", "systemd-run"])
+        self.assertIn("--expand-environment=no", seen["argv"])
+
+    def test_old_systemd_gets_no_expansion_flag(self):
+        # before 254 systemd-run does not expand, and rejects the flag
+        seen = {}
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return _proc(0, out=f"{GIB}\n")
+
+        self.assertIsNone(self._linux(run, version="systemd 252 (252.22-1~deb12u1)"))
+        self.assertNotIn("--expand-environment=no", seen["argv"])
+
+    def test_unreadable_version_is_refused(self):
+        # without the version there is no knowing whether the command would be rewritten
+        reason = self._linux(lambda *a, **k: _proc(0, out=f"{GIB}\n"), version="something else")
+        self.assertIn("version", reason or "")
 
 
 class ActivateAndWrap(_Reset):
@@ -147,6 +180,15 @@ class ActivateAndWrap(_Reset):
                         argv = memlimit.wrap_argv(["cmd"])
                     cut = argv.index("--") + 1
                     self.assertEqual(argv[cut:], [*tail, "cmd"])
+
+    def test_activation_turns_expansion_off_where_systemd_expands(self):
+        for version, flagged in (("systemd 255 (255.4)", True), ("systemd 252 (252.22)", False)):
+            with self.subTest(version=version):
+                with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+                    memlimit.activate(GIB, run=_versioned(None, version))
+                with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"):
+                    argv = memlimit.wrap_argv(["cmd"])
+                self.assertEqual("--expand-environment=no" in argv, flagged)
 
     def test_active_wrap_without_runtime_dir_refuses(self):
         memlimit._active = GIB
@@ -275,6 +317,30 @@ class WorkerArgv(_Reset):
         self.assertEqual(argv[cut + 5], _KILLTREE_PERL)
 
 
+@unittest.skipUnless(_HAS_SUBSTRATE, "shepherd substrate not installed")
+class PlainProviderFallback(_Reset):
+    """When our provider cannot be built the framework's own one launches,
+    and its argv is never wrapped: with a limit active it must not launch."""
+
+    def test_no_limit_falls_back(self):
+        from shepherd_dialect import providers
+
+        from shepherd_dev.supervisor import _plain_provider
+
+        sentinel = object()
+        with mock.patch.object(providers, "ClaudeHeadlessProvider", lambda **kw: sentinel):
+            self.assertIs(_plain_provider(providers, {}), sentinel)
+
+    def test_limit_refuses_to_fall_back(self):
+        from shepherd_dialect import providers
+
+        from shepherd_dev.supervisor import _plain_provider
+
+        memlimit._active = GIB
+        with self.assertRaises(RuntimeError):
+            _plain_provider(providers, {})
+
+
 class Cli(_Reset):
     def setUp(self):
         super().setUp()
@@ -320,6 +386,17 @@ class Cli(_Reset):
             with self.subTest(provider=provider):
                 self.assertFalse(self._apply(flag="8G", provider=provider))
                 self.assertIsNone(memlimit.active())
+
+    def test_failed_rebind_stops_a_limited_run(self):
+        # the worker and reviewer argv is wrapped only by the rebound provider;
+        # without it they would run uncapped after the CLI said the limit was on
+        from shepherd_dev import cli
+
+        for limit, bound, expected in ((GIB, False, False), (GIB, True, True), (None, False, True)):
+            with self.subTest(limit=limit, bound=bound):
+                memlimit._active = limit
+                with mock.patch.object(cli, "set_worker_budget", lambda *a, **k: bound):
+                    self.assertEqual(cli._bind_claude_launches(300), expected)
 
     def test_flag_validator(self):
         import argparse

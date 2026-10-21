@@ -753,11 +753,12 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
-            set_worker_budget(
+            if not _bind_claude_launches(
                 args.worker_budget, stream_hook=stream_hook,
                 launch=LaunchPolicy.from_config(repo_root), roles=_role_models(args, repo_root),
                 seed=LaunchSeed.from_config(repo_root),
-            )
+            ):
+                return 2
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
 
@@ -943,6 +944,23 @@ def _apply_memory_limit(args, repo_root: Path) -> bool:
     if config.remote_gate(repo_root) is not None:
         print("memory limit: the remote gate runs on another machine and is not covered")
     return True
+
+
+def _bind_claude_launches(seconds: int, **kwargs) -> bool:
+    """set_worker_budget, for a run that may carry a memory limit. Only the
+    rebound provider puts worker and reviewer launches in the memory scope, so
+    a failed rebind may cost the budget's hard kill (the watchdog still
+    enforces the clock) but never the limit: the run stops. False = stop."""
+    from . import memlimit
+
+    if set_worker_budget(seconds, **kwargs) or memlimit.active() is None:
+        return True
+    print(
+        "error: memory limit set but the worker launch could not be rebound into its scope; "
+        "worker and reviewer launches would run without it",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _role_models(args, repo_root: Path) -> RoleModels:
@@ -1268,10 +1286,11 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1567,10 +1586,11 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1892,10 +1912,11 @@ def cmd_runN(args) -> int:
               file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,

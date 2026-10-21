@@ -34,7 +34,11 @@ MIN_BYTES = 256 * 1024 * 1024
 _UNITS = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
 _SIZE = re.compile(r"^\s*(\d+)\s*([KMGT]?)i?B?\s*$", re.IGNORECASE)
 
+#: systemd-run expands ${...} and $$ in the command it runs since this version.
+_EXPANDS_SINCE = 254
+
 _active: int | None = None
+_no_expand = True
 
 
 def parse_size(value: object) -> int:
@@ -68,17 +72,30 @@ def runtime_dir() -> str | None:
     return candidate if os.path.isdir(candidate) else None
 
 
-def scope_argv(limit: int, rundir: str) -> list[str]:
+def scope_argv(limit: int, rundir: str, *, no_expand: bool = False) -> list[str]:
     """The prefix that runs a command in its own memory-capped scope. The
     command is exec'd in place, so its pid, process group and session are the
     caller's: the launch perl's group kill and the watchdog see no change.
-    `--collect` drops the unit even when the scope ended in an OOM kill."""
+    `--collect` drops the unit even when the scope ended in an OOM kill.
+    `no_expand` keeps systemd-run from rewriting `${...}` and `$$` in the
+    command, a worker prompt or a gate string; versions before 254 do not
+    expand and reject the flag."""
     return [
         "env", f"XDG_RUNTIME_DIR={rundir}",
         "systemd-run", "--user", "--scope", "--quiet", "--collect",
+        *(["--expand-environment=no"] if no_expand else []),
         "-p", f"MemoryMax={limit}", "-p", "MemorySwapMax=0",
         "--",
     ]
+
+
+def _systemd_version(run) -> int | None:
+    try:
+        proc = run(["systemd-run", "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.match(r"\s*systemd\s+(\d+)", proc.stdout or "")
+    return int(match.group(1)) if match else None
 
 
 #: Prints the memory.max of the cgroup the shell landed in.
@@ -96,9 +113,12 @@ def unavailable_reason(limit: int, *, run=subprocess.run) -> str | None:
     rundir = runtime_dir()
     if rundir is None:
         return "no user runtime directory (XDG_RUNTIME_DIR or /run/user/<uid>): no systemd user manager to ask"
+    version = _systemd_version(run)
+    if version is None:
+        return "could not read systemd-run's version, so whether it rewrites ${...} in the command is unknown"
     try:
         proc = run(
-            [*scope_argv(limit, rundir), "sh", "-c", _READ_OWN_MAX],
+            [*scope_argv(limit, rundir, no_expand=version >= _EXPANDS_SINCE), "sh", "-c", _READ_OWN_MAX],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -118,12 +138,16 @@ def unavailable_reason(limit: int, *, run=subprocess.run) -> str | None:
 def activate(limit: int | None, *, run=subprocess.run) -> str | None:
     """Make `limit` the ceiling for this process's launches, or clear it with
     None. Returns why it cannot be enforced, leaving nothing active, or None."""
-    global _active
+    global _active, _no_expand
     _active = None
     if limit is None:
         return None
     reason = unavailable_reason(limit, run=run)
     if reason is None:
+        version = _systemd_version(run)
+        # unreadable here means the flag stays: a launch that fails on it is
+        # loud, a command rewritten under it is not
+        _no_expand = version is None or version >= _EXPANDS_SINCE
         _active = limit
     return reason
 
@@ -153,7 +177,7 @@ def wrap_argv(argv: list) -> list:
     rundir = runtime_dir()
     if rundir is None:  # checked at activation; the directory vanished since
         raise RuntimeError("memory limit active but the user runtime directory is gone")
-    return [*scope_argv(_active, rundir), *_restore_env(rundir), *argv]
+    return [*scope_argv(_active, rundir, no_expand=_no_expand), *_restore_env(rundir), *argv]
 
 
 def wrap_shell(command: str) -> str:
