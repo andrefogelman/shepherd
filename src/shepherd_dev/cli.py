@@ -753,11 +753,12 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
-            set_worker_budget(
+            if not _bind_claude_launches(
                 args.worker_budget, stream_hook=stream_hook,
                 launch=LaunchPolicy.from_config(repo_root), roles=_role_models(args, repo_root),
                 seed=LaunchSeed.from_config(repo_root),
-            )
+            ):
+                return 2
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
 
@@ -903,6 +904,63 @@ def _apply_run_limits(args, repo_root: Path, command: str) -> None:
             args.max_attempts = DEFAULT_MAX_ATTEMPTS[command]
     if from_config:
         print(f"limits (from {config.CONFIG_NAME}): " + ", ".join(from_config))
+
+
+def _apply_memory_limit(args, repo_root: Path) -> bool:
+    """Flag > repo/global `limits.memory_max` > none. With a limit, every
+    worker and reviewer launch and every local gate runs in its own
+    memory-capped cgroup scope. A limit that is unreadable, or that this
+    machine cannot enforce, stops the run: it was asked for. False = stop.
+    Always resets the process's limit, so a run never inherits the last."""
+    from . import memlimit
+
+    raw = getattr(args, "memory_max", None)
+    origin = "--memory-max"
+    if raw is None:
+        raw = config.memory_max(repo_root)
+        origin = f"limits.memory_max in {config.CONFIG_NAME}"
+    if raw is None:
+        memlimit.activate(None)
+        return True
+    try:
+        limit = memlimit.parse_size(raw)
+    except ValueError as exc:
+        memlimit.activate(None)
+        print(f"error: {origin}: {exc}", file=sys.stderr)
+        return False
+    if getattr(args, "provider", "claude") in ("grok", "codex"):
+        memlimit.activate(None)
+        print(
+            f"error: a memory limit covers the claude provider and the local gate; "
+            f"--provider {args.provider} launches would run without it",
+            file=sys.stderr,
+        )
+        return False
+    reason = memlimit.activate(limit)
+    if reason is not None:
+        print(f"error: memory limit {memlimit.describe(limit)} ({origin}) cannot be enforced: {reason}", file=sys.stderr)
+        return False
+    print(f"memory limit: {memlimit.describe(limit)} per worker, reviewer and local gate launch (cgroup scope)")
+    if config.remote_gate(repo_root) is not None:
+        print("memory limit: the remote gate runs on another machine and is not covered")
+    return True
+
+
+def _bind_claude_launches(seconds: int, **kwargs) -> bool:
+    """set_worker_budget, for a run that may carry a memory limit. Only the
+    rebound provider puts worker and reviewer launches in the memory scope, so
+    a failed rebind may cost the budget's hard kill (the watchdog still
+    enforces the clock) but never the limit: the run stops. False = stop."""
+    from . import memlimit
+
+    if set_worker_budget(seconds, **kwargs) or memlimit.active() is None:
+        return True
+    print(
+        "error: memory limit set but the worker launch could not be rebound into its scope; "
+        "worker and reviewer launches would run without it",
+        file=sys.stderr,
+    )
+    return False
 
 
 def _role_models(args, repo_root: Path) -> RoleModels:
@@ -1115,6 +1173,8 @@ def cmd_run(args) -> int:
 
 def _cmd_run_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run")
+    if not _apply_memory_limit(args, repo_root):
+        return 2
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1226,10 +1286,11 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1488,6 +1549,8 @@ def cmd_run2(args) -> int:
 
 def _cmd_run2_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run2")
+    if not _apply_memory_limit(args, repo_root):
+        return 2
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1523,10 +1586,11 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1742,6 +1806,8 @@ def cmd_runN(args) -> int:
     if repo_root is None:
         return 2
     _apply_run_limits(args, repo_root, "runN")
+    if not _apply_memory_limit(args, repo_root):
+        return 2
     if not _auth_preflight(args, repo_root):
         return 2
     features = list(args.features)
@@ -1846,10 +1912,11 @@ def cmd_runN(args) -> int:
               file=sys.stderr)
 
     if args.provider == "claude":
-        set_worker_budget(
+        if not _bind_claude_launches(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        )
+        ):
+            return 2
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -2170,6 +2237,18 @@ def cmd_trace(args) -> int:
     return 0
 
 
+def _memory_size(text: str) -> str:
+    """argparse type for --memory-max: checked here so a typo fails at the
+    prompt, kept as written so the run reports it the way the user wrote it."""
+    from . import memlimit
+
+    try:
+        memlimit.parse_size(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+    return text
+
+
 def _positive_seconds(text: str) -> int:
     """argparse type for a wall-clock budget. Rejects 0 and negatives: perl's
     `alarm 0` cancels the timer rather than firing it, so a budget of 0 removed
@@ -2360,6 +2439,12 @@ def build_parser() -> argparse.ArgumentParser:
              "default: limits.worker_budget in .shepherd-dev.json, else 900)",
     )
     p_run.add_argument(
+        "--memory-max", type=_memory_size, default=None, metavar="SIZE",
+        help="cap each worker, reviewer and local gate launch at this much memory, "
+             "e.g. 8G (Linux, cgroup scope via systemd-run --user; the run refuses "
+             "to start where it cannot be enforced; default: limits.memory_max, else none)",
+    )
+    p_run.add_argument(
         "--model", default=None, metavar="MODEL",
         help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
              "default: the claude CLI's own default)",
@@ -2457,6 +2542,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run2.add_argument("--gate-timeout", type=int, default=None, help="seconds for the combined gate (default: limits.gate_timeout, else 600)")
     p_run2.add_argument("--worker-budget", type=_positive_seconds, default=None, help="seconds per worker attempt (default: limits.worker_budget, else 900)")
     p_run2.add_argument(
+        "--memory-max", type=_memory_size, default=None, metavar="SIZE",
+        help="cap each worker, reviewer and local gate launch at this much memory, "
+             "e.g. 8G (Linux, cgroup scope via systemd-run --user; the run refuses "
+             "to start where it cannot be enforced; default: limits.memory_max, else none)",
+    )
+    p_run2.add_argument(
         "--model", default=None, metavar="MODEL",
         help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "
              "default: the claude CLI's own default)",
@@ -2492,6 +2583,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_runN.add_argument("--max-attempts", type=int, default=None, help="attempts per lane (default: limits.max_attempts, else 2)")
     p_runN.add_argument("--gate-timeout", type=int, default=None, help="seconds per lane gate (default: limits.gate_timeout, else 600)")
     p_runN.add_argument("--worker-budget", type=_positive_seconds, default=None, help="seconds per worker attempt (default: limits.worker_budget, else 900)")
+    p_runN.add_argument(
+        "--memory-max", type=_memory_size, default=None, metavar="SIZE",
+        help="cap each worker, reviewer and local gate launch at this much memory, "
+             "e.g. 8G (Linux, cgroup scope via systemd-run --user; the run refuses "
+             "to start where it cannot be enforced; default: limits.memory_max, else none)",
+    )
     p_runN.add_argument(
         "--model", default=None, metavar="MODEL",
         help="model for the worker (overrides models.worker.model in .shepherd-dev.json; "

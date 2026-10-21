@@ -325,6 +325,7 @@ shepherd-dev settle run-abc123 --repo ~/projetos/meu-app --reject   # descarta
 | `--max-attempts` | run · run2 | Tentativas por worker (padrão 3; `limits.max_attempts` no `.shepherd-dev.json` muda o padrão do repo). |
 | `--review-rounds N` | run | Rodadas extras gastas numa proposta que passou no portão mas o revisor REJEITOU (padrão 1 = entrega ao humano, como antes; teto 5). |
 | `--worker-budget` | run · run2 | Segundos por tentativa (padrão 900; `limits.worker_budget` na config muda o padrão do repo, assim como `limits.gate_timeout` para `--gate-timeout`). |
+| `--memory-max SIZE` | run · run2 · runN | Teto de memória (ex.: `8G`) para cada launch do worker, do revisor e do portão local, num cgroup próprio (`systemd-run --user --scope`, sem swap). Só Linux; onde não dá para aplicar, o run se recusa a começar. Padrão: `limits.memory_max`, senão nenhum. |
 | `--max-repairs` | run2 | Rodadas de reparo no portão combinado (padrão 2). |
 | `--provider static` | run · run2 | Ensaio offline sem LLM (custo zero). |
 | `--optimize-after` | run · run2 | Roda o `optimize` ao fim do run (com `--optimize-apply` persiste). |
@@ -467,6 +468,19 @@ budget que estourou) e a próxima tentativa recebe a orientação de timeout; an
 era um `run_failed` genérico. `limits.worker_budget`, `limits.gate_timeout` e
 `limits.max_attempts` na config mudam os padrões do repo; as flags continuam
 vencendo.
+
+**Teto de memória.** A jaula limita onde o worker escreve, não quanta memória os
+comandos dele usam: um teste escrito por um worker chegou a 19,8 GB num host
+Linux compartilhado e o OOM global do kernel teve de escolher uma vítima entre
+todos os processos da máquina. `limits.memory_max` (ex.: `"8G"`) ou
+`--memory-max 8G` põe cada launch do worker e do revisor, e cada execução do
+portão local e do pré-gate (`pre_gate_cmd`), num cgroup próprio via `systemd-run --user --scope`, com
+`MemoryMax` no teto e sem swap: quem passa do teto morre dentro do próprio
+scope, e mais nada. É opcional e vem desligado. Pedido e impossível de aplicar
+(fora do Linux, sem `systemd-run`, sem gerenciador systemd do usuário, sem o
+controlador de memória delegado), o run para antes de começar e diz por quê.
+Também recusa `--provider grok|codex`, cujos launches não passam por ele. O
+portão remoto roda em outra máquina e não é coberto.
 
 ## Modo verbose & trace (passo a passo)
 

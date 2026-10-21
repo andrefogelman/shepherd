@@ -1046,3 +1046,44 @@ that wheel. Pinned by the fork's
 (`vcs-core/packages/core/tests/container/test_landlock_containment.py`),
 which fails on 0.3.4 with `cannot create /dev/null: Permission denied`; this
 suite does not exercise native jails.
+
+### A worker's test could take the whole host's memory
+
+**Was:** the jail confines where a worker writes, not how much memory the
+commands it runs may take. In a Linux experiment a Haiku worker rewrote an
+inline Markdown parser and ran its own tests; one `python3` grew to 19.8 GB
+and the kernel's global OOM killer (`constraint=CONSTRAINT_NONE`) had to pick
+a victim among every process on a shared host. It picked the test that time;
+nothing in shepherd would have stopped it from picking a service.
+
+**Fix:** opt-in `limits.memory_max` / `--memory-max SIZE` (run, run2, runN).
+Each worker and reviewer launch and each local gate and `pre_gate_cmd` run
+is wrapped in
+`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`,
+outermost, after the perl swaps; the command is exec'd in place, so the
+killtree and the watchdog see the same pid and group. An overrun is killed
+inside its own scope (`constraint=CONSTRAINT_MEMCG`), measured on the same
+host with the scope started from inside the Landlock jail, which kept
+refusing writes outside its roots. A limit that cannot be enforced stops the
+run before it starts: the preflight starts a real scope and reads back its
+`memory.max`, because a scope without the memory controller delegated starts
+fine and carries no limit. `--provider grok|codex` is refused with a limit,
+since those launches do not go through it; the remote gate is not covered.
+The wrapped command gets back the `XDG_RUNTIME_DIR` it had without the
+limit: `systemd-run` needs it to find the user bus, and a jailed worker
+handed the bus's path can ask it for a transient service outside the jail.
+This does not close that escape, which needs only the path a worker can
+guess; it only stops the limit from handing the path over.
+From systemd 254 on, `systemd-run` may rewrite `${...}` and `$$` in the
+command it runs, and that command is a worker prompt or a gate string, so
+the scope passes `--expand-environment=no` there. Older versions do not
+expand and reject the flag; a version that cannot be read refuses the limit.
+On systemd 255 a `--scope` probe left `${HOME}`, `$$` and `$HOME` intact
+with and without the flag: there the flag is a guard, not a measured repair.
+Only the rebound launch provider wraps worker and reviewer argv, so a
+rebind that fails with a limit set stops the run (`_bind_claude_launches`),
+and a launch whose provider cannot be built does not fall back to the
+framework's unwrapped one (`_plain_provider`).
+With no limit set, every argv and gate command is unchanged. Pinned by
+`tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
+allocation where the host can enforce the limit.

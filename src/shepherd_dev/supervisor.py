@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import memlimit
 from .diffcollect import Entries
 from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
@@ -580,8 +581,8 @@ def run_pre_gate(
         _materialize(repo_root, entries, dest)
         try:
             proc = subprocess.run(
-                cmd, shell=True, cwd=str(dest), capture_output=True, text=True,
-                timeout=timeout, env=gate_env(),
+                memlimit.wrap_shell(cmd), shell=True, cwd=str(dest), capture_output=True,
+                text=True, timeout=timeout, env=gate_env(),
             )
         except subprocess.TimeoutExpired:
             return entries, f"pre-gate command timed out after {timeout}s"
@@ -1142,12 +1143,17 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
                     argv = model_argv(argv, getattr(self, "_role", None) or RoleModel())
                 except Exception:
                     pass  # a hardening failure must not cost the launch
+                swapped = None
                 if stream_hook is not None:
                     try:
-                        return _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
+                        swapped = _swap_perl_teepump(argv, stream_hook.tee_path(working_path))
                     except Exception:
                         pass  # verbose off, run intact
-                return _swap_perl_killtree(argv)
+                if swapped is None:
+                    swapped = _swap_perl_killtree(argv)
+                # Outermost, after the perl swaps that look for perl at argv[0].
+                # No try: a limit the user asked for is never silently dropped.
+                return memlimit.wrap_argv(swapped)
 
             def execute(self, task_body, stack, context, args, *, execution=None, confinement=None):
                 overlay_from = getattr(self, "_overlay_from", None)
@@ -1183,7 +1189,7 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
             try:
                 provider = _KillTreeProvider(**kwargs)
             except Exception:
-                return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
+                return _plain_provider(providers, kwargs)  # never block the launch
             # Frozen dataclass: the role rides as a private attribute set past
             # __init__, read by command_argv for --effort/--fallback-model.
             object.__setattr__(provider, "_role", role)
@@ -1210,6 +1216,17 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
         print(f"warning: worker budget rebind unavailable ({type(exc).__name__}: {exc}); "
               "the watchdog still enforces the budget", file=_sys.stderr)
         return False
+
+
+def _plain_provider(providers, kwargs):
+    """The framework's own provider, for a launch whose rebound one could not
+    be built. Its argv never goes through the memory scope, so with a limit
+    active the launch stops here instead of running uncapped."""
+    if memlimit.active() is not None:
+        raise RuntimeError(
+            "memory limit active but this launch could not be rebound into its scope; not launching without it"
+        )
+    return providers.ClaudeHeadlessProvider(**kwargs)
 
 
 def _fair_shares(sizes: list[int], limit: int) -> list[int]:
@@ -1964,10 +1981,10 @@ def _run_gate(
             from .procstream import run_streaming
 
             res = run_streaming(
-                test_cmd, shell=True, cwd=workdir, timeout=timeout, on_line=on_line,
-                env=gate_env(), output_limit=4000,
+                memlimit.wrap_shell(test_cmd), shell=True, cwd=workdir, timeout=timeout,
+                on_line=on_line, env=gate_env(), output_limit=4000,
             )
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             return GateResult(False, None, "", infra_error=f"could not run test suite: {exc}")
         if res.timed_out:
             return GateResult(False, None, "", infra_error=f"test suite timed out after {timeout}s")

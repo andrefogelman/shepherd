@@ -313,6 +313,19 @@ def run_limits(repo_root: Path) -> dict[str, int]:
     return out
 
 
+def memory_max(repo_root: Path) -> object | None:
+    """`limits.memory_max` as written (`"8G"`, a number of bytes), repo over
+    global, or None. Returned raw, not filtered like run_limits: the caller
+    refuses the run on a value it cannot read, because silently ignoring a
+    safety limit would run without it."""
+    value = None
+    for source in (load_global_config(), load_config(repo_root)):  # repo wins
+        block = source.get("limits")
+        if isinstance(block, dict) and block.get("memory_max") is not None:
+            value = block["memory_max"]
+    return value
+
+
 #: The gate-pass rate at which running the reviewer alongside the gate pays:
 #: above it, the review tokens a failed gate would waste are the rare case
 #: and the review latency hidden behind the gate is the common one.
