@@ -11,11 +11,11 @@ dependencies = [
 ]
 
 # Patched build of shepherd-ai, from the fork andrefogelman/shepherd-ai
-# (of shepherd-agents/shepherd). Neither fix is reported upstream yet; drop
+# (of shepherd-agents/shepherd). None of the local fixes is reported upstream yet; drop
 # this override once upstream ships them and PyPI's shepherd-ai picks them up.
-# The fork's main tracks upstream — 0.3.4 is upstream v0.3.1 (@d34d5ca, citation
+# The fork's main tracks upstream — 0.3.4 and 0.3.5 are upstream v0.3.1 (@d34d5ca, citation
 # checking as a packaged workflow) merged in at @d81dd41, so this wheel is ahead
-# of PyPI's 0.3.1 by the two fixes below. Carried from 0.3.3: FileManifest.created_at
+# of PyPI's 0.3.1 by the three local fixes below. Carried from 0.3.3: FileManifest.created_at
 # is tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
 # workspace carrier by platform instead of hardcoding APFS-only clonefile.
 #
