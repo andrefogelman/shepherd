@@ -201,12 +201,12 @@ def _read_unrecorded(path: Path) -> str:
     run. A diff for the event log is not a read the worker made either, so it
     has no business in the substrate's record. Newlines are translated as
     read_text() did."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, os.O_RDONLY)
     try:
         chunks: list[bytes] = []
         remaining = _BASELINE_CAP
         while remaining > 0:
-            chunk = os.read(fd, min(remaining, 65536))
+            chunk = os.read(fd, min(remaining, 64 * 1024))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -339,20 +339,21 @@ class StreamTailer(threading.Thread):
 
     def drain(self, timeout: float = 2.0) -> None:
         """Stop the thread, then read whatever is left (incl. a final line
-        without a newline). Safe to call more than once."""
+        without a newline). Safe to call more than once.
+
+        Waits at most `timeout` in all. A tailer still wedged inside a line
+        by then is left behind: drain() records ``worker.stream.stuck`` and
+        returns without the final read, so the events from that line on may
+        be missing or arrive late."""
+        deadline = time.monotonic() + timeout
         self._stopping.set()
         if self.is_alive():
             self.join(timeout)
         # Bounded: drain() runs on the launching thread after the worker has
         # exited, and a tailer wedged inside a line would otherwise hold the
-        # run until an outside timeout killed it. The events after the stuck
-        # line are lost; the run is not.
-        if not self._pump_lock.acquire(timeout=timeout):
-            self._log.emit(
-                "worker.stream.stuck",
-                {"waited_s": timeout, "note": "stream tailer did not finish; later worker events were not recorded"},
-                attempt=self._attempt,
-            )
+        # run until an outside timeout killed it.
+        if not self._pump_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            self._log.emit("worker.stream.stuck", {"waited_s": timeout}, attempt=self._attempt)
             return
         try:
             self._read_available()

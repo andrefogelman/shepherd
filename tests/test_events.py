@@ -382,8 +382,14 @@ class StreamTailerTests(unittest.TestCase):
             self.assertTrue(done.wait(5.0), "drain() never returned")
         finally:
             release.set()
+            tailer.join(2.0)
+        self.assertFalse(tailer.is_alive())
         stuck = [e for e in self.seen if e["kind"] == "worker.stream.stuck"]
         self.assertEqual(len(stuck), 1)
+        # Once unwedged the tailer finishes its line: the event arrives late,
+        # after the stuck marker, and nothing breaks.
+        kinds = self.kinds()
+        self.assertIn("worker.write", kinds[kinds.index("worker.stream.stuck") + 1:])
 
 
 if __name__ == "__main__":

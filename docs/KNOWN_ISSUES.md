@@ -1015,9 +1015,10 @@ tailer thread in the substrate's `record_runtime_effects`.
 **Fix:** the old content is read with `os.open`/`os.read`, which the substrate
 does not wrap, so the read takes no substrate lock. It is also no longer
 recorded as a read the worker made, which it was not. Newlines are still
-translated as `read_text()` did. `drain()` now waits for `_pump_lock` for its
-timeout only; if the tailer is still stuck, it records `worker.stream.stuck`
-and returns, so a wedged observer costs the later events, not the run. Pinned
+translated as `read_text()` did. `drain()` now waits at most its timeout in
+all, for the thread and its `_pump_lock` together; if the tailer is still
+stuck, it records `worker.stream.stuck` and returns, so a wedged observer
+costs the events from the stuck line on, not the run. Pinned
 by `tests/test_events.py`
 (`test_baseline_read_does_not_open_through_the_substrate`,
 `test_drain_returns_when_the_tailer_is_stuck`) and

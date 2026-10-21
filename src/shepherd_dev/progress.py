@@ -164,7 +164,7 @@ def format_event(event: dict, live: bool = True) -> str | None:
     if kind == "worker.raw":
         return f"⚠ oversized stream line dropped ({p.get('bytes', 0)} bytes)"
     if kind == "worker.stream.stuck":
-        return "⚠ worker stream tailer stuck; later worker events were not recorded"
+        return "⚠ worker stream tailer stuck; later worker events may be missing"
     if kind == "worker.launch":
         if not p.get("enabled", True):
             return "⚑ launch hardening OFF (worker.harden=false)"
