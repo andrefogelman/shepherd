@@ -993,6 +993,60 @@ user's config directory. Pinned by `tests/test_planning.py`
 (`test_runs_isolated_from_the_repository`, `test_runs_in_the_repo_when_given_one`,
 `test_no_host_login_seeds_nothing`, `test_tempdir_failure_returns_error`).
 
+### A Write over an existing file hung the run
+
+**Was:** with verbose events on (the default), every `Write` tool call over a
+file that already existed in the repository deadlocked the run. The stream
+tailer renders that call as a diff against the old content, and read the old
+content with `read_text()`. The substrate wraps `builtins.open` and `io.open`
+and records each read inside the workspace under its runtime lock, which the
+launching thread holds for the whole worker launch. The tailer waited for that
+lock with its own `_pump_lock` held; the worker went on to finish, with no
+events recorded after the `Write`; then `drain()`, on the launching thread,
+waited for `_pump_lock` with no limit. Neither thread could move, and the
+worker budget did not help: by then there was no worker left to kill. On a
+Linux host with a Haiku worker, 3 of 6 runs of an implement task whose stub
+the worker rewrote with `Write` stopped this way and were killed by an outer
+one-hour timeout. Across every run on that host, no `worker.write` event ever
+carried a diff: the path had never completed once. A `faulthandler` dump of
+the stuck process showed the main thread in `StreamTailer.drain` and the
+tailer thread in the substrate's `record_runtime_effects`.
+
+**Fix:** the old content is read with `os.open`/`os.read`, which the substrate
+does not wrap, so the read takes no substrate lock. It is also no longer
+recorded as a read the worker made, which it was not. Newlines are still
+translated as `read_text()` did. `drain()` now waits at most its timeout in
+all, for the thread and its `_pump_lock` together; if the tailer is still
+stuck, it records `worker.stream.stuck` and returns, so a wedged observer
+costs the events from the stuck line on, not the run. Pinned
+by `tests/test_events.py`
+(`test_baseline_read_does_not_open_through_the_substrate`,
+`test_drain_returns_when_the_tailer_is_stuck`) and
+`tests/test_verbose.py` (`test_newlines_translated_like_read_text`).
+
+### On Linux the jailed worker could not write to /dev/null
+
+**Was:** the Landlock jail in the substrate (`vcs_core._landlock_containment`,
+shipped in the shepherd-ai wheel) denied every write outside the writable
+roots, `/dev/null` included. Every shell redirect into it, `cmd >/dev/null`
+or `2>/dev/null`, failed with `Permission denied` and exited before the
+command ran. The Claude CLI's own Bash wrapper hits it too, so a worker
+command could fail even when it named no `/dev/null`. Seatbelt allows writes
+under `/dev`, so macOS never showed it. In a Linux experiment with a Haiku
+worker, 26 of 173 Bash calls failed this way, among them a plain
+`python3 -m unittest -q 2>&1`.
+
+**Fix:** shepherd-ai 0.3.5 (fork `@713b032`, release
+`v0.3.5-landlock-devnull`) adds one Landlock rule on `/dev/null` itself,
+opened with `O_PATH` and granting `write_file` only. Nothing else under
+`/dev` is granted: `/dev/shm` stays denied. If the rule cannot be added, the
+ruleset stays as strict as before. `pyproject.toml` and `uv.lock` now pin
+that wheel. Pinned by the fork's
+`test_landlock_allows_dev_null_and_nothing_else_under_dev`
+(`vcs-core/packages/core/tests/container/test_landlock_containment.py`),
+which fails on 0.3.4 with `cannot create /dev/null: Permission denied`; this
+suite does not exercise native jails.
+
 ### A worker's test could take the whole host's memory
 
 **Was:** the jail confines where a worker writes, not how much memory the

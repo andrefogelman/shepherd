@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ class FormatEventTests(unittest.TestCase):
         self.assertIn("src/b.py", s)
         self.assertIn("4", s)
         self.assertIn("boom", format_event(_ev("worker.tool.fail", {"error": "boom"})))
+        self.assertIn("stuck", format_event(_ev("worker.stream.stuck", {"waited_s": 2.0})))
 
     def test_gate_and_review_kinds(self):
         s = format_event(_ev("gate.test.fail", {"framework": "pytest", "test": "t/x.py::t_a"}))
@@ -117,6 +119,24 @@ class BaselineReaderTests(unittest.TestCase):
         read = repo_baseline_reader(self.repo)
         self.assertEqual(read("/jail/fork-xyz/src/a.py"), "V = 1\n")
         self.assertEqual(read("src/a.py"), "V = 1\n")
+
+    def test_newlines_translated_like_read_text(self):
+        # read with os.read now; the diff it feeds must not change shape
+        (self.repo / "src" / "crlf.py").write_bytes(b"A = 1\r\nB = 2\rC = 3\n")
+        self.assertEqual(repo_baseline_reader(self.repo)("src/crlf.py"), "A = 1\nB = 2\nC = 3\n")
+
+    def test_file_larger_than_one_read_round_trips(self):
+        body = "x = 1\n" * 20000  # ~117 KiB: several os.read calls
+        (self.repo / "src" / "big.py").write_text(body, encoding="utf-8")
+        self.assertEqual(repo_baseline_reader(self.repo)("src/big.py"), body)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads any file")
+    def test_unreadable_file_returns_none(self):
+        secret = self.repo / "src" / "secret.py"
+        secret.write_text("S = 1\n", encoding="utf-8")
+        secret.chmod(0)
+        self.addCleanup(secret.chmod, 0o600)
+        self.assertIsNone(repo_baseline_reader(self.repo)("src/secret.py"))
 
     def test_missing_and_traversal_paths_return_none(self):
         read = repo_baseline_reader(self.repo)
