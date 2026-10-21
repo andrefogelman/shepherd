@@ -6,8 +6,10 @@ Runnable with: python -m unittest tests.test_events
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -308,6 +310,86 @@ class StreamTailerTests(unittest.TestCase):
         self.assertEqual(writes[0]["payload"]["add"], 1)
         self.assertEqual(writes[0]["payload"]["del"], 0)
         self.assertIn("+print('bye')", writes[0]["payload"]["hunk"])
+
+    def test_baseline_read_does_not_open_through_the_substrate(self):
+        # Pins the deadlock seen on Linux with the Haiku worker: the substrate
+        # wraps builtins.open/io.open and records every read inside the
+        # workspace under a lock the main thread holds for the whole launch.
+        # A Write over an existing file made the tailer read the old content
+        # through that wrapper and wait on the lock; drain() then waited on the
+        # tailer. Here the main thread holds the lock while the Write arrives:
+        # the diff must still be emitted.
+        import builtins
+        import io
+        from unittest import mock
+
+        from shepherd_dev.events import repo_baseline_reader
+
+        repo = self.root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "b.py").write_text("print('hi')\n", encoding="utf-8")
+        held = threading.RLock()
+        real_open = io.open
+
+        def recording_open(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)) and Path(file).resolve().is_relative_to(repo.resolve()):
+                with held:  # the substrate's record_runtime_effects
+                    pass
+            return real_open(file, *args, **kwargs)
+
+        tailer = self._tailer(read_baseline=repo_baseline_reader(repo))
+        tailer.start()
+        with mock.patch.object(builtins, "open", recording_open), mock.patch.object(io, "open", recording_open):
+            held.acquire()
+            try:
+                with real_open(self.stream, "w", encoding="utf-8") as fh:
+                    fh.write(_claude_event({
+                        "type": "tool_use", "id": "t2", "name": "Write",
+                        "input": {"file_path": "/jail/work/src/b.py", "content": "print('hi')\nprint('bye')\n"},
+                    }) + "\n")
+                emitted = self._wait_for(lambda: "worker.write" in self.kinds())
+            finally:
+                held.release()
+            tailer.drain()
+        self.assertTrue(emitted, "the tailer blocked on a lock the launching thread holds")
+        writes = [e for e in self.seen if e["kind"] == "worker.write"]
+        self.assertIn("+print('bye')", writes[0]["payload"]["hunk"])
+
+    def test_drain_returns_when_the_tailer_is_stuck(self):
+        # Whatever wedges the tailer thread, drain() runs on the launching
+        # thread after the worker exits and must give the run back: it waited
+        # for the tailer's lock with no limit, so one stuck read held the run
+        # until an outside timeout killed it.
+        release = threading.Event()
+        entered = threading.Event()
+
+        def stuck_baseline(_path):
+            entered.set()
+            release.wait()
+            return None
+
+        tailer = self._tailer(read_baseline=stuck_baseline)
+        tailer.start()
+        with open(self.stream, "w", encoding="utf-8") as fh:
+            fh.write(_claude_event({
+                "type": "tool_use", "id": "t2", "name": "Write",
+                "input": {"file_path": "src/b.py", "content": "x\n"},
+            }) + "\n")
+        self.assertTrue(entered.wait(2.0))
+        done = threading.Event()
+        threading.Thread(target=lambda: (tailer.drain(timeout=0.2), done.set()), daemon=True).start()
+        try:
+            self.assertTrue(done.wait(5.0), "drain() never returned")
+        finally:
+            release.set()
+            tailer.join(2.0)
+        self.assertFalse(tailer.is_alive())
+        stuck = [e for e in self.seen if e["kind"] == "worker.stream.stuck"]
+        self.assertEqual(len(stuck), 1)
+        # Once unwedged the tailer finishes its line: the event arrives late,
+        # after the stuck marker, and nothing breaks.
+        kinds = self.kinds()
+        self.assertIn("worker.write", kinds[kinds.index("worker.stream.stuck") + 1:])
 
 
 if __name__ == "__main__":
