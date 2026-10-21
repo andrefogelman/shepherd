@@ -478,7 +478,8 @@ defaults; flags still win.
 memory its commands use: a test a worker wrote reached 19.8 GB on a shared
 Linux host and the kernel's global OOM killer had to pick a victim among every
 process on the machine. `limits.memory_max` (e.g. `"8G"`) or `--memory-max 8G`
-puts each worker and reviewer launch, and each local gate run, in its own
+puts each worker and reviewer launch, and each local gate and pre-gate
+(`pre_gate_cmd`) run, in its own
 cgroup through `systemd-run --user --scope`, with `MemoryMax` at the ceiling
 and no swap: whatever goes over dies inside its own scope and nothing else
 does. It is opt-in and off by default. Asked for and impossible to enforce

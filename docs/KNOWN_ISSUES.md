@@ -1003,7 +1003,8 @@ a victim among every process on a shared host. It picked the test that time;
 nothing in shepherd would have stopped it from picking a service.
 
 **Fix:** opt-in `limits.memory_max` / `--memory-max SIZE` (run, run2, runN).
-Each worker and reviewer launch and each local gate run is wrapped in
+Each worker and reviewer launch and each local gate and `pre_gate_cmd` run
+is wrapped in
 `systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`,
 outermost, after the perl swaps; the command is exec'd in place, so the
 killtree and the watchdog see the same pid and group. An overrun is killed
@@ -1014,6 +1015,11 @@ run before it starts: the preflight starts a real scope and reads back its
 `memory.max`, because a scope without the memory controller delegated starts
 fine and carries no limit. `--provider grok|codex` is refused with a limit,
 since those launches do not go through it; the remote gate is not covered.
+The wrapped command gets back the `XDG_RUNTIME_DIR` it had without the
+limit: `systemd-run` needs it to find the user bus, and a jailed worker
+handed the bus's path can ask it for a transient service outside the jail.
+This does not close that escape, which needs only the path a worker can
+guess; it only stops the limit from handing the path over.
 With no limit set, every argv and gate command is unchanged. Pinned by
 `tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
 allocation where the host can enforce the limit.

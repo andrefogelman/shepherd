@@ -131,6 +131,23 @@ class ActivateAndWrap(_Reset):
         self.assertIn(f"MemoryMax={GIB}", argv)
         self.assertEqual(shlex.split(shell)[-3:], ["sh", "-c", "python3 -m unittest -q 2>&1 | tail -1"])
 
+    def test_command_gets_back_the_runtime_dir_it_had(self):
+        # systemd-run needs XDG_RUNTIME_DIR; the command must not inherit it
+        # from the wrap, or a jailed worker is handed the user bus's path
+        memlimit._active = GIB
+        with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"):
+            for parent, tail in (
+                (None, ["env", "-u", "XDG_RUNTIME_DIR"]),
+                ("/run/user/7", []),
+                ("/elsewhere", ["env", "XDG_RUNTIME_DIR=/elsewhere"]),
+            ):
+                with self.subTest(parent=parent):
+                    env = {} if parent is None else {"XDG_RUNTIME_DIR": parent}
+                    with mock.patch.dict(memlimit.os.environ, env, clear=True):
+                        argv = memlimit.wrap_argv(["cmd"])
+                    cut = argv.index("--") + 1
+                    self.assertEqual(argv[cut:], [*tail, "cmd"])
+
     def test_active_wrap_without_runtime_dir_refuses(self):
         memlimit._active = GIB
         with mock.patch.object(memlimit, "runtime_dir", lambda: None), self.assertRaises(RuntimeError):
@@ -175,6 +192,31 @@ class LocalGate(_Reset):
         self.assertIn("systemd-run", parts)
         self.assertIn(f"MemoryMax={GIB}", parts)
         self.assertEqual(parts[-3:], ["sh", "-c", "echo ok"])
+
+    def _pre_gate_cmd(self) -> str:
+        from shepherd_dev import supervisor
+
+        seen = {}
+
+        def fake(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(supervisor.subprocess, "run", fake):
+            _entries, error = supervisor.run_pre_gate(self.repo, {"src/a.py": b"V = 2\n"}, "black .")
+        self.assertIsNone(error)
+        return seen["cmd"]
+
+    def test_pre_gate_without_a_limit_is_unchanged(self):
+        self.assertEqual(self._pre_gate_cmd(), "black .")
+
+    def test_pre_gate_runs_inside_the_scope(self):
+        # the fixer runs over the worker's proposal; `npm run lint` can execute repo code
+        memlimit._active = GIB
+        with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"):
+            parts = shlex.split(self._pre_gate_cmd())
+        self.assertIn(f"MemoryMax={GIB}", parts)
+        self.assertEqual(parts[-3:], ["sh", "-c", "black ."])
 
 
 try:
@@ -221,12 +263,16 @@ class WorkerArgv(_Reset):
         from shepherd_dev.supervisor import _KILLTREE_PERL
 
         memlimit._active = GIB
-        with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"):
+        with mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"), \
+                mock.patch.dict(memlimit.os.environ):
+            memlimit.os.environ.pop("XDG_RUNTIME_DIR", None)
             argv = self._argv()
         cut = argv.index("--") + 1
         self.assertIn(f"MemoryMax={GIB}", argv[:cut])
-        self.assertTrue(argv[cut].endswith("perl"))
-        self.assertEqual(argv[cut + 2], _KILLTREE_PERL)
+        # the parent had no XDG_RUNTIME_DIR, so neither does the worker
+        self.assertEqual(argv[cut:cut + 3], ["env", "-u", "XDG_RUNTIME_DIR"])
+        self.assertTrue(argv[cut + 3].endswith("perl"))
+        self.assertEqual(argv[cut + 5], _KILLTREE_PERL)
 
 
 class Cli(_Reset):

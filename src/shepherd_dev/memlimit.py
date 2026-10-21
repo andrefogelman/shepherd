@@ -132,6 +132,20 @@ def active() -> int | None:
     return _active
 
 
+def _restore_env(rundir: str) -> list[str]:
+    """What runs between the scope and the command so the command sees the
+    XDG_RUNTIME_DIR it would have seen without the limit. systemd-run needs
+    the variable to find the user bus; a jailed worker handed it gets the
+    bus's path for free, and from that bus a transient service runs outside
+    the jail."""
+    original = os.environ.get("XDG_RUNTIME_DIR")
+    if original is None:
+        return ["env", "-u", "XDG_RUNTIME_DIR"]
+    if original != rundir:
+        return ["env", f"XDG_RUNTIME_DIR={original}"]
+    return []
+
+
 def wrap_argv(argv: list) -> list:
     """`argv` inside the active scope; unchanged when no limit is active."""
     if _active is None:
@@ -139,7 +153,7 @@ def wrap_argv(argv: list) -> list:
     rundir = runtime_dir()
     if rundir is None:  # checked at activation; the directory vanished since
         raise RuntimeError("memory limit active but the user runtime directory is gone")
-    return [*scope_argv(_active, rundir), *argv]
+    return [*scope_argv(_active, rundir), *_restore_env(rundir), *argv]
 
 
 def wrap_shell(command: str) -> str:

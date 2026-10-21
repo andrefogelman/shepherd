@@ -474,7 +474,7 @@ comandos dele usam: um teste escrito por um worker chegou a 19,8 GB num host
 Linux compartilhado e o OOM global do kernel teve de escolher uma vítima entre
 todos os processos da máquina. `limits.memory_max` (ex.: `"8G"`) ou
 `--memory-max 8G` põe cada launch do worker e do revisor, e cada execução do
-portão local, num cgroup próprio via `systemd-run --user --scope`, com
+portão local e do pré-gate (`pre_gate_cmd`), num cgroup próprio via `systemd-run --user --scope`, com
 `MemoryMax` no teto e sem swap: quem passa do teto morre dentro do próprio
 scope, e mais nada. É opcional e vem desligado. Pedido e impossível de aplicar
 (fora do Linux, sem `systemd-run`, sem gerenciador systemd do usuário, sem o

@@ -581,8 +581,8 @@ def run_pre_gate(
         _materialize(repo_root, entries, dest)
         try:
             proc = subprocess.run(
-                cmd, shell=True, cwd=str(dest), capture_output=True, text=True,
-                timeout=timeout, env=gate_env(),
+                memlimit.wrap_shell(cmd), shell=True, cwd=str(dest), capture_output=True,
+                text=True, timeout=timeout, env=gate_env(),
             )
         except subprocess.TimeoutExpired:
             return entries, f"pre-gate command timed out after {timeout}s"
