@@ -38,8 +38,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install the package and its dependencies
-        run: pip install -e .
+      # From uv.lock, hash-checked: pip does not read [tool.uv.sources], so a
+      # plain `pip install -e .` took shepherd-ai from PyPI and the suite never
+      # ran against the pinned wheel.
+      - name: Install the package and its locked dependencies
+        run: |
+          pip install uv && uv export --frozen --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/locked.txt"
+          pip install --no-deps -e .
 
       # PYTHONPATH is unset deliberately: the gate scrubs it (see gate_env),
       # and a runner that leaked one would be testing something else.
@@ -67,7 +73,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - run: pip install -e .
+      - name: Install the package and its locked dependencies
+        run: |
+          pip install uv && uv export --frozen --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/locked.txt"
+          pip install --no-deps -e .
       - name: Re-run the timing-sensitive modules
         run: |
           set -euo pipefail
@@ -89,7 +99,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - run: pip install -e .
+      - name: Install the package and its locked dependencies
+        run: |
+          pip install uv && uv export --frozen --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/locked.txt"
+          pip install --no-deps -e .
       - name: Prepare the performance baseline without creating a branch
         run: |
           git fetch --depth=1 origin 9e6a842bae068c3779a950152aa21d5d64530f81
@@ -126,7 +140,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - run: pip install -e . ruff==0.12.10 pyright==1.1.403
+      - name: Install the package, its locked dependencies and the checkers
+        run: |
+          pip install uv && uv export --frozen --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/locked.txt"
+          pip install --no-deps -e .
+          pip install ruff==0.12.10 pyright==1.1.403
       - name: Check source syntax and undefined names
         run: ruff check --select E9,F821,F822,F823 src tests/test_io_perf.py scripts
       - name: Compare type diagnostics against the unchanged baseline

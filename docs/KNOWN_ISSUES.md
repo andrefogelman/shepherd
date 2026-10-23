@@ -1672,3 +1672,22 @@ review of 0.3.16 found.
   and `LimitAroundTheJail.test_a_repos_settings_reach_the_capped_command_and_not_the_scope`,
   and in shepherd-ai by
   `test_landlock_outer_chain_gets_the_kept_environment_and_the_command_its_own`.
+
+### CI tested against shepherd-ai from PyPI, not the pinned wheel
+
+**Was:** the CI's `test`, `repeat`, `performance` and `static` jobs, and
+the release workflow's `test` job, ran `pip install -e .`. pip does not read `[tool.uv.sources]`, so it resolved
+`shepherd-ai` from PyPI instead of the fork's wheel that `pyproject.toml` and
+`uv.lock` pin. The suite, the timing reruns, the benchmark and the type delta
+all ran against a framework the users never get, and so did the suite a
+tag push runs before publishing. It showed when the
+`static` job of the 0.3.18 change reported six new type errors: PyPI's
+shepherd-ai has no `set_outer_prefix` and no memfd launch.
+
+**Fix:** each of those jobs exports `uv.lock` with `uv export --frozen
+--no-emit-project`, installs it with `pip install --require-hashes`, and then
+installs the package with `--no-deps -e .`. The wheel is the one the lock
+names, checked against its hash. `--frozen` takes the lock as it is; the
+`lock` job is what fails a lock that drifted from `pyproject.toml`. The
+`static` job installs `ruff` and `pyright` after that, at the same pins.
+The `static` job's type delta pins it: against PyPI's shepherd-ai it fails.
