@@ -15,7 +15,7 @@ dependencies = [
 # this override once upstream ships them and PyPI's shepherd-ai picks them up.
 # The fork's main tracks upstream — 0.3.4 and 0.3.5 are upstream v0.3.1 (@d34d5ca, citation
 # checking as a packaged workflow) merged in at @d81dd41, so this wheel is ahead
-# of PyPI's 0.3.1 by the three local fixes below. Carried from 0.3.3: FileManifest.created_at
+# of PyPI's 0.3.1 by the local fixes below. Carried from 0.3.3: FileManifest.created_at
 # is tz-aware, ending a TypeError on comparison; and the dialect auto-detects the
 # workspace carrier by platform instead of hardcoding APFS-only clonefile.
 #
@@ -29,6 +29,82 @@ dependencies = [
 # `2>/dev/null` in a worker's Bash call exited 1 before it ran (26 of 173 calls
 # in one Linux experiment). Seatbelt allows /dev, so macOS never showed it. The
 # ruleset now grants write_file on /dev/null alone; /dev/shm stays denied.
+#
+# 0.3.6 (@2753e96) closes an escape from that jail. Landlock below ABI 6 does
+# not govern connecting to a socket by path, so a confined command could run
+# `systemd-run --user -- cmd` over the user bus in $XDG_RUNTIME_DIR; systemd
+# then started cmd as its own child, outside the jail, and its writes landed.
+# Where such a socket exists, bubblewrap now mounts an empty tmpfs over that
+# directory before the runner confines itself. Without a working bubblewrap
+# the launch still runs and the backend reports the open door
+# (service_manager_exposure). `set_outer_prefix` puts an argv around the
+# jail: the memory scope goes there, since it needs the bus.
+#
+# 0.3.7 widens that to tmux's and screen's socket directories, binds a writable
+# root that sits under a hidden directory back over the tmpfs, gives the trial
+# bubblewrap run a timeout, reports a writable Docker socket (`exposure`),
+# warns per launch under its own category (JailExposureWarning), and keeps the
+# outer prefix off the jail probe's launches.
+#
+# 0.3.8 hides the runtime directory whether or not a bus is in it (rootless
+# Docker and Podman listen there), creates tmux's socket directory 0700 when
+# absent so a server started during the run lands under the mask, binds
+# /dev/null over any socket inside a path bound back into a hidden directory,
+# and masks the socket that $DBUS_SESSION_BUS_ADDRESS or $TMUX names by itself
+# (its directory may be /tmp). A probe that still finds a socket reachable
+# warns and lets the run go on without bubblewrap. On macOS the Seatbelt
+# profile refuses connects to tmux's and screen's sockets, and `exposure`
+# reports a Docker daemon the user can reach; DOCKER_HOST over tcp or ssh is
+# reported on both.
+#
+# 0.3.9 masks a socket directory only when it is a real directory this user
+# owns, with its parent resolved and the last component not followed: another
+# user's symlink at /tmp/tmux-<uid> no longer steers the tmpfs (or, on macOS,
+# the deny rule) onto what it points at. The sockets inside a path bound back
+# into a hidden directory are found by one walk per process, not one per
+# launch, and the probe's check reads that list instead of walking again.
+#
+# 0.3.10 checks that list again on every launch (bubblewrap created a missing
+# mount destination on the host, so a socket deleted after the first launch
+# came back as an empty file), walks a kept path again when its mtime
+# changes, and has the probe's check walk the kept paths itself. A symlink
+# the user owns is followed when its target is also the user's; every
+# candidate left unmasked is reported. bubblewrap runs with --unshare-pid, so
+# a setuid bubblewrap no longer lets the command read a hidden directory
+# through /proc/<pid>/root. `exposure` reports a reachable X display and an
+# sshd on loopback the user's key can log in to.
+#
+# 0.3.11 measures that ssh report by logging in (BatchMode, `true`) instead of
+# inferring it from keys on disk, which claimed a login sshd refused.
+#
+# 0.3.12 pins this host's own keys for that login and reads sshd_config's
+# ports, reports Docker through a docker context or plain TCP on loopback,
+# an abstract session bus and, on macOS, the ssh login too. The hiding check
+# compares PID namespaces instead of a /proc path that never existed in the
+# jail, and the runner drops the controlling terminal.
+#
+# 0.3.13 lets the caller find bwrap and ssh before a repo's PATH enters the
+# environment (`_jail_exposure.resolve_programs`).
+#
+# 0.3.14 keeps the environment that call saw and reads what to hide from it
+# (`_jail_exposure.environ`), so the caller can take the command servers'
+# addresses out of the live one; it starts the Landlock runner with `-I`, and
+# its claude providers and auth probe take the claude path the caller found.
+#
+# 0.3.15 looks up the host's claude login with that kept environment and a
+# `security` found before the repo's PATH, and its jail hides the ssh agent
+# socket the kept SSH_AUTH_SOCK names.
+#
+# 0.3.16 reports, in the jail's exposure message, the ssh agent sockets this
+# user owns that SSH_AUTH_SOCK does not name and the jail does not hide.
+#
+# 0.3.17 looks for those agents under ~/.ssh/agent too (OpenSSH 10.1 and
+# later) and lists only live ones, masks the named sockets when there is no
+# directory to hide, and finds the jail's programs on absolute PATH entries.
+#
+# 0.3.18 starts what runs before Landlock (the outer prefix, bubblewrap, the
+# runner) with that kept environment, and hands the command its own on a
+# memfd the runner reads before it confines itself.
 #
 # The first two local fixes are the same shape: the substrate walked a real tree and
 # crashed on something ordinary that lives in one.
@@ -51,10 +127,17 @@ dependencies = [
 # so a published tag's assets on andrefogelman/shepherd-ai must NEVER be
 # replaced or re-uploaded. Any future change to this wheel — even a trivial
 # one — gets a NEW tag and a corresponding uv.lock update. v0.3.1-dotgit-fix,
-# v0.3.2-symlink-fix, v0.3.3-upstream-sync and v0.3.4-upstream-sync are left
+# v0.3.2-symlink-fix, v0.3.3-upstream-sync, v0.3.4-upstream-sync,
+# v0.3.5-landlock-devnull, v0.3.6-landlock-service-manager,
+# v0.3.7-landlock-command-servers, v0.3.8-jail-socket-masks,
+# v0.3.9-jail-socket-ownership, v0.3.10-jail-socket-revalidate,
+# v0.3.11-ssh-login-measured, v0.3.12-jail-exposure-reports,
+# v0.3.13-jail-programs-resolved, v0.3.14-jail-keeps-environment,
+# v0.3.15-jail-hides-the-agent, v0.3.16-jail-reports-agents and
+# v0.3.17-jail-agents-and-path are left
 # published and untouched for exactly that reason.
 [tool.uv.sources]
-shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.5-landlock-devnull/shepherd_ai-0.3.5-py3-none-any.whl" }
+shepherd-ai = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.18-jail-outer-environment/shepherd_ai-0.3.18-py3-none-any.whl" }
 
 [project.scripts]
 shepherd-dev = "shepherd_dev.cli:entry"

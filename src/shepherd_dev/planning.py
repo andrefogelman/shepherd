@@ -17,13 +17,12 @@ reuses the `claude` CLI the worker already requires.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import programs
 from .launch import HARDENING_FLAGS
 
 DEFAULT_PLAN_MODEL = "claude-haiku-4-5-20251001"
@@ -146,7 +145,7 @@ def plan_targets(
     whose `error` is set (and targets/plan empty) on any failure. With `repo`
     the planner runs there and may read its files; without it, it runs in an
     empty directory and plans from the file tree alone."""
-    binary = shutil.which(cli)
+    binary = programs.which(cli)
     if not binary:
         return PlanResult(error=f"{cli} CLI not found on PATH")
     prompt = build_plan_prompt(feature, file_tree_text)
@@ -169,7 +168,10 @@ def plan_targets(
                 cred.write_bytes(login)
                 cred.chmod(0o600)
             env = {
-                **os.environ,
+                # the user's environment, kept before a repo's jail_env applied:
+                # this CLI runs on the host, and NODE_OPTIONS or PATH set there
+                # would choose what it loads
+                **programs.host_env(),
                 "HOME": str(root / "home"),
                 "CLAUDE_CONFIG_DIR": str(root / "config"),
                 "TMPDIR": str(root / "tmp"),

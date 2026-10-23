@@ -66,6 +66,7 @@ class RemoteGateWarmup(unittest.TestCase):
     def setUp(self):
         from shepherd_dev import procstream as PS
 
+        self.addCleanup(setattr, RG, "_ssh_base", RG._ssh_base)
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         PS.subprocess.Popen = _patched_popen
@@ -153,6 +154,7 @@ class WarmupStillStagingIsNotAdopted(unittest.TestCase):
     and re-ran setup concurrently with the warmup's own."""
 
     def setUp(self):
+        self.addCleanup(setattr, RG, "_ssh_base", RG._ssh_base)
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         self.warm = _warm_checkout()

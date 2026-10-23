@@ -62,17 +62,17 @@ class PlanPromptAndParse(unittest.TestCase):
 class PlanTargetsCli(unittest.TestCase):
     def setUp(self):
         self._real_run = subprocess.run
-        self._real_which = PL.shutil.which
+        self._real_which = PL.programs.which
         self._real_login = PL._host_login
         PL._host_login = lambda: None  # never read the real login in a test
 
     def tearDown(self):
         PL.subprocess.run = self._real_run
-        PL.shutil.which = self._real_which
+        PL.programs.which = self._real_which
         PL._host_login = self._real_login
 
     def test_success_path(self):
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         PL.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
             a, 0, stdout='{"result":"{\\"targets\\":[\\"x.py\\"],\\"plan\\":\\"s\\"}"}', stderr="")
         res = plan_targets("feat", "x.py\ny.py", {"x.py", "y.py"})
@@ -84,7 +84,7 @@ class PlanTargetsCli(unittest.TestCase):
         # .mcp.json, and the user's own: without a repo it starts in an empty
         # directory that is not the caller's cwd, on a redirected config, with
         # the worker's hardening flags and only the read-only tools.
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         PL._host_login = lambda: b'{"claudeAiOauth":{}}'
         seen = {}
 
@@ -127,7 +127,7 @@ class PlanTargetsCli(unittest.TestCase):
     def test_runs_in_the_repo_when_given_one(self):
         # the planner may open the repository's files, still on the redirected
         # config and with the read-only tools only
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         seen = {}
 
         def _fake(argv, **kw):
@@ -145,7 +145,7 @@ class PlanTargetsCli(unittest.TestCase):
 
     def test_no_host_login_seeds_nothing(self):
         # auth from the environment (or none): the redirected config stays empty
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         PL._host_login = lambda: None
         seen = {}
 
@@ -160,7 +160,7 @@ class PlanTargetsCli(unittest.TestCase):
     def test_tempdir_failure_returns_error(self):
         # the scratch is created inside the try: a full or missing TMPDIR is a
         # skipped plan, never an exception out of plan_targets
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         real = PL.tempfile.TemporaryDirectory
 
         def _no_tmp(*a, **k):
@@ -175,19 +175,19 @@ class PlanTargetsCli(unittest.TestCase):
         self.assertEqual(res.targets, [])
 
     def test_cli_missing_returns_error(self):
-        PL.shutil.which = lambda _c: None
+        PL.programs.which = lambda _c: None
         res = plan_targets("feat", "x.py", {"x.py"})
         self.assertIsNotNone(res.error)
         self.assertEqual(res.targets, [])
 
     def test_nonzero_exit_returns_error(self):
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
         PL.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="boom")
         res = plan_targets("feat", "x.py", {"x.py"})
         self.assertIsNotNone(res.error)
 
     def test_timeout_returns_error(self):
-        PL.shutil.which = lambda _c: "/fake/claude"
+        PL.programs.which = lambda _c: "/fake/claude"
 
         def _boom(*a, **k):
             raise subprocess.TimeoutExpired(cmd="claude", timeout=1)

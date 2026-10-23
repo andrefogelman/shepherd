@@ -154,6 +154,8 @@ def run_cli_worker(
             argv,
             cwd=str(clone),
             timeout=max(MIN_WORKER_TIMEOUT, budget_seconds),
+            # the live environment on purpose: the repo's jail_env reaches the
+            # worker through it, as it reaches the claude worker (cli.cmd_run)
             env={**os.environ, "CI": os.environ.get("CI", "1")},
             output_limit=4000,
         )

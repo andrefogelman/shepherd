@@ -27,8 +27,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install the package and its dependencies
-        run: pip install -e .
+      # From uv.lock, hash-checked: pip does not read [tool.uv.sources], so a
+      # plain `pip install -e .` took shepherd-ai from PyPI (KNOWN_ISSUES).
+      - name: Install the package and its locked dependencies
+        run: |
+          pip install uv && uv export --frozen --no-emit-project -o "$RUNNER_TEMP/locked.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/locked.txt"
+          pip install --no-deps -e .
 
       - name: Run the suite
         run: python -m unittest discover -s tests

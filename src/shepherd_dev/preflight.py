@@ -30,11 +30,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Callable
+
+from . import programs
 
 #: A worker attempt may run 15 minutes and the review as long again; a token
 #: that expires inside that window fails the review, not the login.
@@ -122,11 +123,12 @@ def credential_sources(now: float | None = None) -> dict[str, float | None]:
     from pathlib import Path
 
     out: dict[str, float | None] = {}
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    # The user's, not a repo's: jail_env sits in os.environ for the command.
+    config_dir = programs.environ().get("CLAUDE_CONFIG_DIR")
     candidates = []
     if config_dir:
         candidates.append(Path(config_dir) / ".credentials.json")
-    candidates.append(Path.home() / ".claude" / ".credentials.json")
+    candidates.append(programs.home() / ".claude" / ".credentials.json")
     for path in candidates:
         try:
             if path.is_file():
@@ -137,8 +139,8 @@ def credential_sources(now: float | None = None) -> dict[str, float | None]:
     if _sys.platform == "darwin":
         try:
             proc = _sp.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-                capture_output=True, timeout=10, check=False,
+                [programs.argv0("security"), "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, timeout=10, check=False, env=programs.host_env(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 out["keychain"] = credential_expires_in(proc.stdout.strip(), now=now)
@@ -172,8 +174,10 @@ def stale_file_shadowing(sources: dict[str, float | None], window_s: int = 0) ->
 def _default_run_probe(timeout: int) -> tuple[bool, str]:
     """One unjailed `claude -p ok` with the REAL config dir. Returns (ran,
     text): `ran` False when the CLI could not be executed at all; `text` is
-    stdout+stderr for classification."""
-    cli = shutil.which("claude")
+    stdout+stderr for classification. The CLI and its environment are the
+    user's, kept before a repo's jail_env applied (`programs`): that one
+    carries NODE_OPTIONS, CLAUDE_CONFIG_DIR and PATH chosen by the repo."""
+    cli = programs.which("claude")
     if not cli:
         return False, "`claude` not found on PATH"
     try:
@@ -181,6 +185,7 @@ def _default_run_probe(timeout: int) -> tuple[bool, str]:
             [cli, "-p", PROBE_PROMPT, "--output-format", "json", "--max-turns", "1",
              "--strict-mcp-config", "--no-chrome"],
             capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+            env=programs.host_env(),
         )
     except subprocess.TimeoutExpired:
         return False, f"probe timed out after {timeout}s"

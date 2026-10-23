@@ -6,7 +6,49 @@ the mechanism is the part worth remembering.
 
 ## Open
 
-None.
+### The local gate runs the worker's own tests outside the jail
+
+**Established:** the native gate refuses a proposal without tests, then runs
+the tests the worker wrote, and `pre_gate_cmd`, on the host with no jail
+(`supervisor._run_gate`, `run_pre_gate`), with the user's environment
+minus `GATE_ENV_STRIP`. A worker that wants out of the jail does not need a socket: a
+`conftest.py` or a test it wrote runs at gate time with the user's rights.
+Hiding the command servers (below, under Fixed) does not contain such a
+worker. **Next:** run the local gate and `pre_gate_cmd` through the same
+Landlock and bubblewrap jail, writable only in the staged tree; until then
+the trust boundary in the manual says the gate executes worker-written code.
+
+### Sockets the jail does not hide
+
+**Established:** Landlock below ABI 6 lets a confined command connect to any
+Unix socket by path and to any abstract socket, and bubblewrap here does not
+unshare the network namespace, which the worker needs for the API. On macOS the
+Seatbelt profile is `(allow default)` plus write denials, so connects are
+allowed unless a rule names the socket. shepherd-ai 0.3.12 hides or denies the
+sockets of the servers that run commands for the user where it can name them
+(below, under Fixed). It does not block, and warns about, a Docker daemon the
+user can reach (a socket, a docker context, or plain TCP on loopback), an X
+display, a session bus at an abstract address, and an sshd on this host the
+user logs in to, on Linux and on macOS. shepherd-dev unsets `TMUX`, `STY`,
+`DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `DISPLAY`, `XAUTHORITY`,
+`SSH_AUTH_SOCK` and `SSH_AGENT_PID` for the worker, with or without
+`worker.harden`. Still reachable: an ssh agent whose socket `SSH_AUTH_SOCK`
+does not name (a second agent, or one the user started elsewhere), which the
+start-of-run warning names when it sits where agents put their socket
+and something listens there (shepherd-ai 0.3.17) and does not find when
+started with `-a` elsewhere;
+a dbus session bus at an abstract address; a server started during the run
+with its socket somewhere no mask covers (`tmux -S /elsewhere`, a screen
+under `/run/screen/S-<user>`, whose root-owned parent shepherd-ai cannot
+pre-create the directory in); a socket created after the process's first
+launch in a subdirectory of a path bound back into a hidden directory (the
+walk is redone only when that path's own mtime changes, and the check inside
+the jail walks it once per process); a socket directory another user owns, or
+a symlink another user owns or that points at something not this user's (left
+unmasked rather than followed, and reported); an editor's or terminal's
+remote-control socket;
+any other same-user server that executes commands. **Next:** Landlock ABI 6
+(scoped abstract sockets) or a filter on `connect(AF_UNIX)`.
 
 ## Fixed
 
@@ -1059,31 +1101,593 @@ nothing in shepherd would have stopped it from picking a service.
 **Fix:** opt-in `limits.memory_max` / `--memory-max SIZE` (run, run2, runN).
 Each worker and reviewer launch and each local gate and `pre_gate_cmd` run
 is wrapped in
-`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`,
-outermost, after the perl swaps; the command is exec'd in place, so the
-killtree and the watchdog see the same pid and group. An overrun is killed
-inside its own scope (`constraint=CONSTRAINT_MEMCG`), measured on the same
-host with the scope started from inside the Landlock jail, which kept
-refusing writes outside its roots. A limit that cannot be enforced stops the
+`systemd-run --user --scope --collect -p MemoryMax=SIZE -p MemorySwapMax=0`;
+the command is exec'd in place, so the killtree and the watchdog see the
+same pid and group. Worker and reviewer launches got the scope inside their
+argv, after the perl swaps, until the jail started hiding the user bus (next
+entry); since then the scope wraps the jail from outside, and what it execs
+there may be bubblewrap, which forks the jailed runner and takes it down with
+it (`--die-with-parent`). An overrun is killed inside its own scope
+(`constraint=CONSTRAINT_MEMCG`). That kill was first measured with the scope
+started from inside the Landlock jail; `LimitAroundTheJail` measures the
+current arrangement. A limit that cannot be enforced stops the
 run before it starts: the preflight starts a real scope and reads back its
 `memory.max`, because a scope without the memory controller delegated starts
 fine and carries no limit. `--provider grok|codex` is refused with a limit,
 since those launches do not go through it; the remote gate is not covered.
 The wrapped command gets back the `XDG_RUNTIME_DIR` it had without the
-limit: `systemd-run` needs it to find the user bus, and a jailed worker
-handed the bus's path can ask it for a transient service outside the jail.
-This does not close that escape, which needs only the path a worker can
-guess; it only stops the limit from handing the path over.
+limit: `systemd-run` needs it to find the user bus, and nothing after the
+scope should inherit a setting the user did not have.
 From systemd 254 on, `systemd-run` may rewrite `${...}` and `$$` in the
 command it runs, and that command is a worker prompt or a gate string, so
 the scope passes `--expand-environment=no` there. Older versions do not
 expand and reject the flag; a version that cannot be read refuses the limit.
 On systemd 255 a `--scope` probe left `${HOME}`, `$$` and `$HOME` intact
 with and without the flag: there the flag is a guard, not a measured repair.
-Only the rebound launch provider wraps worker and reviewer argv, so a
-rebind that fails with a limit set stops the run (`_bind_claude_launches`),
-and a launch whose provider cannot be built does not fall back to the
-framework's unwrapped one (`_plain_provider`).
 With no limit set, every argv and gate command is unchanged. Pinned by
 `tests/test_memlimit.py`, whose `Live` class runs a real over-the-cap
 allocation where the host can enforce the limit.
+
+### A jailed worker could run commands outside the jail through the user bus
+
+**Was:** the Landlock jail confines writes by path, and Landlock below ABI 6
+does not govern connecting to a socket by path. `$XDG_RUNTIME_DIR` holds the
+user's session bus and systemd's private socket, so a confined command could
+run `systemd-run --user -- cmd`. systemd then started `cmd` as its own child,
+outside the jail's process tree, and the jail never applied to it. On
+Ubuntu 24.04 (kernel 6.8, Landlock ABI 4) a confined `systemd-run --user`
+wrote a file outside the writable roots. The memory scope made the path
+easier to find, since it set `XDG_RUNTIME_DIR` for the command, but a
+worker could guess `/run/user/<uid>` on its own.
+
+**Fix:** shepherd-ai 0.3.7 (fork, release
+`v0.3.7-landlock-command-servers`; 0.3.6 at `@2753e96` covered the runtime
+directory alone), pinned in `pyproject.toml` and `uv.lock`. Where a socket
+directory of a server that runs commands for the user exists (the runtime
+directory with the session bus and systemd's private socket, tmux's
+`tmux-<uid>`, screen's `S-<user>`), the Landlock backend puts bubblewrap in
+front of its runner. bubblewrap keeps the host view and mounts an empty tmpfs
+over each such directory, so the sockets are gone before Landlock confines
+the runner. A workspace or writable root that sits under one of them is bound
+back on top of the tmpfs, where Landlock still governs its writes. The jail
+probe checks inside the real jail that nothing else shows. Pinned by the
+fork's `test_landlock_blocks_a_write_through_systemd_run`,
+`test_landlock_hides_the_user_service_manager_sockets` (both fail on 0.3.5),
+`test_landlock_hides_the_tmux_socket_directory` and
+`test_landlock_keeps_a_workspace_that_sits_under_a_hidden_directory`. A real
+Claude worker ran through it on Ubuntu 24.04 and saw `/run/user/<uid>` empty
+and its `bus` missing. shepherd-dev also unsets `TMUX`, `STY`,
+`DBUS_SESSION_BUS_ADDRESS` and `DOCKER_HOST` for the worker
+(`tests/test_launch_policy.py` `CommandServerAddresses`). What stays open is
+under Open, above.
+
+Without a working bubblewrap (not installed, its user namespace denied by
+AppArmor, or a trial run that does not finish in 10 s), the worker still runs,
+with that path open. So does a run where the user can write to a Docker
+socket. The CLI prints one warning at the start naming the paths, the reason
+and how to close each (`launch.jail_exposure`, `cli._warn_jail_exposure`),
+and silenced the backend's per-launch repeats by their category,
+`JailExposureWarning`, not by their text (0.3.9 narrowed that to the repeat
+of the text it printed; below). A shepherd-ai older than 0.3.7 is
+reported the same way instead of passed over. `--provider codex|grok` runs
+under its own CLI's sandbox, which the mask does not reach, and is told so.
+Hosts with none of those sockets launch exactly as before.
+
+The memory scope needs the bus, so it moved out of the worker argv:
+`memlimit.activate` hands it to the backend's `set_outer_prefix`, which puts
+it around the jail. As a result the limit covers every confined launch,
+including the framework's own provider when the rebind fails, and the
+guards that stopped a limited run on a failed rebind are gone. The jail
+probe's own launches skip that prefix: they only touch a file, and a
+`systemd-run` failing there would read as a denied write. A host without
+Landlock refuses the limit, since no worker launch would go through the jail
+and its scope; so does a shepherd-ai older than 0.3.7, and a prefix the
+backend does not take leaves nothing active. Pinned by
+`tests/test_memlimit.py`: the activation tests, `WorkerArgv`, and
+`LimitAroundTheJail`, which, on a host that can do both, launches through
+the real jail and reads back the scope's `memory.max` and an empty runtime
+directory, and by the fork's `test_landlock_probe_runs_without_the_outer_prefix`.
+`tests/test_launch_policy.py` `JailExposure` pins the warning.
+
+shepherd-ai 0.3.8 (release `v0.3.8-jail-socket-masks`) closes what a review
+of 0.3.7 found still open:
+
+- **Was:** the runtime directory was hidden only when the bus or systemd's
+  private socket was in it, so rootless Docker's and Podman's sockets there
+  stayed reachable on a host without a user manager. **Now** it is hidden
+  whenever it exists, and the Podman system socket and a `DOCKER_HOST` over
+  tcp or ssh are reported.
+- **Was:** a tmux server started after the launch created `/tmp/tmux-<uid>`
+  beside the mask. **Now** the backend creates that directory (and
+  `$TMUX_TMPDIR/tmux-<uid>`) 0700 when absent, so the socket lands under the
+  tmpfs. Screen's `/run/screen` is root-owned and is left alone (Open, above).
+- **Was:** a path bound back into a hidden directory brought its sockets with
+  it: keeping the runtime directory's `systemd` as a writable root brought
+  `systemd/private` back. **Now** each socket inside a bound-back path gets
+  `/dev/null` bound over it, read-only.
+- **Was:** only the default socket directories were hidden. **Now** the
+  socket `$DBUS_SESSION_BUS_ADDRESS` (`unix:path=`) or `$TMUX` names is masked
+  on its own with `/dev/null`, not its directory, which can be `/tmp` itself
+  where no systemd runs (`/tmp/dbus-XXXX`); hiding that would empty `/tmp`
+  for the worker.
+- **Was:** the probe stopped the run when its check inside the jail failed.
+  **Now** a check that still finds an entry or a socket reachable marks
+  hiding as failed for the process: the launches that follow run without
+  bubblewrap, with a warning that names what it found, as on a host where
+  bubblewrap cannot start.
+- **Was:** on macOS the Seatbelt profile let a confined command connect to the
+  user's tmux server, measured on macOS 27.0.1 with a Unix socket server in
+  `/tmp/tmux-<uid>`. **Now** the profile adds `(deny network-outbound
+  (subpath ...))` for tmux's and screen's directories (realpaths, since
+  Seatbelt does not resolve `/tmp` to `/private/tmp`) and `literal` for the
+  socket `$TMUX` or the bus address names. Unix sockets as a whole stay
+  allowed: name resolution goes through mDNSResponder's socket. On the same
+  host `launchctl submit` from inside the sandbox did not start the job; that
+  measures this one launchd route, not every route through launchd (see
+  0.3.10, below). `exposure` reports a writable Docker socket (Docker
+  Desktop, Colima, OrbStack) and a network `DOCKER_HOST`, and shepherd-dev
+  prints it at the start of a run as on Linux.
+
+Pinned by the fork's `test_landlock_hides_the_runtime_dir_without_a_bus`,
+`test_landlock_creates_an_absent_tmux_directory_private`,
+`test_landlock_masks_a_socket_inside_a_bound_back_path`,
+`test_landlock_masks_a_session_bus_named_elsewhere_and_not_its_directory`,
+`test_landlock_hides_both_tmux_directories_and_masks_the_socket_tmux_names`,
+`test_landlock_probe_degrades_when_the_hiding_check_fails`,
+`test_landlock_reports_docker_host_over_the_network`, and on macOS
+`test_seatbelt_refuses_a_connect_to_a_tmux_socket` (`refused` for the tmux
+socket, `connected` for one beside it) and
+`test_seatbelt_reports_docker_reachable`.
+
+shepherd-ai 0.3.9 (release `v0.3.9-jail-socket-ownership`) fixes two things
+the review of 0.3.8 found:
+
+- **Was:** a socket directory was taken by its realpath, so a symlink another
+  user planted at `/tmp/tmux-<uid>` (shared `/tmp`) put the tmpfs over
+  whatever it pointed at, a directory of this user's included, and on macOS
+  the deny rule went there too. **Now** a directory counts only when `lstat`
+  shows a real directory this user owns, with its parent resolved and the last
+  component not followed; tmux and screen refuse such a directory for the same
+  reason. The named sockets get the same check. On macOS an absent directory
+  keeps its rule, since a server started later creates it there.
+- **Was:** every launch walked each path bound back into a hidden directory to
+  find its sockets, and the probe's check walked it again inside the jail; a
+  workspace there can be a large tree. **Now** the walk runs once per process
+  per path, and the check reads the resulting list. The limit this leaves is
+  under Open, above.
+
+Pinned by the fork's
+`test_landlock_does_not_follow_a_symlink_planted_at_the_tmux_directory`,
+`test_landlock_skips_a_directory_another_user_owns`,
+`test_landlock_does_not_follow_a_symlink_named_as_the_tmux_socket`,
+`test_landlock_walks_each_kept_path_once`,
+`test_seatbelt_denies_nothing_through_a_symlink_planted_at_the_tmux_directory`
+and `test_seatbelt_skips_a_directory_another_user_owns`.
+
+shepherd-ai 0.3.10 (release `v0.3.10-jail-socket-revalidate`) fixes what the
+review of 0.3.9 found:
+
+- **Was:** the list of sockets inside a bound-back path was kept for the
+  process, and bubblewrap creates a missing mount destination on the host: a
+  socket deleted after the first launch left an empty file (and its
+  directories) in the user's tree at the next launch, measured on Ubuntu
+  24.04. **Now** each listed entry is checked again on every launch and
+  dropped when it is no longer a socket, and the path is walked again when
+  its mtime changes.
+- **Was:** the check inside the jail read the list the host built, so it
+  could not see a socket the list missed. **Now** it walks the kept paths
+  itself, once per process for each set of hidden and kept paths.
+- **Was:** 0.3.9 refused every symlink at a socket directory, the user's own
+  `/tmp/tmux-<uid>` pointing at a private directory included, and said
+  nothing about what it left unmasked. **Now** a symlink this user owns is
+  followed when its target is also this user's and of the right kind, and
+  `exposure` names every candidate left unmasked.
+- **Was:** a setuid bubblewrap (no user namespace) left the host's PID
+  namespace in place, so a confined command could read a hidden directory
+  through another process's root, `/proc/<pid>/root`. **Now** bubblewrap runs
+  with `--unshare-pid`. (0.3.10 also had the check inside the jail try the
+  hidden directories through the parent's `/proc/<pid>/root`; with a fresh
+  `/proc` that pid never exists there, so that check could not fail. 0.3.12
+  replaced it, below.)
+- **Was:** an X display the user can reach (a socket in `/tmp/.X11-unix`, or
+  `DISPLAY` over the network) lets a command type into another window, and an
+  sshd on loopback lets it log in with the user's key, both outside the jail.
+  **Now** `exposure` reports both, and shepherd-dev unsets `DISPLAY` and
+  `XAUTHORITY` for the worker and refuses them in `jail_env` and `env_keep`.
+
+shepherd-ai 0.3.11 (release `v0.3.11-ssh-login-measured`) fixes the ssh report.
+**Was:** 0.3.10 reported "an sshd on loopback that takes the user's key" from
+the conditions alone (sshd answering on port 22, an `authorized_keys`, a
+private key or an agent). On an Ubuntu 24.04 host with all three, `ssh -o
+BatchMode=yes localhost` was refused (`Permission denied (publickey,password)`),
+so the warning claimed a login that did not happen. **Now** the check logs in
+with `BatchMode=yes` and runs `true`, without writing to the user's
+`known_hosts`, and reports only when that succeeds; the result is kept for the
+process, so a run tries at most one login. 0.3.12 changed how it logs in
+(below).
+
+On macOS, `open -a Terminal x.command` from inside the sandbox did not run the
+script on macOS 27.0.1, while the same command outside the sandbox did; no
+Seatbelt rule was added for it.
+
+Pinned by the fork's
+`test_landlock_drops_a_listed_socket_that_is_gone`,
+`test_landlock_walks_each_kept_path_once_while_it_holds`,
+`test_landlock_probe_walks_kept_paths_the_listing_missed`,
+`test_landlock_probe_walks_kept_paths_once_per_process`,
+`test_landlock_follows_this_users_own_link_to_its_own_directory`,
+`test_landlock_does_not_follow_another_users_link_at_the_tmux_directory`,
+`test_landlock_does_not_follow_another_users_link_named_as_the_tmux_socket`,
+`test_landlock_skips_a_directory_another_user_owns`,
+`test_landlock_reports_what_it_leaves_unmasked`,
+`test_landlock_jail_has_its_own_pid_namespace`,
+`test_landlock_reports_a_reachable_x_display`,
+`test_seatbelt_follows_this_users_own_link_to_its_own_directory`,
+`test_seatbelt_denies_nothing_through_another_users_link_at_the_tmux_directory`
+and `test_seatbelt_skips_a_directory_another_user_owns`, and by
+`tests/test_launch_policy.py` `CommandServerAddresses` and
+`SocketVariablesAreNeverKept`.
+
+On the shepherd-dev side:
+
+- **Was:** a repo could set `XDG_RUNTIME_DIR`, `TMUX_TMPDIR`, `SCREENDIR` or
+  the server addresses through `jail_env`, and those values are in this
+  process's environment when the backend decides what to hide; `env_keep`
+  could keep the addresses the scrub removes. **Now** `JAIL_ENV_REFUSED`
+  includes `launch.JAIL_SOCKET_ENV`, and `LaunchPolicy.keeps` never keeps
+  those names. Pinned by `tests/test_jail_env.py`
+  `test_the_command_servers_socket_variables_are_refused` and
+  `tests/test_launch_policy.py` `SocketVariablesAreNeverKept`.
+- **Was:** the CLI silenced every `JailExposureWarning` once it had printed
+  its own, so a later, different finding (the probe above) was dropped.
+  **Now** it silences only the repeat of the text it printed. Pinned by
+  `test_cli_warns_once_and_silences_only_the_repeat_of_that_text`.
+- **Was:** `runN` set the memory scope and checked exposure before applying
+  the repo's `jail_env`, unlike run and run2. **Now** the whole command runs
+  inside it. Pinned by `tests/test_jail_env.py` `test_runN_applies_it`.
+- **Was:** a launch whose provider could not be built fell back to the
+  framework's own without a word, losing the tool denylist, settings
+  isolation, env scrub, private `TMPDIR`, role model and process-tree kill.
+  **Now** it says so once per process, and the failed-rebind warning names the
+  same losses. Pinned by `PlainLaunchFallback`.
+- **Was:** a backend whose exposure check raised would have stopped the
+  command. **Now** the failure is printed as the warning and the run goes on
+  (`test_a_backend_that_fails_its_check_is_reported_and_the_run_goes_on`).
+
+shepherd-ai 0.3.12 (release `v0.3.12-jail-exposure-reports`) fixes what the
+review of 0.3.11 found:
+
+- **Was:** the Docker report checked only the system sockets and
+  `DOCKER_HOST=unix://`. Docker Desktop for Linux, Colima, OrbStack and Rancher
+  Desktop reach the daemon through a docker context or a socket under the home
+  directory, and a daemon on plain TCP at `127.0.0.1:2375` takes no socket at
+  all; the worker reached each of them unreported. **Now** the report also
+  reads the docker contexts (`$DOCKER_CONFIG` or `~/.docker/contexts`), the
+  per-user sockets those tools create, a context on loopback TCP, and port 2375
+  on loopback when it answers `GET /_ping` with an `Api-Version` header. Linux
+  and macOS share the check (`_jail_exposure.py`). Pinned by
+  `test_docker_contexts_and_per_user_sockets_are_candidates`,
+  `test_docker_daemon_on_loopback_tcp_is_found`,
+  `test_a_port_that_is_not_docker_is_not_reported`,
+  `test_landlock_reports_a_docker_context_socket` and
+  `test_seatbelt_reports_a_docker_context_and_an_ssh_login`.
+- **Was:** the ssh check logged in with `StrictHostKeyChecking=no`, so whatever
+  answered on port 22 counted as this host, and the user's `~/.ssh/config`
+  could add a `ProxyCommand`, a `LocalCommand` or forwarding to the attempt.
+  It tried only port 22 on loopback. **Now** it pins this host's own keys
+  (`/etc/ssh/ssh_host_*_key.pub`) in a temporary known-hosts file under a
+  fixed alias, overrides the options that run or forward anything, asks for no
+  session (`-N`), and counts the login when ssh reports it authenticated. The
+  ports and addresses come from `sshd_config` (`Port`, `ListenAddress`,
+  `Include`; a wildcard address is tried on loopback). With no host keys or no
+  listener it does not try. Pinned by
+  `test_ssh_login_counts_when_ssh_says_it_authenticated`,
+  `test_ssh_login_refused_is_not_reported`,
+  `test_ssh_login_that_never_answers_is_stopped`,
+  `test_ssh_login_is_not_tried_without_host_keys_or_a_listener`,
+  `test_sshd_endpoints_follow_port_listen_address_and_include`,
+  `test_sshd_endpoints_default_to_loopback_port_22` and
+  `test_landlock_reports_an_ssh_login_to_this_host`.
+- **Was:** macOS reported no ssh login, though with Remote Login on and
+  network allowed the sandbox reaches it the same way. **Now** it does.
+  Measured on macOS 27.0.1: the user's key logged in to its own sshd, and the
+  report named it. Pinned by
+  `test_seatbelt_reports_a_docker_context_and_an_ssh_login`.
+- **Was:** a uid with no passwd entry made the ssh check raise `KeyError`
+  (seen on a macOS host whose tests fake the uid). **Now** the check gives up
+  without a report. Pinned by
+  `test_ssh_login_is_not_tried_for_a_uid_without_an_account`.
+- **Was:** the check inside the jail looked for the hidden directories through
+  the host's `/proc/<pid>/root`. bubblewrap runs with `--unshare-pid` and a
+  fresh `/proc`, where that pid never exists, so the check always passed.
+  **Now** the jail compares its own PID namespace with the launcher's and fails
+  when they are the same. Pinned by
+  `test_landlock_hiding_check_fails_in_the_launchers_pid_namespace` and
+  `test_landlock_jail_has_its_own_pid_namespace`.
+- **Was:** a D-Bus `unix:path=` with percent escapes, which the D-Bus spec
+  allows, named a path that does not exist, so the real bus was neither masked
+  nor reported; a bus at `unix:abstract=` was not reported at all. **Now** the
+  path is decoded before it is masked, and an abstract bus is reported, on
+  both platforms. Pinned by
+  `test_dbus_addresses_split_paths_from_abstract_names_and_decode_them`,
+  `test_landlock_decodes_a_percent_escaped_bus_path` and
+  `test_landlock_reports_a_session_bus_on_an_abstract_socket`.
+- **Was:** the runner kept the user's controlling terminal. Where the kernel
+  still allows `TIOCSTI` (`dev.tty.legacy_tiocsti=1`), a confined command could
+  type into the shell outside the jail. **Now** the runner gives up the
+  terminal (`TIOCNOTTY`) after confining itself, unless it leads its own
+  session. Pinned by `test_landlock_runner_drops_the_controlling_terminal`.
+- **Was:** the Landlock rule struct was a ctypes `Structure` with `_pack_`,
+  which Python 3.14 deprecates. **Now** it is packed with `struct`. Pinned by
+  `test_landlock_imports_without_a_deprecation_warning`.
+
+On the shepherd-dev side:
+
+- **Was:** with `worker.harden: false` the scrub list was empty, so `TMUX`,
+  `STY`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `DISPLAY` and `XAUTHORITY`
+  reached the worker. **Now** those are unset with or without hardening.
+  Pinned by `test_a_disabled_policy_still_unsets_the_command_servers_addresses`.
+- **Was:** `TMPDIR` was not among the socket variables, and the macOS jail
+  builds the screen socket deny rule from it, so a repo's `jail_env` could
+  move that rule. **Now** it is refused like the others. Pinned by
+  `test_the_command_servers_socket_variables_are_refused`.
+- **Was:** `jail_env` is in this process's environment for the whole command,
+  so a `PATH` set there chose programs that run on the host: the `bwrap` and
+  `ssh` of the jail, the `env`, `systemd-run` and `sh` that hold the memory
+  ceiling, and the `git` that reads the repo, at the start-of-run checks and at
+  every launch. **Now** they are found on the user's own `PATH` before
+  `jail_env` or `jail_seed` is applied, and those paths are used for the rest
+  of the run (`programs.py`; shepherd-ai 0.3.13 for `bwrap` and `ssh`).
+  `systemd-run` and `bwrap` missing there stay missing (the ceiling is refused,
+  the jail warns); `env`, `sh` or `git` missing there are looked up at exec
+  time as before (0.3.14 refuses them instead, below). `PATH` still reaches the worker and the gate. Pinned by
+  `test_the_jails_programs_are_found_before_the_repos_path_applies`,
+  `test_a_seed_alone_also_finds_them_first`,
+  `test_a_program_missing_from_the_users_path_stays_missing`,
+  `test_without_jail_env_nothing_is_resolved_ahead` and `test_path_is_accepted`.
+- **Was:** `jail_env` could set `LD_*` or `DYLD_*`, which load code into
+  `bwrap` and the jail's runner whatever path they are found at. **Now** they
+  are refused. Pinned by `test_the_dynamic_loader_variables_are_refused`.
+- **Was:** a refused `jail_env` or `jail_seed` key was dropped without a word.
+  **Now** the run says which key it ignores and why. Pinned by
+  `test_each_ignored_key_is_named_with_the_reason`.
+- **Was:** the CLI silenced its printed warning with a prefix match, so a later
+  warning that began with the same text was also dropped. **Now** the match is
+  anchored at the end. Pinned by
+  `test_a_longer_warning_that_starts_with_the_printed_text_still_shows`.
+- **Was:** the note that codex and grok are not covered by shepherd-dev's
+  socket mask was printed only on Linux. **Now** macOS says the Seatbelt rules
+  do not cover them either. Pinned by
+  `test_other_providers_are_told_the_mask_does_not_cover_them`.
+
+shepherd-ai 0.3.14 (release `v0.3.14-jail-keeps-environment`) and the
+shepherd-dev side fix what the review of 0.3.13 found. The repo's `jail_env`
+and `jail_seed` sit in this process's environment for the whole command, and
+everything the process did for itself on the host still read that
+environment.
+
+- **Was:** the host's own programs were found and run under the repo's
+  values: the planner's and the auth probe's `claude` (with the repo's
+  `NODE_OPTIONS`, `CLAUDE_CONFIG_DIR` and `HOME`), the `ssh` of the remote
+  gate, `cp`, `git` (with `GIT_CONFIG_*`), `ps`, `security`, `notify-send`,
+  `osascript`, and the codex and grok binaries. **Now** `programs.resolve()`
+  keeps a copy of the user's environment before the repo's applies, and every
+  host-side subprocess gets `programs.host_env()` and finds its binary with
+  `programs.which()` on that copy's `PATH`. The codex and grok workers are
+  found that way but run with the live environment on purpose: `jail_env` is
+  how a repo reaches its worker, and those two have no shepherd jail. Once the copy exists, a program
+  missing from the user's `PATH` raises `FileNotFoundError` instead of being
+  looked up on the repo's (`programs.argv0`). Pinned by `tests/test_jail_env.py`
+  `test_what_runs_on_the_host_gets_the_users_environment_not_the_repos`,
+  `test_the_planner_gets_the_users_environment_and_claude` and
+  `test_after_resolving_a_program_missing_from_the_users_path_is_refused`.
+- **Was:** a kept copy with no `PATH` (shepherd-dev started without one) made
+  `programs.which()` pass `path=None` to `shutil.which`, which then read the
+  live `PATH`, the repo's under `jail_env`. **Now** it falls back to
+  `os.defpath`. Pinned by
+  `test_a_kept_environment_without_path_does_not_read_the_live_one`.
+- **Was:** an empty or `.` entry in the user's own `PATH` (a trailing colon,
+  common in shell profiles) made `shutil.which` search the current
+  directory, the repo's when shepherd-dev runs there, so a `git` or `cp`
+  checked into the repo ran on the host; for an empty entry it returned the
+  bare name, which exec looked up again on the live `PATH`, the repo's under
+  `jail_env`. `resolve()` also lacked the `os.defpath` fallback. **Now**
+  `resolve()` and `which()` search only the absolute entries of the kept
+  `PATH` (`_search_path`). Pinned by
+  `test_a_relative_entry_of_the_users_path_is_not_searched`.
+- **Was:** the worker's `claude` was looked up by the framework's provider at
+  launch, on the repo's `PATH`. **Now** shepherd-dev passes the path it found
+  on the user's `PATH` (`claude_path`, shepherd-ai 0.3.14), and the auth probe
+  takes one too. Pinned by `test_the_workers_claude_is_the_one_on_the_users_path`
+  and the fork's `test_headless_runs_the_claude_path_it_was_given` and
+  `test_probe_claude_auth_runs_the_claude_path_it_was_given`.
+- **Was:** the preflight read `CLAUDE_CONFIG_DIR` and `HOME` from the live
+  environment to find the credentials it judges, and the run records' default
+  directory came from the live `HOME`; a repo could make the preflight judge a
+  token it chose and move the records. **Now** both read the kept copy.
+  Pinned by `test_the_preflight_and_the_run_records_read_the_users_home`.
+- **Was:** the jail read what to hide (`XDG_RUNTIME_DIR`, `DOCKER_HOST`,
+  `DOCKER_CONFIG`, `HOME` and the rest) from the live environment, and the
+  command servers' addresses stayed in it for the whole command, where
+  anything the process spawned found them. **Now** `worker_environment()`
+  removes `launch.JAIL_SOCKET_ENV` and the ssh agent's variables from the live
+  environment for the command and puts them back after; the jail reads the
+  copy it keeps in `_jail_exposure.resolve_programs()` (`environ()`,
+  `home()`), and `gate_env()` gives the gate the scrubbed values back, so the
+  gate runs as before. Pinned by
+  `test_the_servers_addresses_are_out_of_the_environment_for_the_command`,
+  `test_every_command_takes_the_servers_addresses_out` and the fork's
+  `test_resolve_programs_keeps_the_environment_the_checks_read` and
+  `test_landlock_hides_what_the_kept_environment_names_after_it_changes`.
+- **Was:** a shepherd-ai before 0.3.14, whose jail reads the live environment,
+  would hide nothing once those addresses are gone from it. **Now** it counts
+  as a jail that does not hide (the warning says "needs 0.3.14 or later", and
+  the memory ceiling is refused). Pinned by
+  `test_a_jail_that_reads_the_live_environment_is_old`.
+- **Was:** the Landlock runner was started with `python -m`, which imports
+  from the working directory and obeys `PYTHONPATH`: a `vcs_core/` package
+  planted there ran in place of the runner, before Landlock (reproduced: the
+  runner failed with "No module named vcs_core._landlock_containment" and the
+  planted package's marker appeared). **Now** the runner and the in-jail
+  checks run with `-I`. Pinned by the fork's
+  `test_landlock_runner_ignores_python_settings_and_the_working_directory`.
+- **Was:** `jail_env` and `jail_seed` could set `PYTHONPATH` and the other
+  `PYTHON*` variables beyond the listed ones, `GCONV_PATH` and `LOCPATH`
+  (glibc loads code they name), `SSH_AUTH_SOCK` and `SSH_AGENT_PID`,
+  `DOCKER_CONFIG`, and any `SHEPHERD_DEV_*` variable, which configures
+  shepherd-dev itself (`SHEPHERD_DEV_CODEX_SANDBOX=danger-full-access` took the
+  codex worker out of its sandbox, `SHEPHERD_DEV_GATE_ENV_KEEP` chose what the
+  gate inherits). **Now** each is refused and named on stderr with the reason.
+  `SSH_AUTH_SOCK` and `SSH_AGENT_PID` are also unset for the worker with or
+  without hardening (`test_a_disabled_policy_still_unsets_the_command_servers_addresses`).
+  Pinned by `test_every_python_variable_is_refused`,
+  `test_the_glibc_loader_variables_are_refused`,
+  `test_the_ssh_agent_and_the_docker_config_are_refused`,
+  `test_shepherd_devs_own_options_are_refused` and
+  `test_each_ignored_key_is_named_with_the_reason`.
+- **Was:** the suite runs hundreds of commands in one process, and the first
+  one to resolve kept its environment and programs for every later test: a
+  test that set its own `SHEPHERD_DEV_RUNS_DIR` read the developer's real run
+  records (`test_trace_last_renders_timeline`, measured on a host with
+  recorded runs). **Now** every test class that runs a command or resolves
+  starts from `tests/hostprograms.fresh_programs`, which clears both caches
+  (shepherd-dev's and shepherd-ai's) and restores them after; a run of every
+  test module in one process leaves neither set.
+- **Was:** `test_gatestream`, `test_remotegate_ssh` and
+  `test_remotegate_warmup` replaced `remotegate._ssh_base` with a fake in
+  `setUp` and never put it back, so any later test of the remote gate's ssh
+  got the fake. **Now** each restores it in its cleanup.
+
+shepherd-ai 0.3.15 (release `v0.3.15-jail-hides-the-agent`) and the
+shepherd-dev side fix what the review of 0.3.14 found.
+
+- **Was:** four host-side launches still read the live environment, where the
+  repo's `jail_env` sits and from which `worker_environment` has removed the
+  ssh agent: `memlimit`'s `systemd-run --version` and scope probe, the remote
+  gate's streamed test step, and the codex reviewer. The remote test step
+  lost `SSH_AUTH_SOCK`, so for a user whose key is held only by the agent ssh
+  exited 255 and the gate reported a test failure, not an infrastructure
+  error, on every attempt. The codex reviewer got the repo's `NODE_OPTIONS`.
+  **Now** each gets `programs.host_env()` (the reviewer adds `CI`). Pinned by
+  `tests/test_memlimit.py` `test_the_probes_run_with_the_users_environment`,
+  `tests/test_remotegate_ssh.py`
+  `test_the_test_step_keeps_the_users_ssh_agent` and `tests/test_codex_host.py`
+  `test_the_reviewer_gets_the_users_environment_not_the_repos`.
+- **Was:** on macOS the framework's Claude provider looked up the login on the
+  host, unjailed, before each worker and reviewer launch, running `security`
+  by its bare name on the live `PATH` and reading `CLAUDE_CONFIG_DIR` and
+  `HOME` from the live environment. A repo whose `jail_env` put its own
+  `security` first on `PATH` had it run outside Seatbelt on every launch.
+  **Now** shepherd-ai resolves `security` with `bwrap` and `ssh`, and the
+  lookup reads the environment `resolve_programs` kept. Pinned in shepherd-ai
+  by `test_host_login_lookup_runs_the_security_found_before_the_path_changed`
+  and `test_host_login_lookup_reads_the_config_dir_and_home_it_kept`.
+- **Was:** unsetting `SSH_AUTH_SOCK` for the worker left the agent's socket on
+  disk (`/tmp/ssh-*/agent.*`, launchd's `Listeners`). Landlock below ABI 6
+  does not govern `connect`, and `(allow default)` in Seatbelt allows it, so a
+  worker could find the socket and sign with the user's keys. **Now** the
+  jail masks the socket the kept `SSH_AUTH_SOCK` names, as it masks the
+  session bus and the tmux server: `/dev/null` over it under bubblewrap, a
+  connect deny in Seatbelt; its directory stays visible. Pinned in shepherd-ai
+  by `test_landlock_masks_the_ssh_agent_socket_the_environment_names` and
+  `test_seatbelt_refuses_a_connect_to_the_ssh_agent`.
+
+shepherd-ai 0.3.16 (release `v0.3.16-jail-reports-agents`) and the
+shepherd-dev side fix what the review of 0.3.15 found.
+
+- **Was:** the jail hid only the agent socket the kept `SSH_AUTH_SOCK` named.
+  Any other agent of the user's on disk (one an ssh login forwarded to
+  `/tmp/ssh-*`, launchd's `Listeners` with `SSH_AUTH_SOCK` unset, gpg-agent's
+  ssh socket, 1Password, Bitwarden, Secretive) stayed reachable from inside
+  the jail, and the start-of-run warning said nothing about it. **Now** the
+  warning names each one it finds at those places that the jail neither masks
+  nor hides under a hidden directory. It does not mask them: the report is
+  what can be known without guessing each tool's layout, and an agent
+  started with `-a` somewhere else is still not found (Open, above). Pinned
+  in shepherd-ai by
+  `test_agent_sockets_finds_this_users_agents_where_they_put_them`,
+  `test_landlock_reports_the_agents_it_does_not_hide` and
+  `test_seatbelt_reports_the_agents_it_does_not_deny`.
+
+shepherd-ai 0.3.17 (release `v0.3.17-jail-agents-and-path`) fixes what the
+review of 0.3.16 found.
+
+- **Was:** the agent report of 0.3.16 did not look under `~/.ssh/agent`,
+  where OpenSSH 10.1 and later and sshd's forwarded agents put their socket
+  by default, so it missed the agent most users run (measured: a live agent
+  there on macOS with OpenSSH 10.3p1 and `SSH_AUTH_SOCK` unset, not
+  reported). It also reported sockets of agents that had died; on Python
+  3.11 a link another user planted in `/tmp` ended the listing, and a
+  directory removed during it raised out of the report and of the launch
+  that called it; and a path with a control character went raw into the
+  warning. **Now** it looks under `~/.ssh/agent`, walks one directory at a
+  time skipping what it cannot read and never following a link at a
+  wildcard, lists a socket unless connecting to it is refused, escapes
+  non-printable paths, and a failure to build the report during a launch
+  becomes a line of the warning. Pinned in shepherd-ai by
+  `test_agent_sockets_finds_this_users_agents_where_they_put_them`,
+  `test_agent_message_escapes_a_path_that_is_not_printable` and
+  `test_a_launch_warning_survives_an_exposure_that_cannot_be_described`.
+- **Was:** on Linux, with no runtime directory of the user's and
+  `/tmp/tmux-<uid>` taken by another user, there was no directory to hide,
+  so bubblewrap did not run and the session bus, the tmux server and the
+  ssh agent the environment names were neither masked nor reported. **Now**
+  bubblewrap runs whenever there is a named socket to mask. Pinned by
+  `test_landlock_masks_the_named_sockets_with_no_directory_to_hide`.
+- **Was:** the fork's `resolve_programs()` found bwrap, ssh and security
+  with the same `shutil.which` reading of an empty or `.` `PATH` entry.
+  **Now** it keeps only absolute entries. Pinned by
+  `test_resolve_programs_skips_relative_entries_of_the_path`.
+- **Was:** the last host-side calls were left on the live environment. The
+  native gate's `node --version` (`config._node_supports_strip_types`) ran
+  the `node` on the repo's `PATH` with its `NODE_OPTIONS`, during
+  `resolve_test_cmd`, before any gate or person looked at the run; its
+  pytest lookup (`_pytest_available`) read the same `PATH`; and the
+  optimizer's `claude` (`optimize._propose`) and its `git worktree add` and
+  `remove` (`optimize._replay`) ran with the live environment. **Now** each
+  finds its program with `programs.argv0` or `programs.which` and runs
+  with `programs.host_env()`. Pinned by
+  `test_the_gate_detection_and_the_optimizer_run_on_the_users_environment`.
+  Kept by the owner's decision, with its consequence: detection now answers
+  for the user's `PATH` while the gate still runs with the repo's. A Python
+  repo with no test command configured, no pytest marker, and pytest only
+  on a `PATH` its `jail_env` sets gets `python3 -m unittest discover`, which
+  collects no pytest-style test: on Python 3.11 the gate passes with none
+  run, from 3.12 it fails every attempt. A `node` on that `PATH` older or
+  newer than the user's can flip the TypeScript choice the same way. The
+  fix on the repo's side is to set `test_cmd`.
+- **Was:** on Linux the programs that start the jail (the memory scope's
+  `env` and `systemd-run`, `bwrap`, and the Landlock runner) ran on the host
+  with the live environment, which held the repo's `jail_env`. Only the list
+  of refused names kept a variable from loading code into them or changing
+  what they do before Landlock applied. **Now** shepherd-ai 0.3.18 starts that
+  chain with the environment `resolve_programs` kept and hands the command's
+  own environment to the runner on a memfd, read before it confines itself
+  and exec'd with `execvpe`; with no kept environment, or nothing changed
+  since, the launch is the single-environment one it was. The refusal list
+  stays as a second layer. On macOS `sandbox-exec` execs the command itself
+  and has no runner to swap the environment in, so it still starts with the
+  repo's values. Pinned by
+  `test_the_jails_outer_chain_gets_the_users_environment_and_the_command_the_repos`
+  and `LimitAroundTheJail.test_a_repos_settings_reach_the_capped_command_and_not_the_scope`,
+  and in shepherd-ai by
+  `test_landlock_outer_chain_gets_the_kept_environment_and_the_command_its_own`.
+
+### CI tested against shepherd-ai from PyPI, not the pinned wheel
+
+**Was:** the CI's `test`, `repeat`, `performance` and `static` jobs, and
+the release workflow's `test` job, ran `pip install -e .`. pip does not read `[tool.uv.sources]`, so it resolved
+`shepherd-ai` from PyPI instead of the fork's wheel that `pyproject.toml` and
+`uv.lock` pin. The suite, the timing reruns, the benchmark and the type delta
+all ran against a framework the users never get, and so did the suite a
+tag push runs before publishing. It showed when the
+`static` job of the 0.3.18 change reported six new type errors: PyPI's
+shepherd-ai has no `set_outer_prefix` and no memfd launch.
+
+**Fix:** each of those jobs exports `uv.lock` with `uv export --frozen
+--no-emit-project`, installs it with `pip install --require-hashes`, and then
+installs the package with `--no-deps -e .`. The wheel is the one the lock
+names, checked against its hash. `--frozen` takes the lock as it is; the
+`lock` job is what fails a lock that drifted from `pyproject.toml`. The
+`static` job installs `ruff` and `pyright` after that, at the same pins.
+The `static` job's type delta pins it: against PyPI's shepherd-ai it fails.

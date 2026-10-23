@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hostprograms import fresh_programs  # noqa: E402
 from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev import remotegate as RG  # noqa: E402
@@ -70,6 +71,7 @@ class RemoteGateSSHQuoting(unittest.TestCase):
     def setUp(self):
         from shepherd_dev import procstream as PS
 
+        self.addCleanup(setattr, RG, "_ssh_base", RG._ssh_base)
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         PS.subprocess.Popen = _patched_popen
@@ -320,6 +322,30 @@ class RemoteGateSSHQuoting(unittest.TestCase):
         self.assertTrue(res.passed, f"gate should pass; exit={res.exit_code} tail={res.output_tail!r}")
         self.assertEqual(res.exit_code, 0)
         self.assertFalse(any(db.iterdir()), "teardown must remove the per-{id} state")
+
+
+    def test_the_test_step_keeps_the_users_ssh_agent(self):
+        # worker_environment unsets SSH_AUTH_SOCK for the whole command; every
+        # ssh the gate runs for itself must still get the user's agent, the
+        # streamed test step included, or a key held only by the agent fails
+        # the gate as a test failure
+        fresh_programs(self)
+        from unittest import mock
+
+        from shepherd_dev import launch
+
+        warm = Path(mkdtemp())
+        (warm / "src").mkdir()
+        cfg = parse_remote_config({
+            "ssh": "root@host", "repo_dir": str(warm), "copy_cmd": "cp -R {repo} {workdir}",
+            "test_cmd": 'test "$SSH_AUTH_SOCK" = /tmp/agent.users && echo GATE_OK',
+            "workdir_base": mkdtemp(),
+        }, "python")
+        assert cfg is not None
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": "/tmp/agent.users"}), launch.worker_environment():
+            self.assertNotIn("SSH_AUTH_SOCK", os.environ)
+            res = run_remote_gate(cfg, {"src/a.py": b"V = 1\n"}, timeout=30)
+        self.assertTrue(res.passed, f"exit={res.exit_code} tail={res.output_tail!r}")
 
 
 class TarCarriesModes(unittest.TestCase):

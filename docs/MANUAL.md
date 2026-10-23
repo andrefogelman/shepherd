@@ -18,8 +18,11 @@ arquivo no worktree quando você roda `settle`. O commit no git continua seu.
 dele — local e remoto — e executa código controlado pelo repo: a própria suíte
 (`conftest.py`, scripts de build) e o `test_cmd`, que pode vir do
 `.shepherd-dev.json` do repo (a origem é impressa no início do run:
-`test gate (from .shepherd-dev.json): …`). Rode shepherd-dev só em repos em
-cuja suíte de testes você rodaria na mão.
+`test gate (from .shepherd-dev.json): …`). Ele também roda os testes que o
+worker escreveu, fora do jail e com os seus direitos: o jail não contém um
+worker que ponha a saída dele num teste. Rode shepherd-dev só em repos em cuja
+suíte de testes você rodaria na mão, com workers cujos testes você deixaria
+rodar.
 
 ## Duas formas de usar
 
@@ -418,8 +421,33 @@ settings do repo (`.claude/settings.json`, hooks incluídos) são ignoradas, o
 browser é desligado, e variáveis com cara de credencial (`SSH_AUTH_SOCK`,
 `AWS_*`, `GH_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`…) são removidas do
 ambiente do worker. `ANTHROPIC_*`/`CLAUDE_*`, as chaves de `jail_env` e
-`worker.env_keep` nunca são removidas. Evento `worker.launch` registra o que foi
-negado e quais nomes foram removidos.
+`worker.env_keep` nunca são removidas, exceto as variáveis que dizem onde fica
+o socket de um servidor de comandos (`XDG_RUNTIME_DIR`,
+`DBUS_SESSION_BUS_ADDRESS`, `TMUX`, `TMUX_TMPDIR`, `STY`, `SCREENDIR`,
+`DOCKER_HOST`, `DISPLAY`, `XAUTHORITY`, e `TMPDIR`, sob o qual o screen do
+macOS guarda os sockets): o `jail_env` não as define e o `env_keep` não as
+mantém, porque a jaula as lê para decidir o que esconde ou avisa. O `jail_env`
+também não define `LD_*`, `DYLD_*`, `GCONV_PATH` nem `LOCPATH`: elas
+carregariam código dentro do `bwrap` e do runner da jaula. Nem `SSH_AUTH_SOCK`,
+`SSH_AGENT_PID` ou `DOCKER_CONFIG`, nem nenhuma variável `SHEPHERD_DEV_*`, que
+reconfiguraria o próprio shepherd-dev. Cada chave ignorada aparece no stderr
+com o motivo. `PATH` é aceito e chega ao worker e ao portão. O que o
+shepherd-dev roda no host para si (`bwrap`, `ssh`, `systemd-run`, `env`, `sh`,
+`git`, `cp`, o `claude` do planejador e da sonda de autenticação, o `claude` do
+worker, codex, grok, notificações) é procurado no seu próprio `PATH` e roda com
+o seu próprio ambiente, guardado antes de os valores do repo entrarem; um
+programa que não está lá não é procurado no `PATH` do repo. No Linux o que
+abre a jaula (o scope de memória, o `bwrap` e o runner da jaula) também roda
+com esse ambiente, e os valores do repo chegam só ao comando confinado. No
+macOS o `sandbox-exec` executa o próprio comando, então ele começa com eles.
+`TMUX`, `STY`,
+`DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `DISPLAY`, `XAUTHORITY`,
+`SSH_AUTH_SOCK` e `SSH_AGENT_PID` são removidas mesmo com `worker.harden: false`, e a
+jaula também esconde o socket do agente que `SSH_AUTH_SOCK` apontava, porque remover a
+variável deixa o socket no disco. Outro socket de agente seu, vivo, que a jaula
+não esconde (em `~/.ssh/agent` ou `/tmp/ssh-*`, gpg-agent, 1Password e afins)
+aparece no aviso do início do run. Evento `worker.launch` registra o que foi negado e quais nomes foram
+removidos.
 
 ```json
 { "worker": {
@@ -478,9 +506,48 @@ portão local e do pré-gate (`pre_gate_cmd`), num cgroup próprio via `systemd-
 `MemoryMax` no teto e sem swap: quem passa do teto morre dentro do próprio
 scope, e mais nada. É opcional e vem desligado. Pedido e impossível de aplicar
 (fora do Linux, sem `systemd-run`, sem gerenciador systemd do usuário, sem o
-controlador de memória delegado), o run para antes de começar e diz por quê.
+controlador de memória delegado, sem a jaula Landlock no host, shepherd-ai
+anterior à 0.3.14), o run para antes de começar e diz por quê.
 Também recusa `--provider grok|codex`, cujos launches não passam por ele. O
 portão remoto roda em outra máquina e não é coberto.
+
+**A jaula no Linux e o `bubblewrap`.** O Landlock limita onde o worker escreve,
+mas não impede que ele se conecte a um socket. Em `/run/user/<uid>` mora o
+barramento do gerenciador systemd do usuário: por ele, `systemd-run --user`
+dentro da jaula pede ao systemd que rode um comando, e esse comando nasce fora
+da jaula. Servidores tmux e screen fazem o mesmo (`tmux new-window`). Onde o
+`bubblewrap` (`bwrap`) funciona, a jaula monta um diretório vazio por cima de
+`/run/user/<uid>`, `tmux-<uid>` e do `S-<usuário>` do screen, e esses caminhos
+somem. Um `tmux-<uid>` ausente é criado antes, para que um tmux aberto durante
+o run caia debaixo da máscara. Um `tmux-<uid>` que é diretório de outro
+usuário, ou symlink que não é seu ou que aponta para algo que não é seu, fica
+de fora em vez de ser seguido, e o aviso diz isso: num `/tmp` compartilhado
+qualquer um pode plantar um. O socket do barramento ou do tmux que o seu
+ambiente aponta em outro lugar (`/tmp/dbus-XXXX`, por exemplo) recebe
+`/dev/null` por cima desse arquivo só, não do diretório. O ambiente do worker
+perde `TMUX`, `STY`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `DISPLAY` e
+`XAUTHORITY`. Onde o bubblewrap falta, ou o AppArmor bloqueia o namespace
+dele (Ubuntu 23.10 em diante), ou a checagem dentro da jaula ainda acha um
+socket, o run segue sem essa proteção e avisa, dizendo o motivo e como instalar
+(`sudo apt install bubblewrap`, `sudo dnf install bubblewrap`). Um daemon do
+Docker ou do Podman que você alcança também é avisado, não bloqueado: quem
+comanda o daemon é root. Isso cobre um socket em que você pode escrever, um
+docker context (Docker Desktop, Colima, OrbStack, Rancher Desktop), um
+`DOCKER_HOST` por tcp ou ssh, e um daemon respondendo na porta 2375 do
+loopback. Também são avisados um display X alcançável, um barramento de sessão
+em endereço abstrato e um sshd deste host em que o seu usuário entra sem
+senha: a checagem tenta um login, confiando só nas chaves do próprio host, nas
+portas que o `sshd_config` declara. Outros sockets continuam alcançáveis; veja
+`docs/KNOWN_ISSUES.md`. O teto de memória fica por fora da jaula e vale nos
+dois casos; num host sem Landlock ele é recusado, porque nenhum launch do
+worker passaria pela jaula.
+
+**A sandbox no macOS.** O perfil do Seatbelt recusa conexões aos sockets do
+tmux e do screen, então `tmux new-window` vindo do worker falha. Um daemon do
+Docker que você alcança (Docker Desktop, Colima, OrbStack, um docker context,
+um `DOCKER_HOST` de rede), um barramento de sessão em endereço abstrato e um
+sshd deste Mac em que você entra (Login Remoto) são avisados no começo do run,
+não bloqueados; o ssh importa quando o run libera acesso à rede.
 
 ## Modo verbose & trace (passo a passo)
 
@@ -779,7 +846,7 @@ Duas coisas a saber antes de usar. As variáveis chegam a **todo** processo
 filho deste comando, portão inclusive — o substrato não tem hook de ambiente
 por execução, então esta é a única rota até o worker. E variáveis que
 redirecionam interpretador Python ou seu caminho de import (`PYTHONPATH`,
-`PYTHONHOME`, `VIRTUAL_ENV`, `PYTEST_ADDOPTS` e o resto dessa família) são
+`PYTHONHOME`, `VIRTUAL_ENV`, `PYTEST_ADDOPTS`, toda variável `PYTHON*`) são
 recusadas: shepherd remove exatamente essas antes de lançar os próprios
 interpretadores, e config de repo não pode repô-las.
 

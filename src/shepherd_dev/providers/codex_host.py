@@ -10,13 +10,13 @@ Claude / shepherd-ai. Settlement uses `.shepherd-proposals/` (`settle-par`).
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable
 
+from .. import programs
 from ..policy import ChangesetPolicy
 from ..supervisor import ReviewVerdict, verdict_from_review_json
 from .codex_exec import build_executor, find_codex_bin
@@ -39,7 +39,9 @@ def _default_runner(argv: list[str], *, timeout: int, last_message_path: str) ->
         capture_output=True,
         text=True,
         timeout=timeout,
-        env={**os.environ, "CI": os.environ.get("CI", "1")},
+        # the reviewer runs on the host for shepherd-dev: the user's environment,
+        # not the repo's jail_env (that is for the worker, hosted.run_cli_worker)
+        env={**programs.host_env(), "CI": programs.environ().get("CI", "1")},
     )
     tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-4000:]
     return proc.returncode, tail

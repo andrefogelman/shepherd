@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hostprograms import fresh_programs  # noqa: E402
 from tmpdirs import mkdtemp  # noqa: E402
-
 
 try:  # parallel.py imports the substrate; skip where absent
     import shepherd as _sp  # noqa: F401
@@ -346,6 +346,7 @@ class StartupOverlapTests(unittest.TestCase):
     ssh-preflights the host) share nothing, but ran end to end."""
 
     def setUp(self):
+        fresh_programs(self)
         self.repo = Path(mkdtemp(prefix="shepherd-startup-"))
         (self.repo / "a.py").write_text("A = 1\n")
 

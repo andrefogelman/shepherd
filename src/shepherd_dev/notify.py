@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 
+from . import programs
+
 
 def notify(title: str, message: str) -> None:
     if os.environ.get("SHEPHERD_DEV_NO_NOTIFY"):
@@ -24,8 +26,13 @@ def notify(title: str, message: str) -> None:
                 return s.replace("\\", "\\\\").replace('"', '\\"')
 
             script = f'display notification "{esc(message)}" with title "{esc(title)}"'
-            subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+            subprocess.run(
+                [programs.argv0("osascript"), "-e", script], capture_output=True, timeout=5, env=programs.host_env()
+            )
         elif sys.platform.startswith("linux"):
-            subprocess.run(["notify-send", title, message], capture_output=True, timeout=5)
+            subprocess.run(
+                [programs.argv0("notify-send"), title, message], capture_output=True, timeout=5,
+                env=programs.host_env(),
+            )
     except Exception:
         pass

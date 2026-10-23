@@ -29,10 +29,10 @@ from pathlib import Path
 
 import shepherd as sp
 
-from . import config, history, memory as repo_memory
+from . import config, history, memory as repo_memory, programs
 from .contextpack import build_pack
 from .diffcollect import Entries
-from .launch import LaunchPolicy, RoleModels
+from .launch import LaunchPolicy, RoleModels, worker_environment
 from .seed import LaunchSeed
 from .parallel import develop_best_of, develop_parallel
 from .policy import ChangesetPolicy
@@ -125,7 +125,8 @@ def run_shepherd_init(shepherd_bin, cwd, *, capture: bool = True) -> str | None:
     def _once(argv):
         return subprocess.run(
             argv, cwd=str(cwd), capture_output=capture, text=True,
-            env=child_python_env(),  # `shepherd` is a python entry point too
+            # `shepherd` is a python entry point too, run on the host for us
+            env=child_python_env(programs.host_env()),
         )
 
     proc = _once(shepherd_init_argv(shepherd_bin))
@@ -374,13 +375,14 @@ def _adoption_key(repo_root: Path) -> str | None:
 
     try:
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, timeout=10
+            [programs.argv0("git"), "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, timeout=10,
+            env=programs.host_env(),
         )
         if head.returncode != 0:
             return None
         status = subprocess.run(
-            ["git", "status", "--porcelain", "-uall", "-z"],
-            cwd=repo_root, capture_output=True, text=True, timeout=30,
+            [programs.argv0("git"), "status", "--porcelain", "-uall", "-z"],
+            cwd=repo_root, capture_output=True, text=True, timeout=30, env=programs.host_env(),
         )
         if status.returncode != 0:
             return None
@@ -669,7 +671,9 @@ def auto_commit_branch(repo_root: Path, written: list[str], slug: str, message: 
     import subprocess
 
     def git(*argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *argv], cwd=repo_root, capture_output=True, text=True)
+        return subprocess.run(
+            [programs.argv0("git"), *argv], cwd=repo_root, capture_output=True, text=True, env=programs.host_env()
+        )
 
     cur = git("rev-parse", "--abbrev-ref", "HEAD")
     original = cur.stdout.strip()
@@ -753,12 +757,11 @@ def _run_best_of(args, repo_root: Path, worker, reviewer, policy, placement, fea
         set_last_run_id(f"{base}-c0")  # best-of: the first candidate is the entry point
         stream_hook = WorkerStreamHook(read_baseline=repo_baseline_reader(repo_root))
         if args.provider == "claude":
-            if not _bind_claude_launches(
+            set_worker_budget(
                 args.worker_budget, stream_hook=stream_hook,
                 launch=LaunchPolicy.from_config(repo_root), roles=_role_models(args, repo_root),
                 seed=LaunchSeed.from_config(repo_root),
-            ):
-                return 2
+            )
         print(f"verbose: per-candidate events → {event_logs[0].root}/{base}-c*/events.ndjson", file=sys.stderr)
         print(f"trace: shepherd-dev trace {base}-c0  (…-c{args.best_of - 1})", file=sys.stderr)
 
@@ -906,6 +909,46 @@ def _apply_run_limits(args, repo_root: Path, command: str) -> None:
         print(f"limits (from {config.CONFIG_NAME}): " + ", ".join(from_config))
 
 
+def _warn_jail_exposure(args) -> None:
+    """Tell the user, once per run, when the jail leaves a command server
+    (service manager, tmux, screen, Docker) reachable here. The run goes
+    ahead without that protection."""
+    provider = getattr(args, "provider", "claude")
+    if provider == "static":
+        return  # nothing is launched
+    if provider != "claude":
+        guard = {
+            "linux": "the bubblewrap mask that hides the user's service manager, tmux and screen",
+            "darwin": "the Seatbelt rules that refuse connects to the user's tmux and screen sockets",
+        }.get("linux" if sys.platform.startswith("linux") else sys.platform)
+        if guard is not None:
+            print(
+                f"warning: --provider {provider} runs under its own CLI's sandbox, not shepherd-dev's jail: "
+                f"{guard} does not apply, and shepherd-dev does not check whether that sandbox blocks them",
+                file=sys.stderr,
+            )
+        return
+    from .launch import jail_exposure, landlock_backend
+
+    message = jail_exposure()
+    if message is None:
+        return
+    print(f"warning: {message}", file=sys.stderr)
+    landlock = landlock_backend()
+    if landlock is not None:
+        import re
+        import warnings
+
+        # the backend warns again on every launch, with the reason it decided
+        # once per process: the same text as above. Only that text is silenced;
+        # a different one (the probe finding a socket left reachable) still shows.
+        # filterwarnings matches from the start, so the pattern is anchored at
+        # the end too: a longer text ("... Also: <new exposure>") still shows
+        warnings.filterwarnings(
+            "ignore", message=re.escape(message) + r"\Z", category=landlock.JailExposureWarning
+        )
+
+
 def _apply_memory_limit(args, repo_root: Path) -> bool:
     """Flag > repo/global `limits.memory_max` > none. With a limit, every
     worker and reviewer launch and every local gate runs in its own
@@ -944,23 +987,6 @@ def _apply_memory_limit(args, repo_root: Path) -> bool:
     if config.remote_gate(repo_root) is not None:
         print("memory limit: the remote gate runs on another machine and is not covered")
     return True
-
-
-def _bind_claude_launches(seconds: int, **kwargs) -> bool:
-    """set_worker_budget, for a run that may carry a memory limit. Only the
-    rebound provider puts worker and reviewer launches in the memory scope, so
-    a failed rebind may cost the budget's hard kill (the watchdog still
-    enforces the clock) but never the limit: the run stops. False = stop."""
-    from . import memlimit
-
-    if set_worker_budget(seconds, **kwargs) or memlimit.active() is None:
-        return True
-    print(
-        "error: memory limit set but the worker launch could not be rebound into its scope; "
-        "worker and reviewer launches would run without it",
-        file=sys.stderr,
-    )
-    return False
 
 
 def _role_models(args, repo_root: Path) -> RoleModels:
@@ -1165,7 +1191,7 @@ def cmd_run(args) -> int:
         # Around the whole command, not just the worker: the substrate has no
         # per-run env hook, so these reach the worker by being in this
         # process's environment when the provider spawns it.
-        with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
+        with worker_environment(), config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
             return _cmd_run_inner(args, repo_root)
     finally:
         _maybe_optimize_after(args, repo_root)
@@ -1175,6 +1201,7 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1286,11 +1313,10 @@ def _cmd_run_inner(args, repo_root: Path) -> int:
         print(f"verbose: events → {event_log.path}", file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1541,7 +1567,7 @@ def cmd_run2(args) -> int:
     if repo_root is None:
         return 2
     try:
-        with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
+        with worker_environment(), config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
             return _cmd_run2_inner(args, repo_root)
     finally:
         _maybe_optimize_after(args, repo_root)
@@ -1551,6 +1577,7 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
     _apply_run_limits(args, repo_root, "run2")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
 
@@ -1586,11 +1613,10 @@ def _cmd_run2_inner(args, repo_root: Path) -> int:
         print(f"trace: shepherd-dev trace {base}  (workers: {base}-wa, {base}-wb)", file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1800,14 +1826,23 @@ def settle_proposal(repo_root: Path, proposal_id: str, *, reject: bool, auto: bo
 
 def cmd_runN(args) -> int:
     """Up to 5 INDEPENDENT features in parallel lanes (see parallel.develop_many)."""
-    from .parallel import MAX_LANES, develop_many
-
     repo_root = _resolve_repo(args.repo)
     if repo_root is None:
         return 2
+    # Around the whole command, as in run and run2: the memory scope and the
+    # exposure check read the same environment the worker will get, and what
+    # runs on the host for us reads the one kept before it (programs).
+    with worker_environment(), config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
+        return _cmd_runN_inner(args, repo_root)
+
+
+def _cmd_runN_inner(args, repo_root: Path) -> int:
+    from .parallel import MAX_LANES, develop_many
+
     _apply_run_limits(args, repo_root, "runN")
     if not _apply_memory_limit(args, repo_root):
         return 2
+    _warn_jail_exposure(args)
     if not _auth_preflight(args, repo_root):
         return 2
     features = list(args.features)
@@ -1912,11 +1947,10 @@ def cmd_runN(args) -> int:
               file=sys.stderr)
 
     if args.provider == "claude":
-        if not _bind_claude_launches(
+        set_worker_budget(
             args.worker_budget, stream_hook=stream_hook, launch=LaunchPolicy.from_config(repo_root),
             roles=_role_models(args, repo_root), seed=LaunchSeed.from_config(repo_root),
-        ):
-            return 2
+        )
 
     policy = ChangesetPolicy(
         max_changed_paths=args.max_changed_paths,
@@ -1925,23 +1959,22 @@ def cmd_runN(args) -> int:
     placement = "jail" if args.provider == "claude" else "advisory"
     reviewer = None if (args.no_review or args.provider == "static") else review
 
-    with config.jail_seed_applied(repo_root), config.jail_env_applied(repo_root):
-        report = develop_many(
-            repo_root,
-            [_with_hint(f, gate_hint) for f in features],
-            test_cmd=args.test_cmd,
-            provider=args.provider,
-            placement=placement,
-            policy=policy,
-            max_attempts=args.max_attempts,
-            gate_timeout=args.gate_timeout,
-            review_task=reviewer,
-            max_workers=args.max_workers,
-            context_packs=packs,
-            event_logs=event_logs,
-            event_log_main=event_log_main,
-            stream_hook=stream_hook,
-        )
+    report = develop_many(
+        repo_root,
+        [_with_hint(f, gate_hint) for f in features],
+        test_cmd=args.test_cmd,
+        provider=args.provider,
+        placement=placement,
+        policy=policy,
+        max_attempts=args.max_attempts,
+        gate_timeout=args.gate_timeout,
+        review_task=reviewer,
+        max_workers=args.max_workers,
+        context_packs=packs,
+        event_logs=event_logs,
+        event_log_main=event_log_main,
+        stream_hook=stream_hook,
+    )
     history.record_event(
         "runN",
         {

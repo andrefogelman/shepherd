@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from clonestub import clone_stub  # noqa: E402
+from hostprograms import fresh_programs  # noqa: E402
 
 try:
     import shepherd as _sp  # noqa: F401
@@ -31,6 +32,7 @@ class DevelopManyTests(unittest.TestCase):
     """develop_many with stubbed lanes (no substrate workers)."""
 
     def setUp(self):
+        fresh_programs(self)
         self.tmp = tempfile.TemporaryDirectory(prefix="shepherd-runn-")
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
@@ -263,6 +265,7 @@ class RunNPackPipelining(unittest.TestCase):
     feature; the planning calls are independent and network-bound."""
 
     def setUp(self):
+        fresh_programs(self)
         import os
         from unittest.mock import patch
 

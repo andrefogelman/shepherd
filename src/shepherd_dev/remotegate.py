@@ -40,6 +40,8 @@ import uuid
 from dataclasses import dataclass, field
 from io import BytesIO
 
+from . import programs
+
 # Serializes stateful remote gates whose config is not {id}-isolated, so
 # parallel modes (run2/best-of) can't corrupt shared external state.
 _REMOTE_GATE_LOCK = threading.Lock()
@@ -102,7 +104,7 @@ def parse_remote_config(raw: dict, language: str | None) -> RemoteGateConfig | N
 
 
 def _ssh_base(cfg: RemoteGateConfig) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", *cfg.ssh_opts, cfg.ssh]
+    return [programs.argv0("ssh"), "-o", "BatchMode=yes", *cfg.ssh_opts, cfg.ssh]
 
 
 def _remote_argv(cfg: RemoteGateConfig, script: str) -> list[str]:
@@ -125,7 +127,7 @@ def _remote(cfg: RemoteGateConfig, script: str, timeout: int) -> subprocess.Comp
     """Run a shell script on the remote via a single ssh invocation."""
     return subprocess.run(
         _remote_argv(cfg, script),
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, timeout=timeout, env=programs.host_env(),
     )
 
 
@@ -254,7 +256,7 @@ def _overlay(cfg: RemoteGateConfig, workdir: str, entries: dict[str, bytes], tim
     try:
         proc = subprocess.run(
             _remote_argv(cfg, script),
-            input=_tar_entries(entries), capture_output=True, timeout=timeout,
+            input=_tar_entries(entries), capture_output=True, timeout=timeout, env=programs.host_env(),
         )
     except subprocess.TimeoutExpired:
         return "overlay: timed out sending proposal to remote"
@@ -484,7 +486,7 @@ def run_remote_gate(
             try:
                 res = run_streaming(
                     _remote_argv(cfg, test_line), timeout=timeout + 60,
-                    on_line=on_line, output_limit=4000,
+                    on_line=on_line, output_limit=4000, env=programs.host_env(),
                 )
             except OSError as exc:
                 return GateResult(False, None, "", infra_error=f"could not run ssh: {exc}")

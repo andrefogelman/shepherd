@@ -26,6 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hostprograms import fresh_programs  # noqa: E402
+
 
 def _repo(config):
     from tmpdirs import mkdtemp
@@ -78,6 +80,7 @@ class JailSeedConfigTests(unittest.TestCase):
 
 class SeedingTests(unittest.TestCase):
     def setUp(self):
+        fresh_programs(self)
         self._before = dict(os.environ)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._before)))
 
@@ -191,6 +194,7 @@ class CommandsSeedTests(unittest.TestCase):
     """Wiring, not plumbing. A helper nobody calls passes every test above."""
 
     def setUp(self):
+        fresh_programs(self)
         self._before = dict(os.environ)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._before)))
 

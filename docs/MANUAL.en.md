@@ -21,8 +21,10 @@ yours.
 it — locally and over SSH — and executes repo-controlled code: the test suite
 itself (`conftest.py`, build scripts) and the `test_cmd`, which may come from
 the repo's `.shepherd-dev.json` (the source is printed at run start:
-`test gate (from .shepherd-dev.json): …`). Only run shepherd-dev against
-repos whose test suite you would run by hand.
+`test gate (from .shepherd-dev.json): …`). It also runs the tests the worker
+wrote, outside the jail, with your rights: the jail does not contain a worker
+that puts its way out in a test. Only run shepherd-dev against repos whose
+test suite you would run by hand, with workers you would let run their tests.
 
 ## Two ways to use it
 
@@ -422,8 +424,33 @@ repo's own settings (`.claude/settings.json`, hooks included) are ignored, the
 browser bridge is off, and credential-shaped variables (`SSH_AUTH_SOCK`,
 `AWS_*`, `GH_TOKEN`, `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`…) are unset for the
 worker. `ANTHROPIC_*`/`CLAUDE_*`, `jail_env` keys and `worker.env_keep` are
-never unset. A `worker.launch` event records what was denied and which names
-were unset.
+never unset, except the variables that say where a command server's socket
+is (`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `TMUX`, `TMUX_TMPDIR`,
+`STY`, `SCREENDIR`, `DOCKER_HOST`, `DISPLAY`, `XAUTHORITY`, and `TMPDIR`, under
+which macOS screen keeps its sockets): `jail_env` cannot set them and
+`env_keep` cannot keep them, since the jail reads them to decide what it hides
+or reports. `jail_env` cannot set `LD_*`, `DYLD_*`, `GCONV_PATH` or `LOCPATH`
+either: they would load code into `bwrap` and the jail's runner. Nor
+`SSH_AUTH_SOCK`, `SSH_AGENT_PID` or `DOCKER_CONFIG`, nor any `SHEPHERD_DEV_*`
+variable, which would reconfigure shepherd-dev itself. An ignored key is named
+on stderr with the reason. `PATH` is accepted and reaches the worker and the
+gate. What shepherd-dev runs on the host for itself (`bwrap`, `ssh`,
+`systemd-run`, `env`, `sh`, `git`, `cp`, the planner's and the auth probe's
+`claude`, the worker's `claude`, codex, grok, notifications) is found on your
+own `PATH` and runs with your own environment, kept before the repo's values
+apply; a program missing there is not looked up on the repo's `PATH`. On
+Linux what starts the jail (the memory scope, `bwrap` and the jail's runner)
+runs with that environment too, and the repo's values reach only the confined
+command. On macOS `sandbox-exec` execs the command itself, so it starts with
+them.
+`TMUX`, `STY`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`, `DISPLAY`,
+`XAUTHORITY`, `SSH_AUTH_SOCK` and `SSH_AGENT_PID` are unset even with
+`worker.harden: false`, and the jail also hides the agent socket that
+`SSH_AUTH_SOCK` named, since unsetting the variable leaves the socket on
+disk. Another live agent socket of yours that the jail does not hide (one under
+`~/.ssh/agent` or `/tmp/ssh-*`, gpg-agent, 1Password and the like) is named
+in the warning at the start of the run. A `worker.launch` event records what was denied and
+which names were unset.
 
 ```json
 { "worker": {
@@ -484,9 +511,46 @@ cgroup through `systemd-run --user --scope`, with `MemoryMax` at the ceiling
 and no swap: whatever goes over dies inside its own scope and nothing else
 does. It is opt-in and off by default. Asked for and impossible to enforce
 (not Linux, no `systemd-run`, no systemd user manager, memory controller not
-delegated), the run stops before it starts and says why. It also refuses
+delegated, no Landlock jail on the host, shepherd-ai older than 0.3.14), the run
+stops before it starts and says why. It also refuses
 `--provider grok|codex`, whose launches do not go through it. The remote gate
 runs on another machine and is not covered.
+
+**The Linux jail and `bubblewrap`.** Landlock limits where a worker writes, not
+which sockets it connects to. `/run/user/<uid>` holds the bus of the user's
+systemd manager: through it, `systemd-run --user` inside the jail asks systemd
+to run a command, and that command starts outside the jail. tmux and screen
+servers do the same (`tmux new-window`). Where `bubblewrap` (`bwrap`) works,
+the jail mounts an empty directory over `/run/user/<uid>`, `tmux-<uid>` and
+screen's `S-<user>`, and those paths are gone. An absent `tmux-<uid>` is
+created first, so a tmux started during the run lands under the mask. A
+`tmux-<uid>` that is a directory another user owns, or a symlink that is not
+yours or points at something not yours, is left alone rather than followed,
+and the warning says so: in a shared `/tmp` anyone can plant one. The bus
+or tmux socket your environment names elsewhere (`/tmp/dbus-XXXX`, say) gets
+`/dev/null` over that one file, not over its directory. The worker's
+environment loses `TMUX`, `STY`, `DBUS_SESSION_BUS_ADDRESS`, `DOCKER_HOST`,
+`DISPLAY` and `XAUTHORITY`.
+Where bubblewrap is missing, or AppArmor denies its namespace (Ubuntu 23.10
+and later), or the check inside the jail still finds a socket, the run goes
+ahead without that protection and warns, with the reason and how to install
+it (`sudo apt install bubblewrap`, `sudo dnf install bubblewrap`). A Docker
+or Podman daemon you can reach is also reported, not blocked: whoever drives
+the daemon is root. That covers a socket you can write to, a docker context
+(Docker Desktop, Colima, OrbStack, Rancher Desktop), a `DOCKER_HOST` over tcp
+or ssh, and a daemon answering on loopback port 2375. So are an X display you
+can reach, a session bus at an abstract address, and an sshd on this host you
+log in to without a prompt: the check tries one login, trusting only this
+host's own keys, on the ports `sshd_config` names. Other sockets stay reachable; see `docs/KNOWN_ISSUES.md`. The memory
+ceiling sits outside the jail and applies either way; on a host without
+Landlock it is refused, since no worker launch would go through the jail.
+
+**The macOS sandbox.** The Seatbelt profile refuses connects to tmux's and
+screen's sockets, so `tmux new-window` from the worker fails. A Docker daemon
+you can reach (Docker Desktop, Colima, OrbStack, a docker context, a network
+`DOCKER_HOST`), a session bus at an abstract address, and an sshd on this Mac
+you log in to (Remote Login) are reported at the start of the run, not
+blocked; ssh matters when the run allows network access.
 
 ## Verbose mode & trace (step by step)
 
@@ -787,7 +851,7 @@ Two things worth knowing before you use it. The variables reach **every** child
 this command spawns, the gate included — the substrate has no per-run
 environment hook, so this is the only route to the worker. And variables that
 redirect a Python interpreter or its import path (`PYTHONPATH`, `PYTHONHOME`,
-`VIRTUAL_ENV`, `PYTEST_ADDOPTS`, and the rest of that family) are refused:
+`VIRTUAL_ENV`, `PYTEST_ADDOPTS`, every `PYTHON*` variable) are refused:
 shepherd scrubs exactly those before spawning its own interpreters, and a repo
 config must not put them back.
 

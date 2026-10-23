@@ -14,6 +14,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import programs
+
 HISTORY_DIR = Path(os.environ.get("SHEPHERD_DEV_HISTORY_DIR", "")) if os.environ.get(
     "SHEPHERD_DEV_HISTORY_DIR"
 ) else Path.home() / ".shepherd-dev" / "history"
@@ -25,7 +27,8 @@ GATE_TAIL_LIMIT = 2000
 def _git_sha(repo_root: Path) -> str | None:
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, timeout=10
+            [programs.argv0("git"), "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, timeout=10,
+            env=programs.host_env(),
         )
         return proc.stdout.strip() or None
     except Exception:
