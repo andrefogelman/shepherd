@@ -31,6 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hostprograms import fresh_programs  # noqa: E402
+
 MANUALS = ("docs/MANUAL.en.md", "docs/MANUAL.md")
 
 
@@ -40,6 +42,9 @@ def _manual(name: str) -> str:
 
 class SeededPathIsOutsideTheCloneTests(unittest.TestCase):
     """The mechanical fact the documentation has to describe."""
+
+    def setUp(self):
+        fresh_programs(self)
 
     def test_the_seeded_copy_lives_outside_any_clone(self):
         import json

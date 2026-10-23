@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 
+from . import programs
+
 # argv fragments that identify a shepherd worker LAUNCH ROOT among our
 # descendants. The Claude worker is `perl -e 'alarm …; exec @ARGV' <budget>
 # <claude> -p <prompt> …` — the perl script sits at argv[2], BEFORE the (huge)
@@ -36,8 +38,8 @@ def _read_proctable() -> dict[int, tuple[int, str]]:
     """pid -> (ppid, command) for every process. macOS + Linux via ps."""
     try:
         out = subprocess.run(
-            ["ps", "-Ao", "pid=,ppid=,command="],
-            capture_output=True, text=True, timeout=10,
+            [programs.argv0("ps"), "-Ao", "pid=,ppid=,command="],
+            capture_output=True, text=True, timeout=10, env=programs.host_env(),
         )
     except Exception:
         return {}

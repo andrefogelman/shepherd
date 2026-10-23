@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history
+from . import history, programs
 from .supervisor import child_python_env
 from .tasks import DEFAULT_PROMPTS, load_overrides, save_overrides
 
@@ -121,9 +121,7 @@ def _failure_digest(max_events: int = 40) -> str:
 
 def _propose(model: str) -> Candidate | None:
     """Ask Claude (headless) for ONE prompt edit as strict JSON."""
-    import shutil
-
-    claude = shutil.which("claude")
+    claude = programs.which("claude")
     if not claude:
         return None
     current = {k: DEFAULT_PROMPTS[k] for k in EDITABLE_KEYS}
@@ -143,7 +141,7 @@ def _propose(model: str) -> Candidate | None:
     try:
         proc = subprocess.run(
             [claude, "--bare", "-p", prompt, "--model", model],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True, text=True, timeout=180, env=programs.host_env(),
         )
     except Exception:
         return None
@@ -199,8 +197,8 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
     with tempfile.TemporaryDirectory(prefix="shepherd-cro-") as tmp:
         wt = Path(tmp) / "wt"
         add = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "add", "--detach", str(wt), case.sha],
-            capture_output=True, text=True,
+            [programs.argv0("git"), "-C", str(repo), "worktree", "add", "--detach", str(wt), case.sha],
+            capture_output=True, text=True, env=programs.host_env(),
         )
         if add.returncode != 0:
             return False
@@ -273,8 +271,8 @@ def _replay(case: ReplayCase, overrides_path: str | None, worker_budget: int) ->
             return False
         finally:
             subprocess.run(
-                ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
-                capture_output=True,
+                [programs.argv0("git"), "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                capture_output=True, env=programs.host_env(),
             )
 
 

@@ -28,6 +28,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Iterator
 
+from . import programs
+
 HUNK_LIMIT = 4000
 EXCERPT_LIMIT = 200
 
@@ -40,8 +42,10 @@ TEE_RELPATH = Path(".claude-scratch") / "tmp" / "worker-stream.ndjson"
 
 
 def _default_runs_root() -> Path:
-    env = os.environ.get("SHEPHERD_DEV_RUNS_DIR")
-    return Path(env) if env else Path.home() / ".shepherd-dev" / "runs"
+    # The user's environment, not a repo's jail_env, which sits in os.environ
+    # for the command (programs).
+    env = programs.environ().get("SHEPHERD_DEV_RUNS_DIR")
+    return Path(env) if env else programs.home() / ".shepherd-dev" / "runs"
 
 
 def new_run_id() -> str:

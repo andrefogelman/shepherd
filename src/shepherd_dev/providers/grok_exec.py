@@ -7,10 +7,10 @@ the clone against the original repo to build a proposal.
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from pathlib import Path
 
+from .. import programs
 from .hosted import ExecResult, HostedExecutor, run_cli_worker
 
 # Back-compat: the executor protocol now lives in hosted (shared with codex).
@@ -21,15 +21,16 @@ def find_grok_bin(explicit: str | None = None) -> str | None:
     """Resolve the Grok CLI binary. Env SHEPHERD_DEV_GROK_CMD wins, then PATH."""
     if explicit:
         return explicit
-    env = os.environ.get("SHEPHERD_DEV_GROK_CMD")
+    # the user's environment, kept before a repo's jail_env applied (programs)
+    env = programs.environ().get("SHEPHERD_DEV_GROK_CMD")
     if env:
         return env
     for name in ("grok",):
-        found = shutil.which(name)
+        found = programs.which(name)
         if found:
             return found
     # Common install location for Grok Build TUI
-    home = Path.home() / ".grok" / "bin" / "grok"
+    home = programs.home() / ".grok" / "bin" / "grok"
     if home.is_file() and os.access(home, os.X_OK):
         return str(home)
     return None

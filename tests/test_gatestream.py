@@ -277,6 +277,7 @@ def _patched_popen(argv, **kw):
 
 class RemoteGateStreamingTests(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(setattr, RG, "_ssh_base", RG._ssh_base)
         RG._ssh_base = _fake_ssh_base
         RG.subprocess.run = _patched_run
         PS.subprocess.Popen = _patched_popen

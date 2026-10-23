@@ -324,8 +324,8 @@ wheels = [
 
 [[package]]
 name = "shepherd-ai"
-version = "0.3.6"
-source = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.6-landlock-service-manager/shepherd_ai-0.3.6-py3-none-any.whl" }
+version = "0.3.18"
+source = { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.18-jail-outer-environment/shepherd_ai-0.3.18-py3-none-any.whl" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
@@ -333,7 +333,7 @@ dependencies = [
     { name = "tomli-w" },
 ]
 wheels = [
-    { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.6-landlock-service-manager/shepherd_ai-0.3.6-py3-none-any.whl", hash = "sha256:34574e93d48a761253564ec0996baf2c825c5477dd85865b823f226d1b778f66" },
+    { url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.18-jail-outer-environment/shepherd_ai-0.3.18-py3-none-any.whl", hash = "sha256:b529297d5064500fec488318a654fa88e9c18f873ed2070b01ec3a899653b72f" },
 ]
 
 [package.metadata]
@@ -363,7 +363,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "shepherd-ai", url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.6-landlock-service-manager/shepherd_ai-0.3.6-py3-none-any.whl" }]
+requires-dist = [{ name = "shepherd-ai", url = "https://github.com/andrefogelman/shepherd-ai/releases/download/v0.3.18-jail-outer-environment/shepherd_ai-0.3.18-py3-none-any.whl" }]
 
 [[package]]
 name = "tomli-w"

@@ -21,7 +21,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import memlimit
+from . import memlimit, programs
 from .diffcollect import Entries
 from .ledger import Ledger
 from .policy import ChangesetPolicy, check_paths
@@ -435,7 +435,16 @@ def gate_env(
     """The environment a gate subprocess runs under: `base` (default: ours)
     minus GATE_ENV_STRIP. `keep` re-admits entries, `strip` removes more; both
     default to the SHEPHERD_DEV_GATE_ENV_{KEEP,STRIP} env lists."""
-    src = dict(os.environ if base is None else base)
+    if base is None:
+        # the command servers' addresses and the ssh agent are out of this
+        # process's environment for the worker's sake (launch.worker_environment);
+        # the gate is not the worker and gets them back as it had them
+        from .launch import _ALWAYS_SCRUBBED
+
+        kept_env = programs.environ()
+        src = {**{k: kept_env[k] for k in _ALWAYS_SCRUBBED if k in kept_env}, **os.environ}
+    else:
+        src = dict(base)
     kept = set(keep if keep is not None else _env_list(_GATE_ENV_KEEP_VAR))
     dropped = set(GATE_ENV_STRIP | set(strip if strip is not None else _env_list(_GATE_ENV_STRIP_VAR))) - kept
     return {k: v for k, v in src.items() if k not in dropped}
@@ -476,12 +485,16 @@ def fast_copytree(src: Path, dest: Path, ignored: set[str] | None = None) -> Non
             continue
         target = dest / entry.name
         done = False
-        commands = [["cp", "-R", str(entry), str(target)]]
-        if sys.platform == "darwin":
-            commands.insert(0, ["cp", "-c", "-R", str(entry), str(target)])
+        try:
+            cp = programs.argv0("cp")
+        except FileNotFoundError:
+            cp = None  # the pure-python copy below
+        commands = [[cp, "-R", str(entry), str(target)]] if cp else []
+        if cp and sys.platform == "darwin":
+            commands.insert(0, [cp, "-c", "-R", str(entry), str(target)])
         for argv in commands:
             try:
-                if subprocess.run(argv, capture_output=True).returncode == 0:
+                if subprocess.run(argv, capture_output=True, env=programs.host_env()).returncode == 0:
                     done = True
                     break
             except Exception:
@@ -543,7 +556,7 @@ def _remove_tree(path: Path) -> None:
             # PYTHONPATH pointing somewhere else stops it booting at all, and
             # with check=False the failure is invisible — every staged tree then
             # leaks in silence. gate_env drops exactly those.
-            env=gate_env(),
+            env=gate_env(programs.host_env()),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:
@@ -1128,8 +1141,12 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
     policy = launch if launch is not None else LaunchPolicy()
     role_models = roles if roles is not None else RoleModels()
     try:
+        import dataclasses
+
         from shepherd_dialect import providers
         from shepherd_dialect.workspace_control import runtime_provider as rp
+
+        _takes_claude_path = "claude_path" in {f.name for f in dataclasses.fields(providers.ClaudeHeadlessProvider)}
 
         class _KillTreeProvider(providers.ClaudeHeadlessProvider):
             def command_argv(self, working_path, cli, prompt=None):
@@ -1184,9 +1201,13 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
                 model=invocation.model_name or role.model,
                 budget_seconds=seconds,
             )
+            if _takes_claude_path:
+                # the CLI on the user's PATH, not on one a repo's jail_env set
+                kwargs["claude_path"] = programs.which("claude")
             try:
                 provider = _KillTreeProvider(**kwargs)
-            except Exception:
+            except Exception as exc:
+                _warn_plain_launch(exc)
                 return providers.ClaudeHeadlessProvider(**kwargs)  # never block the launch
             # Frozen dataclass: the role rides as a private attribute set past
             # __init__, read by command_argv for --effort/--fallback-model.
@@ -1212,8 +1233,27 @@ def set_worker_budget(seconds: int, stream_hook=None, launch=None, roles=None, s
         import sys as _sys
 
         print(f"warning: worker budget rebind unavailable ({type(exc).__name__}: {exc}); "
-              "the watchdog still enforces the budget", file=_sys.stderr)
+              f"the watchdog still enforces the budget, but {_PLAIN_LAUNCH_LOSES}", file=_sys.stderr)
         return False
+
+
+#: What a launch through the framework's own provider goes without.
+_PLAIN_LAUNCH_LOSES = (
+    "launches go through the framework's own provider, without shepherd-dev's hardening: "
+    "no tool denylist, settings isolation or env scrub, no private TMPDIR, no role model, "
+    "and no process-tree kill at the budget"
+)
+_plain_launch_warned = False
+
+
+def _warn_plain_launch(exc: BaseException) -> None:
+    """Say once per process that a launch fell back to the plain provider."""
+    global _plain_launch_warned
+    if _plain_launch_warned:
+        return
+    _plain_launch_warned = True
+    print(f"warning: shepherd-dev's provider could not be built ({type(exc).__name__}: {exc}); "
+          f"{_PLAIN_LAUNCH_LOSES}", file=sys.stderr)
 
 
 def _fair_shares(sizes: list[int], limit: int) -> list[int]:

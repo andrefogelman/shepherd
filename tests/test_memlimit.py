@@ -11,6 +11,7 @@ every argv is exactly what it was. Runnable with:
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -22,17 +23,50 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shepherd_dev import memlimit  # noqa: E402
+from hostprograms import fresh_programs  # noqa: E402
 
-try:
-    from vcs_core import _landlock_containment as _landlock
+from shepherd_dev import launch, memlimit  # noqa: E402
 
-    _HAS_JAIL = hasattr(_landlock, "set_outer_prefix")
-except Exception:  # pragma: no cover - substrate absent
-    _HAS_JAIL = False
+_REAL_BACKEND = launch.landlock_backend
+_HAS_JAIL = _REAL_BACKEND() is not None
 
 GIB = 1024 ** 3
+
+_resolved_before: dict = {}
+_environ_before: list = []
+
+
+def setUpModule():
+    # A command that applied a repo's jail_env earlier in this process found
+    # its programs, and kept its environment, once for the process; these
+    # tests start from a lookup on the live environment.
+    _resolved_before.update(memlimit.programs._found)
+    memlimit.programs._found.clear()
+    _environ_before.append(memlimit.programs._environ)
+    memlimit.programs._environ = None
+
+
+def tearDownModule():
+    memlimit.programs._found.clear()
+    memlimit.programs._found.update(_resolved_before)
+    memlimit.programs._environ = _environ_before.pop()
+
+
+class _StubJail:
+    """Stands in for shepherd-ai's Landlock module: records the outer prefix,
+    reports the jail available or not."""
+
+    def __init__(self, available=(True, "stub")):
+        self.prefixes: list[list[str]] = []
+        self._available = available
+
+    def set_outer_prefix(self, argv):
+        self.prefixes.append(list(argv))
+
+    def LandlockContainmentBackend(self):  # noqa: N802 - mirrors the module's class
+        return SimpleNamespace(available=lambda: self._available)
 
 
 class _Reset(unittest.TestCase):
@@ -47,6 +81,12 @@ class _Reset(unittest.TestCase):
             runtime = mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7")
             runtime.start()
             self.addCleanup(runtime.stop)
+        # activation needs the jail; a stub keeps these tests off the installed
+        # substrate's version and its module state
+        self.jail = _StubJail()
+        backend = mock.patch.object(launch, "landlock_backend", lambda: self.jail)
+        backend.start()
+        self.addCleanup(backend.stop)
 
     def tearDown(self):
         memlimit._active = self._saved
@@ -99,10 +139,15 @@ def _versioned(run, version="systemd 255 (255.4-1ubuntu8.18)"):
     return dispatch
 
 
+#: activation reads systemd-run's version for the jail prefix; a pinned answer
+#: keeps these tests off the host's systemd
+_PINNED = _versioned(None)
+
+
 class UnavailableReason(unittest.TestCase):
     def _linux(self, run, which="/usr/bin/systemd-run", rundir="/run/user/7", version="systemd 255 (255.4)"):
         with mock.patch.object(memlimit.sys, "platform", "linux"), \
-                mock.patch.object(memlimit.shutil, "which", lambda _n: which), \
+                mock.patch.object(memlimit.programs.shutil, "which", lambda _n, **_k: which), \
                 mock.patch.object(memlimit, "runtime_dir", lambda: rundir):
             return memlimit.unavailable_reason(GIB, run=run if run is None else _versioned(run, version))
 
@@ -147,6 +192,31 @@ class UnavailableReason(unittest.TestCase):
         self.assertIsNone(self._linux(run, version="systemd 252 (252.22-1~deb12u1)"))
         self.assertNotIn("--expand-environment=no", seen["argv"])
 
+    def test_the_probes_run_with_the_users_environment(self):
+        # both run on the host, unjailed, while the repo's jail_env is in the
+        # live environment: systemd-run and sh must not see it
+        fresh_programs(self)
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw.get("env"))
+            if argv[-1] == "--version":
+                return _proc(0, out="systemd 255 (255.4)\n")
+            return _proc(0, out=f"{GIB}\n")
+
+        with mock.patch.dict(os.environ, {"SD_FROM_USER": "1"}), \
+                mock.patch.object(memlimit.sys, "platform", "linux"), \
+                mock.patch.object(memlimit.programs.shutil, "which", lambda n, **_k: f"/usr/bin/{n}"), \
+                mock.patch.object(memlimit, "runtime_dir", lambda: "/run/user/7"):
+            memlimit.programs.resolve()
+            os.environ["SD_FROM_REPO"] = "1"
+            self.assertIsNone(memlimit.unavailable_reason(GIB, run=run))
+        self.assertEqual(len(seen), 2)
+        for env in seen:
+            self.assertIsNotNone(env)
+            self.assertEqual(env.get("SD_FROM_USER"), "1")
+            self.assertNotIn("SD_FROM_REPO", env)
+
     def test_unreadable_version_is_refused(self):
         # without the version there is no knowing whether the command would be rewritten
         reason = self._linux(lambda *a, **k: _proc(0, out=f"{GIB}\n"), version="something else")
@@ -161,31 +231,98 @@ class ActivateAndWrap(_Reset):
 
     def test_activation_and_reset(self):
         with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
-            self.assertIsNone(memlimit.activate(GIB))
+            self.assertIsNone(memlimit.activate(GIB, run=_PINNED))
         self.assertEqual(memlimit.active(), GIB)
         memlimit.activate(None)
         self.assertIsNone(memlimit.active())
 
-    @unittest.skipUnless(_HAS_JAIL, "shepherd-ai 0.3.6+ not installed")
     def test_activation_puts_the_scope_around_the_jail(self):
         # inside the jail the scope could not reach the user bus it needs
-        from vcs_core import _landlock_containment as landlock
-
         with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
-            self.assertIsNone(memlimit.activate(GIB))
-        prefix = landlock.outer_prefix()
-        self.assertEqual(prefix[2:5], ("systemd-run", "--user", "--scope"))
+            self.assertIsNone(memlimit.activate(GIB, run=_PINNED))
+        prefix = self.jail.prefixes[-1]
+        self.assertEqual(prefix[2:5], ["systemd-run", "--user", "--scope"])
         self.assertIn(f"MemoryMax={GIB}", prefix)
         # the jail's own argv follows the scope's `--` and the restored env
-        self.assertEqual(prefix[prefix.index("--") + 1:], tuple(memlimit._restore_env("/run/user/7")))
-        memlimit.activate(None)
-        self.assertEqual(landlock.outer_prefix(), ())
+        self.assertEqual(prefix[prefix.index("--") + 1:], memlimit._restore_env("/run/user/7"))
+
+    def test_the_jail_prefix_keeps_the_command_unexpanded(self):
+        # every worker and reviewer argv, prompt included, goes through this prefix
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            self.assertIsNone(memlimit.activate(GIB, run=_PINNED))
+        prefix = self.jail.prefixes[-1]
+        self.assertLess(prefix.index("--expand-environment=no"), prefix.index("--"))
+
+    def test_the_jail_prefix_on_old_systemd_has_no_expansion_flag(self):
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            self.assertIsNone(memlimit.activate(GIB, run=_versioned(None, "systemd 252 (252.22-1~deb12u1)")))
+        self.assertNotIn("--expand-environment=no", self.jail.prefixes[-1])
+
+    def test_a_runtime_dir_gone_since_the_check_leaves_nothing_active(self):
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None), \
+                mock.patch.object(memlimit, "runtime_dir", lambda: None):
+            reason = memlimit.activate(GIB, run=_PINNED)
+        self.assertIn("went away", reason or "")
+        self.assertIsNone(memlimit.active())
+        self.assertEqual([p for p in self.jail.prefixes if p], [])
 
     def test_activation_refuses_a_jail_that_takes_no_prefix(self):
         with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None), \
-                mock.patch.object(memlimit, "_jail_backend", lambda: None):
-            reason = memlimit.activate(GIB)
-        self.assertIn("0.3.6", reason or "")
+                mock.patch.object(launch, "landlock_backend", lambda: None):
+            reason = memlimit.activate(GIB, run=_PINNED)
+        self.assertIn("0.3.14", reason or "")
+        self.assertIsNone(memlimit.active())
+
+    def test_activation_refuses_a_host_without_the_jail(self):
+        # no Landlock: worker and reviewer launches skip the jail and its prefix,
+        # so a limit would cap the gate alone while the run reported it on
+        self.jail = _StubJail(available=(False, "Landlock unsupported by this kernel (ENOSYS)"))
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            reason = memlimit.activate(GIB, run=_PINNED)
+        self.assertIn("ENOSYS", reason or "")
+        self.assertIsNone(memlimit.active())
+        self.assertEqual(self.jail.prefixes, [])
+
+    def test_a_jail_check_that_raises_refuses_the_limit(self):
+        # the run stops with the usual "cannot be enforced: <reason>", not a traceback
+        self.jail.LandlockContainmentBackend = lambda: SimpleNamespace(
+            available=mock.Mock(side_effect=OSError("landlock_create_ruleset: EPERM"))
+        )
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            reason = memlimit.activate(GIB, run=_PINNED)
+        self.assertIn("could not check the Landlock jail", reason or "")
+        self.assertIn("EPERM", reason or "")
+        self.assertIsNone(memlimit.active())
+        self.assertEqual(self.jail.prefixes, [])
+
+    def test_a_loaded_module_older_than_0_3_7_is_left_alone(self):
+        # the version decision is launch's; clearing follows it
+        old = types.ModuleType("vcs_core._landlock_containment")
+        old.set_outer_prefix = mock.Mock()
+        with mock.patch.dict(sys.modules, {"vcs_core._landlock_containment": old}):
+            memlimit._clear_jail_prefix()
+        old.set_outer_prefix.assert_not_called()
+
+    def test_a_refused_prefix_leaves_nothing_active(self):
+        self.jail.set_outer_prefix = mock.Mock(side_effect=ValueError("no such wrapper"))
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            reason = memlimit.activate(GIB, run=_PINNED)
+        self.assertIn("no such wrapper", reason or "")
+        self.assertIsNone(memlimit.active())
+
+    def test_failed_reactivation_clears_the_previous_prefix(self):
+        # a second run in one process (the MCP server, a test) that cannot get
+        # its limit must not keep the first run's scope around the jail
+        loaded = types.ModuleType("vcs_core._landlock_containment")
+        loaded.set_outer_prefix = self.jail.set_outer_prefix
+        loaded.exposure = lambda: None
+        loaded.JailExposureWarning = RuntimeWarning
+        with mock.patch.dict(sys.modules, {"vcs_core._landlock_containment": loaded}):
+            with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+                self.assertIsNone(memlimit.activate(GIB, run=_PINNED))
+            with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: "no"):
+                self.assertEqual(memlimit.activate(GIB), "no")
+        self.assertEqual(self.jail.prefixes[-1], [])
         self.assertIsNone(memlimit.active())
 
     def test_inactive_wrap_is_identity(self):
@@ -430,17 +567,58 @@ class Live(_Reset):
         self.assertEqual(res.returncode, 0, res.stderr)
 
 
-@unittest.skipUnless(sys.platform.startswith("linux") and _HAS_JAIL, "Linux with shepherd-ai 0.3.6+")
+@unittest.skipUnless(sys.platform.startswith("linux") and _HAS_JAIL, "Linux with shepherd-ai 0.3.7+")
+class TheRealBackendLaunchesInsideTheScope(_Reset):
+    """Without starting a scope: the installed backend's launch argv begins
+    with the prefix activation handed it. Every confined launch goes through
+    it, the plain-provider fallback included, so the limit cannot be skipped."""
+
+    def setUp(self):
+        super().setUp()
+        real = mock.patch.object(launch, "landlock_backend", _REAL_BACKEND)
+        real.start()
+        self.addCleanup(real.stop)
+
+    def test_launch_argv_starts_with_the_scope(self):
+        from vcs_core import _landlock_containment as landlock
+        from vcs_core._landlock_containment import LandlockContainmentBackend
+
+        if not LandlockContainmentBackend().available()[0]:
+            self.skipTest("no Landlock jail on this host")
+        with mock.patch.object(memlimit, "unavailable_reason", lambda *a, **k: None):
+            self.assertIsNone(memlimit.activate(GIB, run=_PINNED))
+        prefix = list(landlock.outer_prefix())
+        self.assertEqual(prefix[2:5], ["systemd-run", "--user", "--scope"])
+        seen = []
+        # no bubblewrap trial here: its verdict is cached for the process
+        with mock.patch.object(landlock, "_hiding_argv", lambda keep=(): []), \
+                mock.patch.object(landlock.subprocess, "run",
+                                  lambda argv, **kwargs: seen.append(list(argv)) or SimpleNamespace(returncode=0)):
+            backend = LandlockContainmentBackend()
+            with tempfile.TemporaryDirectory(prefix="shepherd-memargv-") as tmp:
+                backend.launch(backend.profile_for((tmp,), allow_network=True), tmp, ["true"])
+        self.assertEqual(seen[-1][:len(prefix)], prefix)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux") and _HAS_JAIL, "Linux with shepherd-ai 0.3.7+")
 class LimitAroundTheJail(unittest.TestCase):
     """On a host that can enforce a limit and hide the bus: a confined command
     lands in the capped scope, and the user bus is gone from its view."""
 
     def test_confined_command_is_capped_and_blind_to_the_bus(self):
-        from vcs_core._landlock_containment import LandlockContainmentBackend, service_manager_exposure
+        from vcs_core import _landlock_containment as landlock
+        from vcs_core._landlock_containment import LandlockContainmentBackend
 
-        if memlimit.unavailable_reason(GIB) is not None or service_manager_exposure() is not None:
-            self.skipTest("this host cannot enforce a limit or hide the user bus")
+        if memlimit.unavailable_reason(GIB) is not None:
+            self.skipTest("this host cannot enforce a limit")
+        # the backend's own verdict: a bwrap on PATH that cannot start (user
+        # namespaces denied) would otherwise fail this test instead of skipping it
+        why = landlock._why_not_hidden(landlock._hidden_dirs())
+        if why is not None:
+            self.skipTest(f"the jail cannot hide the runtime dir here: {why}")
         rundir = memlimit.runtime_dir()
+        if rundir is None:
+            self.skipTest("no user runtime directory")
         saved = memlimit._active
         self.addCleanup(lambda: (memlimit.activate(None), setattr(memlimit, "_active", saved)))
         self.assertIsNone(memlimit.activate(GIB))
@@ -451,6 +629,30 @@ class LimitAroundTheJail(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         lines = done.stdout.split()
         self.assertEqual(lines, [str(GIB)])  # memory.max is the limit, the runtime dir is empty
+
+    def test_a_repos_settings_reach_the_capped_command_and_not_the_scope(self):
+        """The scope and the runner start with the user's environment; the
+        confined command, inside the scope, still sees what jail_env set."""
+        from vcs_core import _jail_exposure
+        from vcs_core._landlock_containment import LandlockContainmentBackend
+
+        if memlimit.unavailable_reason(GIB) is not None:
+            self.skipTest("this host cannot enforce a limit")
+        if memlimit.runtime_dir() is None:
+            self.skipTest("no user runtime directory")
+        fresh_programs(self)
+        saved = memlimit._active
+        self.addCleanup(lambda: (memlimit.activate(None), setattr(memlimit, "_active", saved)))
+        os.environ.pop("REPO_MARK", None)
+        _jail_exposure.resolve_programs()
+        self.assertIsNone(memlimit.activate(GIB))
+        backend = LandlockContainmentBackend()
+        with tempfile.TemporaryDirectory(prefix="shepherd-memjail-") as tmp, \
+                mock.patch.dict(os.environ, {"REPO_MARK": "the repo's"}):
+            profile = backend.profile_for((tmp,), allow_network=True)
+            done = backend.launch(profile, tmp, ["sh", "-c", f'{memlimit._READ_OWN_MAX}; printf %s "$REPO_MARK"'])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split("\n"), [str(GIB), "the repo's"])
 
 
 if __name__ == "__main__":

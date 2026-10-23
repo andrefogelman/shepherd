@@ -11,10 +11,10 @@ original repo to build a proposal.
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from pathlib import Path
 
+from .. import programs
 from .hosted import ExecResult, HostedExecutor, run_cli_worker
 
 DEFAULT_SANDBOX = "workspace-write"
@@ -24,16 +24,17 @@ def find_codex_bin(explicit: str | None = None) -> str | None:
     """Resolve the Codex CLI binary. Env SHEPHERD_DEV_CODEX_CMD wins, then PATH."""
     if explicit:
         return explicit
-    env = os.environ.get("SHEPHERD_DEV_CODEX_CMD")
+    # the user's environment, kept before a repo's jail_env applied (programs)
+    env = programs.environ().get("SHEPHERD_DEV_CODEX_CMD")
     if env:
         return env
     for name in ("codex",):
-        found = shutil.which(name)
+        found = programs.which(name)
         if found:
             return found
     # Common install locations (npm global, hermes-bundled node bin)
     for candidate in (
-        Path.home() / ".hermes" / "node" / "bin" / "codex",
+        programs.home() / ".hermes" / "node" / "bin" / "codex",
         Path("/usr/local/bin/codex"),
     ):
         if candidate.is_file() and os.access(candidate, os.X_OK):

@@ -13,6 +13,9 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import programs
+from .launch import AGENT_ENV, JAIL_SOCKET_ENV
+
 if TYPE_CHECKING:
     from .remotegate import RemoteGateConfig
 
@@ -104,9 +107,7 @@ def detect_test_cmd(repo_root: Path) -> str | None:
 
 
 def _pytest_available() -> bool:
-    import shutil
-
-    return shutil.which("pytest") is not None
+    return programs.which("pytest") is not None
 
 
 def _rust_src_has_tests(repo_root: Path) -> bool:
@@ -145,7 +146,9 @@ def _node_supports_strip_types() -> bool:
     import subprocess
 
     try:
-        out = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(
+            [programs.argv0("node"), "--version"], capture_output=True, text=True, timeout=5, env=programs.host_env()
+        ).stdout
         v = out.strip().lstrip("v").split(".")
         major, minor = int(v[0]), int(v[1])
         return major > 22 or (major == 22 and minor >= 6)
@@ -403,11 +406,62 @@ def planning_config(repo_root: Path) -> dict:
 #: CHILD_PYTHON_ENV_STRIP / GATE_ENV_STRIP, because a wrong PYTHONHOME stops
 #: the interpreter booting before any of our code runs and a leaked PYTHONPATH
 #: puts the supervisor's own source on the sandbox's sys.path. Letting a repo
-#: config reintroduce them would undo those guarantees from the outside.
+#: config reintroduce them would undo those guarantees from the outside. The
+#: command servers' socket variables are refused too: the jail reads them to
+#: decide what it hides (launch.JAIL_SOCKET_ENV), and so is the user's ssh
+#: agent (launch.AGENT_ENV). PATH is accepted: the programs the jail runs are
+#: found before these values are applied (launch.resolve_jail_programs).
 JAIL_ENV_REFUSED = frozenset({
-    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV",
-    "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "__PYVENV_LAUNCHER__",
-})
+    "VIRTUAL_ENV", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "__PYVENV_LAUNCHER__",
+}) | JAIL_SOCKET_ENV | AGENT_ENV
+
+#: glibc loads code named by these too (a gconv module, a locale's charset
+#: converter), into bubblewrap and into the jail's runner before Landlock.
+JAIL_ENV_LOADER = frozenset({"GCONV_PATH", "LOCPATH"})
+
+#: Every variable of the dynamic loader (LD_PRELOAD, LD_LIBRARY_PATH,
+#: DYLD_INSERT_LIBRARIES, ...) is refused: finding bubblewrap first does not
+#: stop them loading code into it and into the jail's runner. So is every
+#: PYTHON* variable (PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX,
+#: PYTHONWARNINGS, ...): each changes what an interpreter of ours imports.
+#: And every SHEPHERD_DEV_* variable: they are shepherd-dev's own options, read
+#: from this process's environment while the repo's values sit in it, so one
+#: could pick the codex worker's sandbox mode or what the gate inherits.
+JAIL_ENV_LOADER_PREFIXES = ("LD_", "DYLD_")
+JAIL_ENV_OWN_PREFIX = "SHEPHERD_DEV_"
+JAIL_ENV_REFUSED_PREFIXES = (*JAIL_ENV_LOADER_PREFIXES, "PYTHON", JAIL_ENV_OWN_PREFIX)
+
+
+def _refused(key: str) -> bool:
+    return key in JAIL_ENV_REFUSED or key in JAIL_ENV_LOADER or key.startswith(JAIL_ENV_REFUSED_PREFIXES)
+
+
+def _why_refused(key: str) -> str:
+    if key in JAIL_SOCKET_ENV:
+        return "the jail reads it to decide which command servers it hides"
+    if key in AGENT_ENV:
+        return "it would hand the worker the user's ssh agent"
+    if key in JAIL_ENV_LOADER or key.startswith(JAIL_ENV_LOADER_PREFIXES):
+        return "it would load code into bubblewrap and the jail's runner"
+    if key.startswith(JAIL_ENV_OWN_PREFIX):
+        return "it would reconfigure shepherd-dev itself"
+    return "it would change which Python and which code shepherd-dev itself runs"
+
+
+def warn_refused(repo_root: Path) -> None:
+    """Say which jail_env and jail_seed keys are ignored, and why, on stderr."""
+    import sys
+
+    for section in ("jail_env", "jail_seed"):
+        raw = load_config(repo_root).get(section)
+        if not isinstance(raw, dict):
+            continue
+        for key in raw:
+            if isinstance(key, str) and _refused(key):
+                print(
+                    f"warning: {section} sets {key}, which shepherd-dev ignores: {_why_refused(key)}",
+                    file=sys.stderr,
+                )
 
 
 def jail_env(repo_root: Path) -> dict[str, str]:
@@ -434,7 +488,7 @@ def jail_env(repo_root: Path) -> dict[str, str]:
     for key, value in raw.items():
         if not isinstance(key, str) or not isinstance(value, str):
             continue
-        if key in JAIL_ENV_REFUSED:
+        if _refused(key):
             continue
         out[key] = str(Path(value).expanduser()) if value.startswith("~") else value
     return out
@@ -476,7 +530,7 @@ def jail_seed(repo_root: Path) -> dict[str, str]:
     for key, value in raw.items():
         if not isinstance(key, str) or not isinstance(value, str):
             continue
-        if key in JAIL_ENV_REFUSED:  # this sets an env var too — same guard
+        if _refused(key):  # this sets an env var too — same guard
             continue
         out[key] = str(Path(value).expanduser())
     return out
@@ -515,8 +569,8 @@ def _clone_dir_fast(src: Path, dest: Path) -> bool:
 
     try:
         proc = subprocess.run(
-            ["cp", "-c", "-R", str(src), str(dest)],
-            capture_output=True, timeout=300,
+            [programs.argv0("cp"), "-c", "-R", str(src), str(dest)],
+            capture_output=True, timeout=300, env=programs.host_env(),
         )
         return proc.returncode == 0 and dest.exists()
     except Exception:
@@ -556,6 +610,9 @@ def jail_seed_applied(repo_root: Path):
     if not origins:
         yield
         return
+    from .launch import resolve_jail_programs
+
+    resolve_jail_programs()
     previous = {key: os.environ.get(key) for key in origins}
     root = Path(tempfile.mkdtemp(prefix="shepherd-seed-"))
     try:
@@ -588,10 +645,14 @@ def jail_env_applied(repo_root: Path):
     repo pointing its toolchain at a dependency cache is the intended use: the
     gate needs the same cache to be honest about the same tree.
     """
+    warn_refused(repo_root)
     values = jail_env(repo_root)
     if not values:
         yield
         return
+    from .launch import resolve_jail_programs
+
+    resolve_jail_programs()
     previous = {key: os.environ.get(key) for key in values}
     os.environ.update(values)
     try:

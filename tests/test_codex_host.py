@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hostprograms import fresh_programs  # noqa: E402
 from tmpdirs import mkdtemp  # noqa: E402
 
 from shepherd_dev.policy import ChangesetPolicy  # noqa: E402
@@ -223,6 +225,32 @@ class CodexReviewParsing(unittest.TestCase):
         )
         self.assertFalse(v.approved)
         self.assertIsNotNone(v.error)
+
+
+
+class ReviewerEnvironment(unittest.TestCase):
+    def test_the_reviewer_gets_the_users_environment_not_the_repos(self):
+        # the codex review runs on the host for shepherd-dev; the repo's
+        # jail_env (NODE_OPTIONS loading its own script, say) must not reach it
+        from unittest import mock
+
+        from shepherd_dev import programs
+        from shepherd_dev.providers import codex_host
+
+        fresh_programs(self)
+        probe = [
+            sys.executable, "-c",
+            "import json, os; print(json.dumps({k: os.environ.get(k) for k in ('SD_FROM_USER', 'NODE_OPTIONS', 'CI')}))",
+        ]
+        with mock.patch.dict(os.environ, {"SD_FROM_USER": "1"}):
+            os.environ.pop("NODE_OPTIONS", None)
+            os.environ.pop("CI", None)
+            programs.resolve()
+            os.environ["NODE_OPTIONS"] = "--require ./planted.js"
+            rc, out = codex_host._default_runner(probe, timeout=30, last_message_path="")
+        self.assertEqual(rc, 0, out)
+        seen = json.loads(out.strip().splitlines()[0])
+        self.assertEqual(seen, {"SD_FROM_USER": "1", "NODE_OPTIONS": None, "CI": "1"})
 
 
 if __name__ == "__main__":
