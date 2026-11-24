@@ -1,0 +1,7 @@
+# Caminhos que decidem o que fica público, o que chega ao banco e o que roda
+# com credencial. PR que toca um deles pede revisão do dono.
+# Ordem do dono, 23/11/2026, depois do link externo do fornecedor ter entrado
+# sem autorização.
+
+# Automação com credencial, e este próprio arquivo
+/.github/                                                @andrefogelman
